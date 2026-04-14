@@ -1,0 +1,13 @@
+tasks:
+  warehouse_multi_object_collection:
+    task_type: multi_object_collection
+    source_object: target_red
+    target_objects:
+      - target_red
+      - target_blue
+    drop_zone: tote
+    environment: warehouse
+    use_perception: true
+    perception_mode: classical_cv
+    policy_mode: scripted
+    description: Collect target warehouse objects from pickup shelves and deliver them to the tote.

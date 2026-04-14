@@ -1,0 +1,30 @@
+tasks:
+  pick_and_place_red_to_tray:
+    task_type: pick_and_place
+    source_object: red_block
+    target_zone: tray
+    description: Pick the red block and place it in the tray.
+
+  sort_blue_to_zone:
+    task_type: sort_to_zone
+    source_object: blue_block
+    color_routing:
+      red: red_zone
+      blue: blue_zone
+      green: tray
+    description: Sort the blue block to its configured color zone.
+
+  sort_red_to_zone:
+    task_type: sort_to_zone
+    source_object: red_block
+    color_routing:
+      red: red_zone
+      blue: blue_zone
+      green: tray
+    description: Sort the red block to the red zone.
+
+  stack_red_on_green:
+    task_type: stack_blocks
+    source_object: red_block
+    target_object: green_block
+    description: Stack the red block on top of the green block.

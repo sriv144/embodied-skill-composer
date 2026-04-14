@@ -1,0 +1,6 @@
+name: isaac_gpu
+backend: isaac_lab
+device: cuda
+requires_linux: true
+requires_nvidia_gpu: true
+notes: Planned Isaac Lab profile for Linux plus NVIDIA GPU training. Not implemented yet.

@@ -1,0 +1,42 @@
+randomize_object_positions: true
+
+zones:
+  tote:
+    center: [0.0, -0.8, 0.0]
+    size: [0.2, 0.2, 0.05]
+
+stations:
+  dock:
+    position: [0.0, -1.2, 0.0]
+    kind: dock
+    capacity: 1
+  shelf_a:
+    position: [-0.8, 0.0, 0.0]
+    kind: pickup
+    capacity: 2
+  shelf_b:
+    position: [0.0, 0.0, 0.0]
+    kind: pickup
+    capacity: 2
+  shelf_c:
+    position: [0.8, 0.0, 0.0]
+    kind: pickup
+    capacity: 2
+
+objects:
+  target_red:
+    color_name: red
+    size: [0.03, 0.03, 0.03]
+    station_name: shelf_a
+  target_blue:
+    color_name: blue
+    size: [0.03, 0.03, 0.03]
+    station_name: shelf_b
+  distractor_green:
+    color_name: green
+    size: [0.03, 0.03, 0.03]
+    station_name: shelf_c
+  distractor_yellow:
+    color_name: yellow
+    size: [0.03, 0.03, 0.03]
+    station_name: shelf_a

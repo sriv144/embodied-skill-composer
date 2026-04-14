@@ -1,0 +1,8 @@
+seed: 7
+log_dir: logs
+simulation:
+  time_step: 0.0041666667
+  move_steps: 140
+  settle_steps: 80
+  grasp_threshold: 0.06
+

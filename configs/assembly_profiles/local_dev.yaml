@@ -1,0 +1,6 @@
+name: local_dev
+backend: local_sandbox
+device: cpu
+requires_linux: false
+requires_nvidia_gpu: false
+notes: Fast local regression profile for the current Windows development machine.

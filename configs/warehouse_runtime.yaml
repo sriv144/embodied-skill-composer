@@ -1,0 +1,10 @@
+seed: 7
+log_dir: logs
+rl_policy_path: logs/grasp_policy.json
+simulation:
+  time_step: 0.02
+  move_steps: 10
+  settle_steps: 5
+  grasp_threshold: 0.06
+benchmark:
+  seeds: [7, 11, 23, 31]
