@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -20,7 +21,6 @@ from embodied_skill_composer.assembly.runtime import (
     load_runtime_profile,
     load_training_config,
 )
-from embodied_skill_composer.assembly.trainer import MAPPOTrainer
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +37,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def torch_available() -> bool:
+    return importlib.util.find_spec("torch") is not None
+
+
 def main() -> int:
     args = parse_args()
     checkpoint_path = Path(args.checkpoint)
@@ -47,9 +51,15 @@ def main() -> int:
     runtime_profile = load_runtime_profile(Path(args.runtime_profile))
     env = build_assembly_backend(config=env_config, runtime_profile=runtime_profile, seed=train_config.seed)
     env.set_curriculum_stage(None)
-    trainer = MAPPOTrainer(env=env, config=train_config, device=runtime_profile.device)
+    trainer = None
 
     if args.policy == "learned":
+        if not torch_available():
+            print("Learned low-level MARL evaluation requires torch. Install it with `pip install -r requirements-rl.txt`.")
+            return 1
+        from embodied_skill_composer.assembly.trainer import MAPPOTrainer
+
+        trainer = MAPPOTrainer(env=env, config=train_config, device=runtime_profile.device)
         trainer.load_checkpoint(checkpoint_path)
 
     artifacts: list[EpisodeArtifact] = []

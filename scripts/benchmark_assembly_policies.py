@@ -40,14 +40,18 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    summary = run_assembly_policy_benchmark(
-        env_config=load_assembly_scenario(Path(args.env_config)),
-        training_config=load_training_config(Path(args.train_config)),
-        runtime_profile=load_runtime_profile(Path(args.runtime_profile)),
-        options_checkpoint=Path(args.options_checkpoint),
-        low_level_checkpoint=Path(args.low_level_checkpoint),
-        episodes=args.episodes,
-    )
+    try:
+        summary = run_assembly_policy_benchmark(
+            env_config=load_assembly_scenario(Path(args.env_config)),
+            training_config=load_training_config(Path(args.train_config)),
+            runtime_profile=load_runtime_profile(Path(args.runtime_profile)),
+            options_checkpoint=Path(args.options_checkpoint),
+            low_level_checkpoint=Path(args.low_level_checkpoint),
+            episodes=args.episodes,
+        )
+    except RuntimeError as exc:
+        print(f"Benchmark unavailable: {exc}")
+        return 1
 
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)

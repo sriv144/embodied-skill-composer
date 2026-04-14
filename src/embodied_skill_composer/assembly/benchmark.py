@@ -1,11 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
-import torch
-
 from embodied_skill_composer.assembly.backends import build_assembly_backend
-from embodied_skill_composer.assembly.baseline import scripted_joint_policy
 from embodied_skill_composer.assembly.models import (
     AssemblyBenchmarkSummary,
     AssemblyRuntimeProfile,
@@ -13,8 +11,19 @@ from embodied_skill_composer.assembly.models import (
     PolicyBenchmarkResult,
     TrainingConfig,
 )
-from embodied_skill_composer.assembly.options_trainer import HierarchicalOptionTrainer
-from embodied_skill_composer.assembly.trainer import MAPPOTrainer
+
+
+def torch_available() -> bool:
+    return importlib.util.find_spec("torch") is not None
+
+
+def require_torch(feature_name: str) -> None:
+    if torch_available():
+        return
+    raise RuntimeError(
+        f"{feature_name} requires the RL dependency set. Install it with "
+        "`pip install -r requirements-rl.txt` in your active environment."
+    )
 
 
 def run_assembly_policy_benchmark(
@@ -77,6 +86,9 @@ def _evaluate_learned_options(
     checkpoint_path: Path,
     episodes: int,
 ) -> PolicyBenchmarkResult:
+    require_torch("Hierarchical option evaluation")
+    from embodied_skill_composer.assembly.options_trainer import HierarchicalOptionTrainer
+
     env = build_assembly_backend(env_config, runtime_profile, seed=training_config.seed)
     trainer = HierarchicalOptionTrainer(env=env, config=training_config, device=runtime_profile.device)
     trainer.load_checkpoint(checkpoint_path)
@@ -97,6 +109,11 @@ def _evaluate_low_level_learned(
     checkpoint_path: Path,
     episodes: int,
 ) -> PolicyBenchmarkResult:
+    require_torch("Low-level MARL evaluation")
+    import torch
+
+    from embodied_skill_composer.assembly.trainer import MAPPOTrainer
+
     env = build_assembly_backend(env_config, runtime_profile, seed=training_config.seed)
     trainer = MAPPOTrainer(env=env, config=training_config, device=runtime_profile.device)
     trainer.load_checkpoint(checkpoint_path)

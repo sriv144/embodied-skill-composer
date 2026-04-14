@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
-
-import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -15,7 +14,6 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from embodied_skill_composer.assembly.backends import build_assembly_backend
-from embodied_skill_composer.assembly.options_trainer import HierarchicalOptionTrainer
 from embodied_skill_composer.assembly.runtime import (
     load_assembly_scenario,
     load_runtime_profile,
@@ -37,6 +35,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def torch_available() -> bool:
+    return importlib.util.find_spec("torch") is not None
+
+
 def main() -> int:
     args = parse_args()
     checkpoint_path = Path(args.checkpoint)
@@ -46,8 +48,16 @@ def main() -> int:
     train_config = load_training_config(Path(args.train_config))
     runtime_profile = load_runtime_profile(Path(args.runtime_profile))
     env = build_assembly_backend(config=env_config, runtime_profile=runtime_profile, seed=train_config.seed)
-    trainer = HierarchicalOptionTrainer(env=env, config=train_config, device=runtime_profile.device)
+    trainer = None
     if args.policy == "learned":
+        if not torch_available():
+            print("Learned hierarchical evaluation requires torch. Install it with `pip install -r requirements-rl.txt`.")
+            return 1
+        import torch
+
+        from embodied_skill_composer.assembly.options_trainer import HierarchicalOptionTrainer
+
+        trainer = HierarchicalOptionTrainer(env=env, config=train_config, device=runtime_profile.device)
         trainer.load_checkpoint(checkpoint_path)
 
     env.set_curriculum_stage(None)
@@ -59,6 +69,8 @@ def main() -> int:
             if args.policy == "scripted":
                 option = env.scripted_team_option()
             else:
+                import torch
+
                 observation = torch.as_tensor(
                     env.get_team_option_observation(), dtype=torch.float32, device=trainer.device
                 ).unsqueeze(0)

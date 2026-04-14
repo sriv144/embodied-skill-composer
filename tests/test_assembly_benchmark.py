@@ -3,7 +3,6 @@ from pathlib import Path
 
 import pytest
 
-from embodied_skill_composer.assembly.benchmark import run_assembly_policy_benchmark
 from embodied_skill_composer.assembly.backends import IsaacBackendNotReadyError, build_assembly_backend
 from embodied_skill_composer.assembly.env import CollaborativeAssemblyEnv
 from embodied_skill_composer.assembly.models import (
@@ -143,6 +142,7 @@ def test_isaac_backend_stub_preserves_contract_shape_but_raises_on_execution() -
 
 @pytest.mark.skipif(not torch_available, reason="torch is required for benchmark smoke tests")
 def test_policy_benchmark_smoke(tmp_path: Path) -> None:
+    from embodied_skill_composer.assembly.benchmark import run_assembly_policy_benchmark
     from embodied_skill_composer.assembly.options_trainer import HierarchicalOptionTrainer
     from embodied_skill_composer.assembly.trainer import MAPPOTrainer
 
