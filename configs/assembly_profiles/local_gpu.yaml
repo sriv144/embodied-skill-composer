@@ -1,0 +1,6 @@
+name: local_gpu
+backend: local_sandbox
+device: cuda
+requires_linux: false
+requires_nvidia_gpu: true
+notes: Local GPU profile for the current RTX 4060 laptop. Good for torch validation and smaller training runs, but not the final Isaac environment.

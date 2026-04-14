@@ -8,7 +8,9 @@ import numpy as np
 
 from embodied_skill_composer.assembly.models import (
     AssemblyMetrics,
+    AssemblyPlaybackFrame,
     AssemblyScenarioConfig,
+    BackendStatus,
     EpisodeArtifact,
     OptionExecutionResult,
     TeamOption,
@@ -42,6 +44,12 @@ class CollaborativeAssemblyEnv:
     num_agents = 2
     action_size = len(AssemblyAction)
     option_size = len(TeamOption)
+    backend_name = "local_sandbox"
+    is_ready = True
+    readiness_notes = [
+        "Local sandbox backend is the regression oracle for collaborative assembly.",
+        "Use this backend for fast training, playback, and benchmark checks on Windows or Linux.",
+    ]
 
     def __init__(self, config: AssemblyScenarioConfig, seed: int = 7) -> None:
         self.config = config
@@ -58,6 +66,7 @@ class CollaborativeAssemblyEnv:
             "second_beam_install_step": None,
         }
         self._last_option: TeamOption | None = None
+        self.frame_history: list[AssemblyPlaybackFrame] = [self._snapshot_frame()]
 
     @property
     def obs_dim(self) -> int:
@@ -84,6 +93,7 @@ class CollaborativeAssemblyEnv:
             "second_beam_install_step": None,
         }
         self._last_option = None
+        self.frame_history = [self._snapshot_frame()]
         return self.get_agent_observations(), self.get_privileged_state()
 
     def set_curriculum_stage(self, beam_count: int | None = None, stage_index: int | None = None) -> None:
@@ -340,18 +350,42 @@ class CollaborativeAssemblyEnv:
             primitive_steps = 1
             success = True
             option_info.update(info)
+            self.frame_history.append(
+                self._snapshot_frame(
+                    option=team_option,
+                    primitive_step_index=primitive_steps,
+                    option_reward=reward,
+                    option_success=success,
+                )
+            )
         elif team_option == TeamOption.GRAB:
             _, _, step_reward, done, info = self.step([AssemblyAction.GRAB, AssemblyAction.GRAB])
             reward += step_reward
             primitive_steps = 1
             success = bool(info["picked"])
             option_info.update(info)
+            self.frame_history.append(
+                self._snapshot_frame(
+                    option=team_option,
+                    primitive_step_index=primitive_steps,
+                    option_reward=reward,
+                    option_success=success,
+                )
+            )
         elif team_option == TeamOption.INSTALL:
             _, _, step_reward, done, info = self.step([AssemblyAction.INSTALL, AssemblyAction.INSTALL])
             reward += step_reward
             primitive_steps = 1
             success = bool(info["installed"])
             option_info.update(info)
+            self.frame_history.append(
+                self._snapshot_frame(
+                    option=team_option,
+                    primitive_step_index=primitive_steps,
+                    option_reward=reward,
+                    option_success=success,
+                )
+            )
         else:
             while primitive_steps < primitive_budget and not done:
                 if self._option_completed(team_option):
@@ -363,6 +397,14 @@ class CollaborativeAssemblyEnv:
                 primitive_steps += 1
                 option_info["picked"] = bool(option_info["picked"]) or bool(info["picked"])
                 option_info["installed"] = bool(option_info["installed"]) or bool(info["installed"])
+                self.frame_history.append(
+                    self._snapshot_frame(
+                        option=team_option,
+                        primitive_step_index=primitive_steps,
+                        option_reward=reward,
+                        option_success=self._option_completed(team_option),
+                    )
+                )
                 if self._option_completed(team_option):
                     success = True
                     break
@@ -382,6 +424,8 @@ class CollaborativeAssemblyEnv:
 
     def get_option_episode_diagnostics(self) -> dict[str, object]:
         return {
+            "backend": self.backend_name,
+            "backend_status": self.get_backend_status().model_dump(mode="json"),
             "selected_options": [result.option.name.lower() for result in self.option_history],
             "option_switch_count": self.option_switch_count,
             "option_results": [result.model_dump(mode="json") for result in self.option_history],
@@ -389,7 +433,15 @@ class CollaborativeAssemblyEnv:
             "first_beam_completion_step": self.milestones["first_beam_completion_step"],
             "second_beam_pickup_step": self.milestones["second_beam_pickup_step"],
             "second_beam_install_step": self.milestones["second_beam_install_step"],
+            "state_snapshots": [frame.model_dump(mode="json") for frame in self.frame_history],
         }
+
+    def get_backend_status(self) -> BackendStatus:
+        return BackendStatus(
+            backend_name=self.backend_name,
+            is_ready=self.is_ready,
+            readiness_notes=list(self.readiness_notes),
+        )
 
     def render_ascii(self) -> str:
         grid = [["." for _ in range(self.config.grid_size)] for _ in range(self.config.grid_size)]
@@ -633,3 +685,25 @@ class CollaborativeAssemblyEnv:
         if result.info.get("installed") and pre_beam_index == 1 and self.milestones["second_beam_install_step"] is None:
             self.milestones["second_beam_install_step"] = self.state.step_count
         self.option_history.append(result)
+
+    def _snapshot_frame(
+        self,
+        option: TeamOption | None = None,
+        primitive_step_index: int = 0,
+        option_reward: float = 0.0,
+        option_success: bool | None = None,
+    ) -> AssemblyPlaybackFrame:
+        beam = self._available_beams()[min(self.state.current_beam_index, len(self._available_beams()) - 1)]
+        return AssemblyPlaybackFrame(
+            step_count=self.state.step_count,
+            current_beam_index=self.state.current_beam_index,
+            current_beam_name=beam.name if self.state.current_beam_index < self.active_beam_count else None,
+            carrying=self.state.carrying,
+            agent_positions=list(self.state.agent_positions),
+            pickup_targets=[beam.pickup_left, beam.pickup_right],
+            assembly_targets=[beam.assembly_left, beam.assembly_right],
+            selected_option=None if option is None else option.name.lower(),
+            primitive_step_index=primitive_step_index,
+            option_reward=option_reward,
+            option_success=option_success,
+        )

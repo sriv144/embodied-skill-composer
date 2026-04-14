@@ -1,0 +1,91 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Assembly Benchmark",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\benchmark_assembly_policies.py",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\local_dev.yaml",
+        "--episodes",
+        "3"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Hierarchical Eval",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\eval_assembly_options.py",
+        "--policy",
+        "learned",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\local_dev.yaml",
+        "--episodes",
+        "3"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Low-Level Eval",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\eval_assembly_policy.py",
+        "--policy",
+        "learned",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\local_dev.yaml",
+        "--episodes",
+        "3"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Assembly Visualizer",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\visualize_assembly_episode.py",
+        "--policy",
+        "scripted",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\local_dev.yaml"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "GPU Runtime Check",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\check_gpu_runtime.py",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\local_gpu.yaml"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Pytest",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "-m",
+        "pytest",
+        "-q",
+        "--basetemp",
+        ".pytest_tmp"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -4,8 +4,6 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
 import torch
 import torch.nn.functional as F
 from torch import nn

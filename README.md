@@ -33,6 +33,7 @@ Most recent comparison:
 | Low-level learned MARL | 0.000 | -0.02 | 1.00 |
 
 See [assembly-hierarchical-options.md](docs/results/assembly-hierarchical-options.md) for the short write-up and [isaac-prep.md](docs/isaac-prep.md) for the next backend milestone assumptions.
+For current local setup and debugging workflows, see [windows-vscode.md](docs/setup/windows-vscode.md) and [linux-nvidia-isaac.md](docs/setup/linux-nvidia-isaac.md).
 
 Private-repo publishing is intended to happen through GitHub CLI once authentication is valid:
 
@@ -145,6 +146,39 @@ python scripts\eval_assembly_policy.py --policy learned --runtime-profile config
 python scripts\benchmark_assembly_policies.py --runtime-profile configs\assembly_profiles\local_dev.yaml
 ```
 
+### 8. Assembly playback visualizer
+
+Render the local sandbox episode as a sequence of 2D frames:
+
+```powershell
+python scripts\visualize_assembly_episode.py --policy scripted --runtime-profile configs\assembly_profiles\local_dev.yaml
+```
+
+This writes:
+
+- `artifacts/assembly_playback/frames/frame_*.png`
+- `artifacts/assembly_playback/summary.png`
+
+You can also replay a previously saved diagnostics JSON:
+
+```powershell
+python scripts\visualize_assembly_episode.py --diagnostics-json artifacts\assembly_playback\diagnostics_scripted.json
+```
+
+### 9. GPU runtime check
+
+Validate whether the active Python environment can really see torch and CUDA:
+
+```powershell
+python scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
+```
+
+Recommended profiles:
+
+- `configs/assembly_profiles/local_dev.yaml`: CPU regression baseline
+- `configs/assembly_profiles/local_gpu.yaml`: local RTX 4060 torch/CUDA validation
+- `configs/assembly_profiles/isaac_gpu.yaml`: planned Linux + NVIDIA Isaac profile
+
 ## Architecture
 
 - `src/embodied_skill_composer/core/`: planner, executor, interfaces, shared models, skills, logging
@@ -163,18 +197,20 @@ Minimal local setup:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-pip install -r requirements-rl.txt
-pytest -q
+.\.venv\Scripts\python.exe -m ensurepip --upgrade
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-rl.txt
+.\.venv\Scripts\python.exe -m pytest -q --basetemp .pytest_tmp
 ```
 
 Repository guidance:
 
 - `logs/`, checkpoints, rendered images, and simulator artifacts are generated outputs and are ignored by git
 - the intended default runtime profile is `configs/assembly_profiles/local_dev.yaml`
+- the intended local GPU validation profile is `configs/assembly_profiles/local_gpu.yaml`
 - the planned future profile is `configs/assembly_profiles/isaac_gpu.yaml`
 - contributor notes live in `CONTRIBUTING.md`
+- Windows/VS Code notes live in `docs/setup/windows-vscode.md`
 - Linux/NVIDIA bring-up notes for Isaac live in `docs/setup/linux-nvidia-isaac.md`
 
 ## Why This Is Hybrid

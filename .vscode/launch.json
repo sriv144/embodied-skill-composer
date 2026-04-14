@@ -1,0 +1,61 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Benchmark Assembly Policies",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\scripts\\benchmark_assembly_policies.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--runtime-profile",
+        "${workspaceFolder}\\configs\\assembly_profiles\\local_dev.yaml",
+        "--episodes",
+        "3"
+      ]
+    },
+    {
+      "name": "Eval Hierarchical Options",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\scripts\\eval_assembly_options.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--policy",
+        "learned",
+        "--runtime-profile",
+        "${workspaceFolder}\\configs\\assembly_profiles\\local_dev.yaml",
+        "--episodes",
+        "3"
+      ]
+    },
+    {
+      "name": "Eval Low-Level MARL",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\scripts\\eval_assembly_policy.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--policy",
+        "learned",
+        "--runtime-profile",
+        "${workspaceFolder}\\configs\\assembly_profiles\\local_dev.yaml",
+        "--episodes",
+        "3"
+      ]
+    },
+    {
+      "name": "Visualize Assembly Episode",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\scripts\\visualize_assembly_episode.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--policy",
+        "scripted",
+        "--runtime-profile",
+        "${workspaceFolder}\\configs\\assembly_profiles\\local_dev.yaml"
+      ]
+    }
+  ]
+}

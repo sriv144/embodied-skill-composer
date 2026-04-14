@@ -10,6 +10,7 @@ from embodied_skill_composer.assembly.models import (
     AssemblyMetrics,
     AssemblyRuntimeProfile,
     AssemblyScenarioConfig,
+    BackendStatus,
     EpisodeArtifact,
     OptionExecutionResult,
 )
@@ -23,6 +24,9 @@ class AssemblyTaskBackend(Protocol):
     team_option_obs_dim: int
     action_size: int
     option_size: int
+    backend_name: str
+    is_ready: bool
+    readiness_notes: list[str]
 
     def reset(self, seed: int | None = None) -> tuple[np.ndarray, np.ndarray]: ...
 
@@ -48,6 +52,8 @@ class AssemblyTaskBackend(Protocol):
 
     def get_option_episode_diagnostics(self) -> dict[str, object]: ...
 
+    def get_backend_status(self) -> BackendStatus: ...
+
 
 class IsaacBackendNotReadyError(RuntimeError):
     """Raised when the Isaac backend contract is selected before simulator implementation exists."""
@@ -64,6 +70,17 @@ class IsaacLabAssemblyBackend:
     action_size: int = 7
     option_size: int = 8
     _last_seed: int | None = field(default=None, init=False)
+    backend_name: str = field(default="isaac_lab", init=False)
+    is_ready: bool = field(default=False, init=False)
+    readiness_notes: list[str] = field(
+        default_factory=lambda: [
+            "Isaac Lab backend is a contract-preserving stub in this repository.",
+            "Use Linux plus NVIDIA GPU for real Isaac work; keep Windows local_sandbox for regression.",
+            "First bring-up target: scripted options on the same two-beam assembly task.",
+            "Only simulator-dependent execution methods are blocked right now.",
+        ],
+        init=False,
+    )
 
     def reset(self, seed: int | None = None) -> tuple[np.ndarray, np.ndarray]:
         self._last_seed = self.seed if seed is None else seed
@@ -123,12 +140,37 @@ class IsaacLabAssemblyBackend:
 
     def get_option_episode_diagnostics(self) -> dict[str, object]:
         return {
-            "backend": "isaac_lab",
+            "backend": self.backend_name,
             "runtime_profile": self.runtime_profile.name,
             "status": "stub",
             "message": self._error_message("get_option_episode_diagnostics"),
             "last_seed": self._last_seed,
+            "backend_status": self.get_backend_status().model_dump(mode="json"),
         }
+
+    def get_backend_status(self) -> BackendStatus:
+        notes = list(self.readiness_notes)
+        notes.append(f"Runtime profile: {self.runtime_profile.name}")
+        if self.runtime_profile.requires_linux:
+            notes.append("Requires a Linux host before simulator bring-up.")
+        if self.runtime_profile.requires_nvidia_gpu:
+            notes.append("Requires a CUDA-capable NVIDIA GPU environment.")
+        if self.runtime_profile.notes:
+            notes.append(self.runtime_profile.notes)
+        notes.extend(
+            [
+                "Bring-up checklist:",
+                "1. Prepare Ubuntu LTS with recent NVIDIA drivers.",
+                "2. Install Isaac Sim / Isaac Lab in an isolated conda or micromamba environment.",
+                "3. Recreate the two-beam assembly task semantics and scripted option execution.",
+                "4. Match artifacts and diagnostics before training learned policies.",
+            ]
+        )
+        return BackendStatus(
+            backend_name=self.backend_name,
+            is_ready=self.is_ready,
+            readiness_notes=notes,
+        )
 
     def _raise_not_ready(self, method_name: str):
         raise IsaacBackendNotReadyError(self._error_message(method_name))

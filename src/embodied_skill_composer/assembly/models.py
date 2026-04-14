@@ -79,6 +79,24 @@ class AssemblyRuntimeProfile(BaseModel):
     notes: str = ""
 
 
+class BackendStatus(BaseModel):
+    backend_name: str
+    is_ready: bool
+    readiness_notes: list[str] = Field(default_factory=list)
+
+
+class GpuRuntimeStatus(BaseModel):
+    runtime_profile: str
+    backend: str
+    requested_device: str | None
+    torch_installed: bool
+    cuda_available: bool
+    selected_device: str
+    device_name: str | None = None
+    tensor_allocation_ok: bool = False
+    notes: list[str] = Field(default_factory=list)
+
+
 class TeamOption(IntEnum):
     GO_PICKUP = 0
     GRAB = 1
@@ -112,6 +130,20 @@ class OptionPolicyMetrics(BaseModel):
     mean_beams_installed: float
     mean_option_switches: float
     mean_recovery_usage: float
+
+
+class AssemblyPlaybackFrame(BaseModel):
+    step_count: int
+    current_beam_index: int
+    current_beam_name: str | None = None
+    carrying: bool
+    agent_positions: list[GridCoord]
+    pickup_targets: list[GridCoord] = Field(default_factory=list)
+    assembly_targets: list[GridCoord] = Field(default_factory=list)
+    selected_option: str | None = None
+    primitive_step_index: int = 0
+    option_reward: float = 0.0
+    option_success: bool | None = None
 
 
 class PolicyBenchmarkResult(BaseModel):
