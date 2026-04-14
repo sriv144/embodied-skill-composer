@@ -34,6 +34,14 @@ Most recent comparison:
 
 See [assembly-hierarchical-options.md](docs/results/assembly-hierarchical-options.md) for the short write-up and [isaac-prep.md](docs/isaac-prep.md) for the next backend milestone assumptions.
 
+Private-repo publishing is intended to happen through GitHub CLI once authentication is valid:
+
+```powershell
+gh auth status
+gh auth login -h github.com
+gh repo create embodied-skill-composer --private --source=. --remote=origin --push
+```
+
 ## What It Does
 
 - Runs a perception-driven warehouse collection task with reusable skills
@@ -166,6 +174,8 @@ Repository guidance:
 - `logs/`, checkpoints, rendered images, and simulator artifacts are generated outputs and are ignored by git
 - the intended default runtime profile is `configs/assembly_profiles/local_dev.yaml`
 - the planned future profile is `configs/assembly_profiles/isaac_gpu.yaml`
+- contributor notes live in `CONTRIBUTING.md`
+- Linux/NVIDIA bring-up notes for Isaac live in `docs/setup/linux-nvidia-isaac.md`
 
 ## Why This Is Hybrid
 

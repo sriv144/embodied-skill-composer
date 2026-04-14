@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from embodied_skill_composer.assembly.benchmark import run_assembly_policy_benchmark
-from embodied_skill_composer.assembly.backends import build_assembly_backend
+from embodied_skill_composer.assembly.backends import IsaacBackendNotReadyError, build_assembly_backend
 from embodied_skill_composer.assembly.env import CollaborativeAssemblyEnv
 from embodied_skill_composer.assembly.models import (
     AssemblyRuntimeProfile,
@@ -116,6 +116,29 @@ def test_local_backend_factory_preserves_scripted_behavior() -> None:
     factory_artifact = from_factory.build_artifact(policy_mode="scripted")
     assert direct_artifact.metrics.total_reward == factory_artifact.metrics.total_reward
     assert direct_artifact.metrics.beams_installed == factory_artifact.metrics.beams_installed
+
+
+def test_isaac_backend_stub_preserves_contract_shape_but_raises_on_execution() -> None:
+    config = build_default_assembly_config()
+    profile = AssemblyRuntimeProfile(
+        name="isaac_gpu",
+        backend="isaac_lab",
+        device="cuda",
+        requires_linux=True,
+        requires_nvidia_gpu=True,
+    )
+    backend = build_assembly_backend(config=config, runtime_profile=profile, seed=7)
+
+    observation, state = backend.reset(seed=9)
+    diagnostics = backend.get_option_episode_diagnostics()
+
+    assert observation.shape == (backend.team_option_obs_dim,)
+    assert state.shape == (backend.state_dim,)
+    assert diagnostics["status"] == "stub"
+    assert diagnostics["last_seed"] == 9
+
+    with pytest.raises(IsaacBackendNotReadyError):
+        backend.execute_team_option(0)
 
 
 @pytest.mark.skipif(not torch_available, reason="torch is required for benchmark smoke tests")
