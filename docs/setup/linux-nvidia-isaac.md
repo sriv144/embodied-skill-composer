@@ -28,6 +28,8 @@ Recommended Linux target:
 - CUDA-compatible stack
 - isolated conda or micromamba environment dedicated to Isaac
 
+Cloud GPU Ubuntu VMs are usually **not free** beyond trial credits. Budget for hourly GPU runtime plus storage. For early Isaac bring-up, prefer an RTX 4090 / RTX 6000 Ada / L40S class instance with at least `24 GB` VRAM and `32-64 GB` RAM over a tiny free notebook runtime.
+
 ## Bring-Up Goal
 
 The first Isaac milestone is **backend parity**, not scale.

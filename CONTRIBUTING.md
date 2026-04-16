@@ -22,6 +22,12 @@ Use these commands before committing:
 .\.venv\Scripts\python.exe scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
 ```
 
+If the GPU runtime check reports a CPU-only torch wheel, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_cuda_torch_windows.ps1
+```
+
 Expected benchmark summary:
 
 - `scripted_options`: success `1.000`

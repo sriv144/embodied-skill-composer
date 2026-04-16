@@ -24,6 +24,25 @@ Run these from the project root:
 .\.venv\Scripts\python.exe scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
 ```
 
+## Fix Local CUDA PyTorch
+
+If the GPU check says `torch` is installed but CUDA is unavailable, the environment probably has a CPU-only torch wheel.
+
+Use the helper script:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_cuda_torch_windows.ps1
+```
+
+Or install the pinned CUDA wheel through pip:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-rl-cuda-cu130.txt
+.\.venv\Scripts\python.exe scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
+```
+
+The helper script uses Windows BITS because the CUDA torch wheel is large and regular pip downloads can time out or leave partial files.
+
 ## What To Expect
 
 - `benchmark_assembly_policies.py` should keep the flagship comparison intact:

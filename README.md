@@ -173,6 +173,12 @@ Validate whether the active Python environment can really see torch and CUDA:
 python scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
 ```
 
+If CUDA is not available even though the NVIDIA driver is installed, replace the CPU-only torch wheel:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_cuda_torch_windows.ps1
+```
+
 Recommended profiles:
 
 - `configs/assembly_profiles/local_dev.yaml`: CPU regression baseline
