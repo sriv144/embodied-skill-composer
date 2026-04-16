@@ -9,6 +9,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m ensurepip --upgrade
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pip install -r requirements-rl.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-sim-mujoco.txt
 ```
 
 ## Main Commands
@@ -21,6 +22,7 @@ Run these from the project root:
 .\.venv\Scripts\python.exe scripts\eval_assembly_policy.py --policy learned --runtime-profile configs\assembly_profiles\local_dev.yaml --episodes 3
 .\.venv\Scripts\python.exe -m pytest -q --basetemp .pytest_tmp
 .\.venv\Scripts\python.exe scripts\visualize_assembly_episode.py --policy scripted --runtime-profile configs\assembly_profiles\local_dev.yaml
+.\.venv\Scripts\python.exe scripts\run_mujoco_assembly.py --policy scripted --runtime-profile configs\assembly_profiles\mujoco_local.yaml --record artifacts\mujoco_scripted.mp4
 .\.venv\Scripts\python.exe scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
 ```
 
@@ -50,6 +52,7 @@ The helper script uses Windows BITS because the CUDA torch wheel is large and re
   - `learned_options`: success `1.000`
   - `low_level_learned`: success `0.000`
 - `visualize_assembly_episode.py` writes per-frame PNGs plus a `summary.png` into `artifacts/assembly_playback/`
+- `run_mujoco_assembly.py` opens the MuJoCo scene with `--gui` and writes an MP4 with `--record`
 - `check_gpu_runtime.py` confirms whether the active Python environment can actually see CUDA
 
 ## VS Code

@@ -165,7 +165,29 @@ You can also replay a previously saved diagnostics JSON:
 python scripts\visualize_assembly_episode.py --diagnostics-json artifacts\assembly_playback\diagnostics_scripted.json
 ```
 
-### 9. GPU runtime check
+### 9. MuJoCo 3D assembly simulation
+
+Install the optional MuJoCo simulation dependencies:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-sim-mujoco.txt
+```
+
+Run the scripted 3D assembly episode and record a video:
+
+```powershell
+python scripts\run_mujoco_assembly.py --policy scripted --gui --record artifacts\mujoco_scripted.mp4
+```
+
+Run the learned hierarchical policy in the MuJoCo backend:
+
+```powershell
+python scripts\run_mujoco_assembly.py --policy learned --runtime-profile configs\assembly_profiles\mujoco_local.yaml --gui --record artifacts\mujoco_learned.mp4
+```
+
+The first MuJoCo backend is intentionally a hybrid step-up: simple mobile agent bodies and beam visuals in 3D, with the same team-option task semantics and metrics as the local sandbox.
+
+### 10. GPU runtime check
 
 Validate whether the active Python environment can really see torch and CUDA:
 
@@ -183,6 +205,7 @@ Recommended profiles:
 
 - `configs/assembly_profiles/local_dev.yaml`: CPU regression baseline
 - `configs/assembly_profiles/local_gpu.yaml`: local RTX 4060 torch/CUDA validation
+- `configs/assembly_profiles/mujoco_local.yaml`: Windows-friendly MuJoCo 3D visual simulation
 - `configs/assembly_profiles/isaac_gpu.yaml`: planned Linux + NVIDIA Isaac profile
 
 ## Architecture
@@ -214,6 +237,7 @@ Repository guidance:
 - `logs/`, checkpoints, rendered images, and simulator artifacts are generated outputs and are ignored by git
 - the intended default runtime profile is `configs/assembly_profiles/local_dev.yaml`
 - the intended local GPU validation profile is `configs/assembly_profiles/local_gpu.yaml`
+- the intended local 3D simulation profile is `configs/assembly_profiles/mujoco_local.yaml`
 - the planned future profile is `configs/assembly_profiles/isaac_gpu.yaml`
 - contributor notes live in `CONTRIBUTING.md`
 - Windows/VS Code notes live in `docs/setup/windows-vscode.md`

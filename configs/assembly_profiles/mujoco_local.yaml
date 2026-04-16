@@ -1,0 +1,6 @@
+name: mujoco_local
+backend: mujoco_local
+device: cuda
+requires_linux: false
+requires_nvidia_gpu: false
+notes: Windows-friendly MuJoCo 3D visual simulation backend for evaluating the current hierarchical assembly policy.

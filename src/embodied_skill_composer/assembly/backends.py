@@ -14,6 +14,7 @@ from embodied_skill_composer.assembly.models import (
     EpisodeArtifact,
     OptionExecutionResult,
 )
+from embodied_skill_composer.assembly.mujoco_backend import MuJoCoAssemblyBackend
 
 
 @runtime_checkable
@@ -190,4 +191,6 @@ def build_assembly_backend(
 ) -> AssemblyTaskBackend:
     if runtime_profile.backend == "local_sandbox":
         return CollaborativeAssemblyEnv(config=config, seed=seed)
+    if runtime_profile.backend == "mujoco_local":
+        return MuJoCoAssemblyBackend(config=config, runtime_profile=runtime_profile, seed=seed)
     return IsaacLabAssemblyBackend(config=config, runtime_profile=runtime_profile, seed=seed)

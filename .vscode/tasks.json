@@ -62,6 +62,38 @@
       "problemMatcher": []
     },
     {
+      "label": "MuJoCo Assembly Scripted",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_mujoco_assembly.py",
+        "--policy",
+        "scripted",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\mujoco_local.yaml",
+        "--record",
+        "artifacts\\mujoco_scripted.mp4"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "MuJoCo Assembly Learned",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_mujoco_assembly.py",
+        "--policy",
+        "learned",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\mujoco_local.yaml",
+        "--record",
+        "artifacts\\mujoco_learned.mp4"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
       "label": "GPU Runtime Check",
       "type": "shell",
       "command": "${config:python.defaultInterpreterPath}",

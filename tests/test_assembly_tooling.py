@@ -1,15 +1,22 @@
 import json
+import importlib.util
 from pathlib import Path
 
 import matplotlib
+import pytest
 
 from embodied_skill_composer.assembly.backends import build_assembly_backend
 from embodied_skill_composer.assembly.gpu import inspect_gpu_runtime
+from embodied_skill_composer.assembly.mujoco_backend import MuJoCoAssemblyBackend
 from embodied_skill_composer.assembly.models import AssemblyRuntimeProfile, AssemblyScenarioConfig, BeamTask
 
 matplotlib.use("Agg")
 
 from embodied_skill_composer.assembly.visualizer import render_playback_frames, render_summary_figure
+
+
+mujoco_available = importlib.util.find_spec("mujoco") is not None
+torch_available = importlib.util.find_spec("torch") is not None
 
 
 def build_default_assembly_config() -> AssemblyScenarioConfig:
@@ -67,6 +74,72 @@ def test_isaac_backend_status_reports_assumptions() -> None:
     joined_notes = " ".join(status.readiness_notes).lower()
     assert "linux" in joined_notes
     assert "nvidia" in joined_notes or "cuda" in joined_notes
+
+
+@pytest.mark.skipif(not mujoco_available, reason="MuJoCo optional dependency is not installed")
+def test_mujoco_backend_factory_and_scripted_episode(tmp_path: Path) -> None:
+    backend = build_assembly_backend(
+        config=build_default_assembly_config(),
+        runtime_profile=AssemblyRuntimeProfile(name="mujoco_local", backend="mujoco_local", device="cpu"),
+        seed=7,
+    )
+    assert isinstance(backend, MuJoCoAssemblyBackend)
+    assert backend.get_backend_status().is_ready is True
+
+    backend.reset(seed=7)
+    done = False
+    while not done:
+        result = backend.execute_team_option(backend.scripted_team_option())
+        done = result.done
+
+    artifact = backend.build_artifact(policy_mode="scripted")
+    diagnostics = backend.get_option_episode_diagnostics()
+    recording = backend.record_episode(tmp_path / "mujoco_scripted.mp4", diagnostics=diagnostics, width=640, height=480)
+
+    assert artifact.metrics.success is True
+    assert artifact.metrics.beams_installed == 2
+    assert diagnostics["backend"] == "mujoco_local"
+    assert diagnostics["selected_options"]
+    assert recording.exists()
+
+
+@pytest.mark.skipif(
+    not (mujoco_available and torch_available and (Path(__file__).resolve().parents[1] / "logs" / "assembly_options.pt").exists()),
+    reason="MuJoCo, torch, and the learned options checkpoint are required",
+)
+def test_learned_policy_completes_mujoco_episode() -> None:
+    import torch
+
+    from embodied_skill_composer.assembly.options_trainer import HierarchicalOptionTrainer
+    from embodied_skill_composer.assembly.runtime import load_assembly_scenario, load_training_config
+
+    workspace = Path(__file__).resolve().parents[1]
+    config = load_assembly_scenario(workspace / "configs" / "assembly_env.yaml")
+    training = load_training_config(workspace / "configs" / "assembly_training.yaml")
+    backend = build_assembly_backend(
+        config=config,
+        runtime_profile=AssemblyRuntimeProfile(name="mujoco_local", backend="mujoco_local", device="cuda"),
+        seed=training.seed,
+    )
+    trainer = HierarchicalOptionTrainer(backend, training, device="cuda" if torch.cuda.is_available() else "cpu")
+    trainer.load_checkpoint(workspace / "logs" / "assembly_options.pt")
+
+    backend.reset(seed=training.seed)
+    done = False
+    while not done:
+        observation = torch.as_tensor(
+            backend.get_team_option_observation(), dtype=torch.float32, device=trainer.device
+        ).unsqueeze(0)
+        mask = torch.as_tensor(trainer._masked_option_array(), dtype=torch.float32, device=trainer.device).unsqueeze(0)
+        with torch.no_grad():
+            logits = trainer._masked_logits(trainer.actor(observation), mask)
+            option = int(torch.argmax(logits, dim=-1).item())
+        result = backend.execute_team_option(option, max_primitive_steps=backend.config.option_max_primitive_steps)
+        done = result.done
+
+    artifact = backend.build_artifact(policy_mode="learned")
+    assert artifact.metrics.success is True
+    assert artifact.metrics.beams_installed == 2
 
 
 def test_visualizer_renders_playback_frames(tmp_path: Path) -> None:

@@ -72,7 +72,7 @@ class TrainingConfig(BaseModel):
 
 class AssemblyRuntimeProfile(BaseModel):
     name: str = "local_dev"
-    backend: Literal["local_sandbox", "isaac_lab"] = "local_sandbox"
+    backend: Literal["local_sandbox", "mujoco_local", "isaac_lab"] = "local_sandbox"
     device: str | None = None
     requires_linux: bool = False
     requires_nvidia_gpu: bool = False

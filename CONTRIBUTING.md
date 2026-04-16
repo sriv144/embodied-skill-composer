@@ -7,6 +7,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m ensurepip --upgrade
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pip install -r requirements-rl.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-sim-mujoco.txt
 .\.venv\Scripts\python.exe -m pytest -q --basetemp .pytest_tmp
 ```
 
@@ -19,6 +20,7 @@ Use these commands before committing:
 .\.venv\Scripts\python.exe -m compileall src scripts tests
 .\.venv\Scripts\python.exe scripts\benchmark_assembly_policies.py --runtime-profile configs\assembly_profiles\local_dev.yaml --episodes 3
 .\.venv\Scripts\python.exe scripts\visualize_assembly_episode.py --policy scripted --runtime-profile configs\assembly_profiles\local_dev.yaml
+.\.venv\Scripts\python.exe scripts\run_mujoco_assembly.py --policy scripted --runtime-profile configs\assembly_profiles\mujoco_local.yaml --record artifacts\mujoco_scripted.mp4
 .\.venv\Scripts\python.exe scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
 ```
 

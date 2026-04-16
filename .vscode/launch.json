@@ -56,6 +56,21 @@
         "--runtime-profile",
         "${workspaceFolder}\\configs\\assembly_profiles\\local_dev.yaml"
       ]
+    },
+    {
+      "name": "Run MuJoCo Assembly",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}\\scripts\\run_mujoco_assembly.py",
+      "console": "integratedTerminal",
+      "args": [
+        "--policy",
+        "scripted",
+        "--runtime-profile",
+        "${workspaceFolder}\\configs\\assembly_profiles\\mujoco_local.yaml",
+        "--record",
+        "${workspaceFolder}\\artifacts\\mujoco_scripted.mp4"
+      ]
     }
   ]
 }
