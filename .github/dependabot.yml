@@ -1,0 +1,44 @@
+# Dependabot config for embodied-skill-composer.
+#
+# Groups pip updates by ecosystem so version bumps do not flood the PR queue.
+# CUDA-pinned torch wheels are intentionally pinned per
+# scripts/setup_cuda_torch_windows.ps1 and are ignored here.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 5
+    groups:
+      core:
+        patterns:
+          - "numpy"
+          - "pyyaml"
+          - "pydantic"
+          - "rich"
+          - "typer"
+      rl-stack:
+        patterns:
+          - "gymnasium"
+          - "stable-baselines3"
+          - "torch"
+          - "torchvision"
+      sim-backends:
+        patterns:
+          - "pybullet"
+          - "mujoco"
+    ignore:
+      # CUDA-specific torch wheels are pinned intentionally.
+      - dependency-name: "torch"
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 3
