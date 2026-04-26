@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use Embodied Skill Composer in academic or industry work, please cite it as below."
+title: "Embodied Skill Composer: Hybrid Hierarchical Multi-Agent RL for Two-Robot Collaborative Assembly"
+abstract: >-
+  A hybrid robotics research project combining classical perception, scripted
+  options, and learned policies (PPO with imitation warm-start) for two-robot
+  collaborative assembly. Provides a simulator-agnostic task contract (PyBullet
+  / MuJoCo / Isaac-ready) and benchmark suite comparing scripted, low-level
+  MARL, and hierarchical team-options policies.
+authors:
+  - family-names: "Srivathsa"
+    given-names: ""
+    alias: "sriv144"
+repository-code: "https://github.com/sriv144/embodied-skill-composer"
+url: "https://github.com/sriv144/embodied-skill-composer"
+keywords:
+  - reinforcement-learning
+  - multi-agent-rl
+  - hierarchical-rl
+  - robotics
+  - manipulation
+  - assembly
+  - mujoco
+  - isaac-lab
+  - ppo
+license: MIT
+version: "0.1.0"
+date-released: "2026-04-26"
