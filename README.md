@@ -43,6 +43,36 @@ gh auth login -h github.com
 gh repo create embodied-skill-composer --private --source=. --remote=origin --push
 ```
 
+## Hierarchical Options Flow
+
+The diagram below maps the end-to-end loop that produced the `2/2 beams`
+flagship row above. The same task contract is preserved across the
+`local_sandbox`, `mujoco_local`, and (planned) `isaac_lab` backends so the
+high-level policy is portable across simulators.
+
+```mermaid
+flowchart TD
+    A["World state<br/>(beams, agent poses, holds)"] --> B["Team-option observation builder"]
+    B --> C{"High-level policy<br/>(scripted oracle OR PPO)"}
+    C -->|"option id"| D["Deterministic option executor<br/>(routing + grasp + recovery)"]
+    D --> E["Low-level primitive actions per agent"]
+    E --> F["AssemblyTaskBackend.step"]
+    F --> G["Reward shaping + invariants:<br/>turnover, collisions, deadlock, beams installed"]
+    G --> H["AssemblyMetrics episode artifact"]
+    G -->|"Replay buffer"| I["PPO trainer (options head)"]
+    I -. updates .-> C
+    F --> A
+    H --> J["Benchmark suite:<br/>scripted vs learned-options vs low-level MARL"]
+    subgraph Backends
+        F1["local_sandbox<br/>(regression default)"]
+        F2["mujoco_local<br/>(3D visual)"]
+        F3["isaac_lab<br/>(stub today)"]
+    end
+    F --- F1
+    F --- F2
+    F --- F3
+```
+
 ## What It Does
 
 - Runs a perception-driven warehouse collection task with reusable skills
