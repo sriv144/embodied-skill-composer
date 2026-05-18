@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+title: "Embodied Skill Composer"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: "Srivathsan"
+    alias: "sriv144"
+repository-code: "https://github.com/sriv144/embodied-skill-composer"
+license: MIT
+version: "0.1.0"
+date-released: "2026-04-14"
+abstract: >
+  Embodied Skill Composer is a hybrid robotics research sandbox for two-robot
+  collaborative assembly. It combines hierarchical team-options learning
+  (PPO fine-tuning with imitation warm-start) with a low-level MARL baseline
+  and scripted oracles, run on a simulator-agnostic task contract that
+  targets the local sandbox, MuJoCo, and a planned Isaac Lab backend.
+keywords:
+  - robotics
+  - reinforcement-learning
+  - multi-agent
+  - hierarchical-rl
+  - ppo
+  - mujoco
+  - isaac-lab
