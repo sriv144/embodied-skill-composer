@@ -1,5 +1,9 @@
 # Embodied Skill Composer
 
+[![tests](https://github.com/sriv144/embodied-skill-composer/actions/workflows/tests.yml/badge.svg)](https://github.com/sriv144/embodied-skill-composer/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+
 Embodied Skill Composer is a **hybrid robotics research project** that now centers on **two-robot collaborative assembly** in a local sandbox, with the older tabletop and warehouse flows retained as supporting baselines.
 
 It now includes the first local-sandbox slice of a bigger research direction:
@@ -219,6 +223,15 @@ Recommended profiles:
 - `src/embodied_skill_composer/tasks/`: YAML task loading
 - `configs/`: tabletop and warehouse configs
 - `tests/`: tabletop regression tests plus warehouse perception/planner/benchmark coverage
+
+## Continuous Integration
+
+Every push and pull request to `main` runs the full `pytest` regression suite
+via GitHub Actions (see [`.github/workflows/tests.yml`](.github/workflows/tests.yml)).
+The job installs `requirements.txt` + `requirements-rl.txt` on Python 3.11 and
+runs headless (`MPLBACKEND=Agg`). The MuJoCo / PyBullet / CUDA paths stay out
+of CI because hosted runners lack the system packages and GPU they need; the
+pure-Python regression path is the supported correctness signal.
 
 ## Setup Notes
 
