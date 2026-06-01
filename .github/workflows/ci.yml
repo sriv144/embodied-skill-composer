@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-typecheck-test:
+    name: lint, typecheck, test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-rl.txt
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install core requirements
+        run: pip install -r requirements.txt
+
+      - name: Install RL requirements (CPU)
+        run: pip install -r requirements-rl.txt
+
+      - name: Install dev tools
+        run: pip install ruff mypy pytest
+
+      - name: Install project (editable)
+        run: pip install -e .
+
+      - name: Ruff lint
+        run: ruff check src tests
+        # ruff is configured in pyproject.toml ([tool.ruff])
+
+      - name: Mypy typecheck
+        run: mypy src
+        # mypy is configured in pyproject.toml ([tool.mypy])
+        continue-on-error: true
+        # Typing is enforced incrementally — do not fail the build yet, but surface
+        # errors in the run log so we can drive the count down over time.
+
+      - name: Run tests
+        run: pytest -q
+        # pytest config (pythonpath, testpaths) is in pyproject.toml
