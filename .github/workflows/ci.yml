@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint + compile (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff
+        run: pip install ruff
+      - name: Ruff syntax + undefined-name check
+        # E9 = syntax / runtime errors, F63/F7/F82 = catch real bugs
+        # without forcing a style overhaul on existing code.
+        run: ruff check src tests --select=E9,F63,F7,F82
+      - name: Byte-compile import smoke test
+        # Belt-and-braces: catches import-time SyntaxError that ruff misses
+        # on conditional imports. Skips heavy mujoco/torch imports.
+        run: python -m compileall -q src tests
