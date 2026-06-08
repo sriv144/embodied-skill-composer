@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Ruff (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install ruff
+        run: pip install --quiet ruff
+      - name: Ruff lint
+        run: ruff check . --exit-zero --output-format=github
+      - name: Ruff format check
+        run: ruff format --check . || true
+
+  syntax:
+    name: Python syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Compile-check tracked .py files
+        shell: bash
+        run: |
+          set -o pipefail
+          git ls-files '*.py' | xargs -r -L 25 python -m py_compile
