@@ -1,5 +1,13 @@
 # Embodied Skill Composer
 
+![CI](https://github.com/sriv144/embodied-skill-composer/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)
+![Reinforcement Learning](https://img.shields.io/badge/RL-PPO%20%7C%20MARL-purple)
+![MuJoCo](https://img.shields.io/badge/sim-MuJoCo%20%7C%20PyBullet-orange)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+> **Two-robot collaborative assembly with hierarchical team-options learning — imitation warm-start, PPO fine-tuning, simulator-agnostic.**
+
 Embodied Skill Composer is a **hybrid robotics research project** that now centers on **two-robot collaborative assembly** in a local sandbox, with the older tabletop and warehouse flows retained as supporting baselines.
 
 It now includes the first local-sandbox slice of a bigger research direction:
