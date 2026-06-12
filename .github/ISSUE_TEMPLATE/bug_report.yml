@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a defect in Embodied Skill Composer (assembly, MARL, MuJoCo backend, perception, planner)
+labels: ["bug", "triage"]
+body:
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Which runtime profile reproduces this?
+      options:
+        - local_dev (CPU regression baseline)
+        - local_gpu (RTX 4060 torch/CUDA)
+        - mujoco_local (Windows-friendly 3D)
+        - isaac_gpu (planned)
+        - Not runtime-specific
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface is affected?
+      options:
+        - Tabletop baseline (pick/place/stack)
+        - Warehouse collection task
+        - Collaborative assembly (hierarchical options)
+        - Low-level MARL baseline
+        - Assembly playback visualizer
+        - MuJoCo 3D backend
+        - Classical-CV perception
+        - Planner / executor
+        - Scripts (training / benchmarks)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. `python scripts/eval_assembly_options.py --policy learned --runtime-profile configs/assembly_profiles/local_dev.yaml`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: gpu
+    attributes:
+      label: GPU / CUDA visibility (paste `python scripts/check_gpu_runtime.py` output if relevant)
+      render: shell
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      render: shell
