@@ -1,5 +1,44 @@
 # Roadmap: From Two-Robot Assembly To Physical AI Construction Swarms
 
+## Construction Intelligence v1: Learned Swarm Brain
+
+Status: active. The implementation checkpoint is complete; long research training and live dynamic
+Coppelia acceptance remain intentionally open.
+
+Completed in this checkpoint:
+
+- deterministic 16-32-module train, validation, and held-out cottage families,
+- `construction_coordination_v1`, where work consumes simulated time and failures trigger reassignment,
+- optional w9 CBS routing behind a deterministic reservation-table A* fallback,
+- CP-SAT demonstrations, behavior cloning, MAPPO/IPPO losses, checkpoint and ONNX export,
+- a real 64-transition training plumbing run and held-out non-learned controller smoke evaluation,
+- five-seed evaluation statistics with standard deviation and bootstrap 95% confidence intervals,
+- MuJoCo campaign-to-`SkillProfile` calibration,
+- `dynamic_base_logical_payload` Coppelia execution with 20 Hz wheel commands and measured telemetry,
+- persistent lab APIs, approval-gated training, run history, and WebSocket progress,
+- a routed browser workbench using the real named-node cottage GLB and an original robot GLB,
+- a read-only GitHub Pages bundle, CI, secret scanning, licensing, and dependency attribution.
+
+Current local readiness:
+
+- PyTorch `2.11.0+cu130` sees the RTX 4060 and passes CUDA tensor allocation.
+- `w9-pathfinding==0.1.3` is not installed because MSVC and the Windows SDK are not present; the tested
+  deterministic fallback is active.
+- A live Coppelia assignment passed with 2,274 physics steps, 4,540 wheel commands, 4,536 measured
+  pose samples, one installed module, and zero post-start robot pose writes. Full-cottage completion and
+  live failure recovery remain required.
+- MAPPO/IPPO research checkpoints do not exist yet. The UI labels them `not trained`.
+
+Acceptance gates still open:
+
+1. Run MAPPO and IPPO research seeds `7,8,9,10,11` and publish the held-out confidence intervals.
+2. Verify the stated completion, CP-SAT gap, failure recovery, and ablation thresholds from actual data.
+3. Extend the passed one-module live Coppelia gate to a complete cottage with zero post-initialization
+   robot pose writes.
+4. Record planned-versus-measured replay and one genuine obstacle or unavailable-robot recovery.
+
+No dual boot, ROS 2, Isaac Sim, humanoid embodiment, or lunar scene is required for these gates.
+
 ## Construction v2 Product Track
 
 Status: the first portfolio-grade workbench slice is operational.
@@ -24,8 +63,8 @@ Next product milestones:
 
 1. Add direct wall/opening editing and a small golden dataset for uploaded-plan parsing.
 2. Add conflict-aware multi-agent routing beyond the current deterministic orthogonal routes.
-3. Train and evaluate the first high-level MARL bidder against scripted, greedy, and CP-SAT controllers.
-4. Replace fixed-delay recovery fixtures with genuine event-driven rescheduling and rerouting.
+3. Run and evaluate the implemented MAPPO/IPPO bidder against scripted, greedy, auction, and CP-SAT.
+4. Validate dynamic Coppelia execution and measured recovery on the live simulator.
 5. Add optional IFC export and richer CC0 materials after geometry semantics remain stable.
 
 The browser digital twin is now the primary product experience. Blender is the geometry compiler;
@@ -50,7 +89,7 @@ The verified flagship result is that hierarchical learned options solve the defa
 Known limits:
 
 - OpenAI copilot `ask` mode requires API quota.
-- CUDA is not visible to torch in the active Windows environment until the CUDA torch wheel is fixed.
+- CUDA is visible to the active `.venv` torch runtime; the RTX 4060 tensor-allocation check passes.
 - Isaac Lab is a contract-preserving stub, not a real simulator backend yet.
 - Blender is optional and should not be required by tests or runtime commands.
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from math import atan2, degrees, hypot
 
+from pydantic import BaseModel, Field
+
 from embodied_skill_composer.construction.models import (
     BuildModule,
     BuildPlan,
@@ -15,10 +17,22 @@ from embodied_skill_composer.construction.models import (
 )
 
 
-def compile_house_design(design: HouseDesign) -> BuildPlan:
+class ConstructionCompileSettings(BaseModel):
+    """Deterministic decomposition controls for Construction v2 plans."""
+
+    wall_panel_target_width_m: float = Field(default=2.0, gt=0.5, le=4.0)
+    interior_panel_count: int = Field(default=2, ge=0, le=4)
+    roof_rows: int = Field(default=2, ge=1, le=4)
+
+
+def compile_house_design(
+    design: HouseDesign,
+    settings: ConstructionCompileSettings | None = None,
+) -> BuildPlan:
     """Compile an approved metric house into independently transportable modules."""
     if not design.floor_plan.approved:
         raise ValueError("floor plan must be reviewed and approved before compilation")
+    settings = settings or ConstructionCompileSettings()
 
     modules: list[BuildModule] = []
     foundation_ids: list[str] = []
@@ -51,7 +65,7 @@ def compile_house_design(design: HouseDesign) -> BuildPlan:
     opening_by_wall = {item.wall_id: item for item in design.floor_plan.openings}
     for wall_index, wall in enumerate(design.floor_plan.walls):
         length = hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y)
-        segment_count = max(1, round(length / 2.0))
+        segment_count = max(1, round(length / settings.wall_panel_target_width_m))
         angle = degrees(atan2(wall.end.y - wall.start.y, wall.end.x - wall.start.x))
         for segment in range(segment_count):
             ratio = (segment + 0.5) / segment_count
@@ -84,7 +98,11 @@ def compile_house_design(design: HouseDesign) -> BuildPlan:
             )
 
     interior_ids: list[str] = []
-    for index, x in enumerate((-1.35, 1.35)):
+    interior_x_positions = _interior_x_positions(
+        design.footprint_width_m,
+        settings.interior_panel_count,
+    )
+    for index, x in enumerate(interior_x_positions):
         module_id = f"interior_panel_{index}"
         interior_ids.append(module_id)
         modules.append(
@@ -100,7 +118,10 @@ def compile_house_design(design: HouseDesign) -> BuildPlan:
                 mass=28,
                 team=1,
                 duration=10,
-                dependencies=foundation_ids[index : index + 2],
+                dependencies=[
+                    foundation_ids[index % len(foundation_ids)],
+                    foundation_ids[(index + 1) % len(foundation_ids)],
+                ],
                 material="interior_white",
                 staging_index=len(modules),
                 yaw=90,
@@ -109,7 +130,12 @@ def compile_house_design(design: HouseDesign) -> BuildPlan:
 
     support_ids = exterior_ids + interior_ids
     roof_width = design.footprint_width_m / 2 + design.roof.overhang_m
-    for index, y in enumerate((-design.footprint_depth_m / 4, design.footprint_depth_m / 4)):
+    roof_row_depth = design.footprint_depth_m / settings.roof_rows
+    roof_y_positions = [
+        -design.footprint_depth_m / 2 + roof_row_depth * (index + 0.5)
+        for index in range(settings.roof_rows)
+    ]
+    for index, y in enumerate(roof_y_positions):
         for side, x in enumerate((-design.footprint_width_m / 4, design.footprint_width_m / 4)):
             module_id = f"roof_{index}_{side}"
             modules.append(
@@ -120,7 +146,7 @@ def compile_house_design(design: HouseDesign) -> BuildPlan:
                     y=y,
                     z=3.35,
                     width=roof_width,
-                    depth=design.footprint_depth_m / 2 + design.roof.overhang_m,
+                    depth=roof_row_depth + design.roof.overhang_m,
                     height=0.18,
                     mass=62,
                     team=2,
@@ -150,6 +176,16 @@ def compile_house_design(design: HouseDesign) -> BuildPlan:
         robots=robots,
         site_grid=SiteGrid(width=34, height=26),
     )
+
+
+def _interior_x_positions(width_m: float, count: int) -> list[float]:
+    if count == 0:
+        return []
+    if count == 2 and abs(width_m - 8.0) < 1e-9:
+        return [-1.35, 1.35]
+    usable_width = max(width_m - 2.0, 0.5)
+    spacing = usable_width / (count + 1)
+    return [-usable_width / 2 + spacing * (index + 1) for index in range(count)]
 
 
 def _module(

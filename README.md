@@ -2,7 +2,54 @@
 
 Embodied Skill Composer is a **Physical AI construction research workbench**. Its current flagship converts an approved architectural design into 24 transportable modules, schedules four robots, exposes the AI brain's decisions, and replays construction in a browser digital twin. The earlier two-robot assembly, MuJoCo, CoppeliaSim, tabletop, and warehouse experiments remain as research baselines.
 
-## Construction v2 Flagship
+## Construction Intelligence v1
+
+The current milestone adds a learned-swarm research layer without discarding the deterministic
+Construction v2 foundation:
+
+```text
+procedural cottages -> temporal PettingZoo event simulator -> BC + MAPPO/IPPO
+                    -> MuJoCo skill profile -> dynamic Coppelia wheel control
+                    -> browser digital twin + persisted experiment lab
+```
+
+Implemented now:
+
+- deterministic train/validation/test cottage generation with 16-32 modules and four robots,
+- temporal travel, pickup, carrying, installation, battery, obstacle, drop, and robot-failure events,
+- masked parameter-shared actors, centralized MAPPO and independent IPPO critics,
+- CP-SAT behavior-cloning demonstrations, real PPO updates, checkpoints, ONNX, TensorBoard, and manifests,
+- sequential, greedy, decentralized auction, and CP-SAT evaluation baselines with bootstrap intervals,
+- persisted SQLite scenarios, policies, runs, progress events, and approval-gated training,
+- dynamic CoppeliaSim wheel commands and measured telemetry with honest logical payload attachment,
+- a read-only static workbench bundle that requires no Python, API key, Blender, MuJoCo, or CoppeliaSim.
+
+Install the learned-swarm dependencies and run a short plumbing profile:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-construction-rl.txt
+.\.venv\Scripts\python.exe scripts\train_construction_intelligence.py --algorithm mappo --profile unit --seed 7 --yes
+.\.venv\Scripts\python.exe scripts\evaluate_construction_intelligence.py --seeds 900 --controllers sequential,greedy,auction,cp_sat --no-failures
+```
+
+Generate the public trace bundle and verify its production build:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_construction_public_demo.py
+cd workbench
+npm run build:static
+```
+
+The 64-transition `unit` profile validates the training pipeline; it is not research evidence. MAPPO/IPPO
+acceptance remains open until the five 1.5M-transition research seeds and held-out suites have completed.
+The Coppelia controller is `dynamic_base_logical_payload`: bases are wheel-driven from measured poses,
+while payload attachment remains a logical carrier constraint rather than arm/gripper contact dynamics.
+A live one-module gate has passed with `2,274` physics steps, `4,540` wheel commands, `4,536` measured
+pose samples, and zero post-start robot pose writes; full-cottage and live-recovery acceptance remain open.
+
+See [dependencies-and-assets.md](docs/dependencies-and-assets.md) for licenses and asset provenance.
+
+## Deterministic Construction v2 Foundation
 
 The verified cottage fixture demonstrates the complete deterministic path:
 
@@ -55,7 +102,16 @@ Validate the optional robotics and MARL surfaces:
 .\.venv\Scripts\python.exe scripts\run_construction_marl_env.py
 ```
 
-The CoppeliaSim replay is currently kinematic and trace-driven. The PettingZoo environment is a validated MARL research interface with assignment actions, dependency masks, cooperative teams, and rewards; it does not yet include a trained policy.
+The legacy CoppeliaSim replay remains kinematic and trace-driven. Construction Intelligence v1 adds a
+separate dynamic base executor:
+
+```powershell
+# Approval-gated; start CoppeliaSim first.
+.\.venv\Scripts\python.exe scripts\run_dynamic_construction_coppelia.py --controller greedy --seed 900 --yes
+```
+
+The legacy PettingZoo v0 contract remains available. The new `construction_coordination_v1` environment
+advances real simulated time and is the training contract used by MAPPO/IPPO.
 
 The retained assembly research includes:
 - **two-robot collaborative assembly**
