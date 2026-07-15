@@ -59,6 +59,7 @@ def _evaluate_scripted_options(
     env = build_assembly_backend(env_config, runtime_profile, seed=training_config.seed)
     returns: list[float] = []
     beams: list[int] = []
+    step_counts: list[int] = []
     successes = 0
     for episode in range(episodes):
         env.reset(seed=training_config.seed + episode)
@@ -69,12 +70,14 @@ def _evaluate_scripted_options(
         artifact = env.build_artifact(policy_mode="scripted")
         returns.append(artifact.metrics.total_reward)
         beams.append(artifact.metrics.beams_installed)
+        step_counts.append(artifact.metrics.step_count)
         successes += int(artifact.metrics.success)
     return PolicyBenchmarkResult(
         policy_name="scripted_options",
         success_rate=successes / max(1, episodes),
         mean_return=float(sum(returns) / max(1, len(returns))),
         mean_beams_installed=float(sum(beams) / max(1, len(beams))),
+        mean_step_count=float(sum(step_counts) / max(1, len(step_counts))),
         notes="Scripted option oracle using deterministic execution.",
     )
 
@@ -98,6 +101,7 @@ def _evaluate_learned_options(
         success_rate=metrics.success_rate,
         mean_return=metrics.mean_return,
         mean_beams_installed=metrics.mean_beams_installed,
+        mean_step_count=metrics.mean_step_count,
         notes="Hierarchical team-options policy with imitation warm-start and PPO fine-tuning.",
     )
 
@@ -119,6 +123,7 @@ def _evaluate_low_level_learned(
     trainer.load_checkpoint(checkpoint_path)
     returns: list[float] = []
     beams: list[int] = []
+    step_counts: list[int] = []
     successes = 0
     env.set_curriculum_stage(None)
 
@@ -140,11 +145,13 @@ def _evaluate_low_level_learned(
         artifact = env.build_artifact(policy_mode="learned")
         returns.append(artifact.metrics.total_reward)
         beams.append(artifact.metrics.beams_installed)
+        step_counts.append(artifact.metrics.step_count)
         successes += int(artifact.metrics.success)
     return PolicyBenchmarkResult(
         policy_name="low_level_learned",
         success_rate=successes / max(1, episodes),
         mean_return=float(sum(returns) / max(1, len(returns))),
         mean_beams_installed=float(sum(beams) / max(1, len(beams))),
+        mean_step_count=float(sum(step_counts) / max(1, len(step_counts))),
         notes="Retained low-level MARL baseline for comparison only.",
     )

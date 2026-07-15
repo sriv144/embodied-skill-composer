@@ -1,0 +1,23 @@
+name: coppelia_local
+backend: coppelia_sim
+device: cpu
+requires_linux: false
+requires_nvidia_gpu: false
+coppelia:
+  host: 127.0.0.1
+  port: 23000
+  executable_path: C:/Program Files/CoppeliaRobotics/CoppeliaSimEdu/coppeliaSim.exe
+  connection_timeout_s: 10.0
+  grid_scale_m: 0.35
+  control_steps_per_frame: 1
+  camera_width: 640
+  camera_height: 480
+  rebuild_scene_on_connect: true
+  use_mujoco_physics: true
+  use_bundled_robot_model: true
+  robot_model_path: C:/Program Files/CoppeliaRobotics/CoppeliaSimEdu/models/robots/mobile/KUKA YouBot.ttm
+  robot_model_scale: 1.25
+  use_construction_meshes: true
+  asset_catalog_path: configs/construction_asset_catalog.yaml
+  overview_camera_fov_degrees: 48.0
+notes: Optional CoppeliaSim Edu backend spike using deterministic ZeroMQ stepping and programmatically generated construction scenes.

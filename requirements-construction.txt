@@ -1,0 +1,8 @@
+-r requirements.txt
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+python-multipart>=0.0.18,<1
+httpx2>=2.7,<3
+ortools>=9.12,<10
+opencv-python>=4.10,<5
+shapely>=2.0,<3

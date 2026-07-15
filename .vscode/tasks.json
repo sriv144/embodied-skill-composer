@@ -62,6 +62,106 @@
       "problemMatcher": []
     },
     {
+      "label": "ConstructionBrain Heuristic",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_construction_brain.py",
+        "--brain",
+        "heuristic",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\local_dev.yaml",
+        "--episodes",
+        "1"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "ConstructionBrain MuJoCo Obstacles",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_construction_brain.py",
+        "--brain",
+        "heuristic",
+        "--env-config",
+        "configs\\assembly_obstacles.yaml",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\mujoco_local.yaml",
+        "--episodes",
+        "1"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "ConstructionBrain MuJoCo Recovery",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_construction_brain.py",
+        "--brain",
+        "heuristic",
+        "--env-config",
+        "configs\\assembly_recovery.yaml",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\mujoco_local.yaml",
+        "--episodes",
+        "1"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "ConstructionBrain MuJoCo Sensing",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_construction_brain.py",
+        "--brain",
+        "heuristic",
+        "--env-config",
+        "configs\\assembly_recovery.yaml",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\mujoco_sensing.yaml",
+        "--episodes",
+        "20"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Assembly Perception Capture",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\capture_assembly_perception.py",
+        "--output-dir",
+        "artifacts\\assembly_perception\\initial"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "ConstructionBrain MuJoCo Vision",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_construction_brain.py",
+        "--brain",
+        "heuristic",
+        "--env-config",
+        "configs\\assembly_recovery.yaml",
+        "--runtime-profile",
+        "configs\\assembly_profiles\\mujoco_vision.yaml",
+        "--episodes",
+        "20"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
       "label": "MuJoCo Assembly Scripted",
       "type": "shell",
       "command": "${config:python.defaultInterpreterPath}",
@@ -89,6 +189,26 @@
         "configs\\assembly_profiles\\mujoco_local.yaml",
         "--record",
         "artifacts\\mujoco_learned.mp4"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "CoppeliaSim Runtime Check",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\check_coppelia_runtime.py"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "CoppeliaSim Assembly Scripted",
+      "type": "shell",
+      "command": "${config:python.defaultInterpreterPath}",
+      "args": [
+        "scripts\\run_coppelia_assembly.py"
       ],
       "group": "test",
       "problemMatcher": []

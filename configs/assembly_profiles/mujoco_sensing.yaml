@@ -1,0 +1,15 @@
+name: mujoco_sensing
+backend: mujoco_local
+device: cpu
+requires_linux: false
+requires_nvidia_gpu: false
+manipulation_alignment_tolerance_m: 0.03
+manipulation_min_grip_force_n: 25.0
+physical_sensors:
+  enabled: true
+  alignment_noise_std_m: 0.002
+  force_noise_std_n: 1.5
+  joint_position_noise_std_m: 0.0004
+  dropout_probability: 0.15
+  ema_alpha: 0.6
+notes: Reproducible noisy/dropout-aware MuJoCo sensing profile for Physical AI experiments.

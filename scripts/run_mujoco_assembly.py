@@ -93,6 +93,13 @@ def main() -> int:
 
     artifact = env.build_artifact(policy_mode=args.policy)
     diagnostics = env.get_option_episode_diagnostics()
+    record_path = None
+    if args.record:
+        record_path = env.record_episode(Path(args.record), diagnostics=diagnostics)
+        diagnostics = env.get_option_episode_diagnostics()
+    if args.gui:
+        env.launch_viewer_playback(diagnostics=diagnostics)
+
     payload = {
         "artifact": artifact.model_dump(mode="json"),
         "diagnostics": diagnostics,
@@ -100,12 +107,6 @@ def main() -> int:
     diagnostics_path = Path(args.diagnostics_output)
     diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
     diagnostics_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-    record_path = None
-    if args.record:
-        record_path = env.record_episode(Path(args.record), diagnostics=diagnostics)
-    if args.gui:
-        env.launch_viewer_playback(diagnostics=diagnostics)
 
     print(f"Policy: {args.policy}")
     print(f"Runtime profile: {runtime_profile.name} ({runtime_profile.backend})")

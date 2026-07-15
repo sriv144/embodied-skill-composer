@@ -5,7 +5,13 @@ from typing import Any
 
 import yaml
 
-from embodied_skill_composer.assembly.models import AssemblyRuntimeProfile, AssemblyScenarioConfig, TrainingConfig
+from embodied_skill_composer.assembly.models import (
+    AssemblyRuntimeProfile,
+    AssemblyScenarioConfig,
+    AssetCatalog,
+    ModularBlueprint,
+    TrainingConfig,
+)
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -24,3 +30,11 @@ def load_assembly_scenario(path: Path) -> AssemblyScenarioConfig:
 
 def load_training_config(path: Path) -> TrainingConfig:
     return TrainingConfig.model_validate(load_yaml(path))
+
+
+def load_modular_blueprint(path: Path) -> ModularBlueprint:
+    return ModularBlueprint.model_validate(load_yaml(path))
+
+
+def load_asset_catalog(path: Path) -> AssetCatalog:
+    return AssetCatalog.model_validate(load_yaml(path))

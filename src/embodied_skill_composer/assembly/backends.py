@@ -6,11 +6,16 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 from embodied_skill_composer.assembly.env import CollaborativeAssemblyEnv
+from embodied_skill_composer.assembly.coppelia_backend import CoppeliaSimAssemblyBackend
 from embodied_skill_composer.assembly.models import (
     AssemblyMetrics,
     AssemblyRuntimeProfile,
     AssemblyScenarioConfig,
     BackendStatus,
+    BlueprintSlotState,
+    ConstructionBrainObservation,
+    ConstructionProgress,
+    ConstructionResourceState,
     EpisodeArtifact,
     OptionExecutionResult,
 )
@@ -52,6 +57,8 @@ class AssemblyTaskBackend(Protocol):
     def execute_team_option(self, option: int, max_primitive_steps: int | None = None) -> OptionExecutionResult: ...
 
     def get_option_episode_diagnostics(self) -> dict[str, object]: ...
+
+    def get_construction_observation(self) -> ConstructionBrainObservation: ...
 
     def get_backend_status(self) -> BackendStatus: ...
 
@@ -149,6 +156,27 @@ class IsaacLabAssemblyBackend:
             "backend_status": self.get_backend_status().model_dump(mode="json"),
         }
 
+    def get_construction_observation(self) -> ConstructionBrainObservation:
+        return ConstructionBrainObservation(
+            backend=self.backend_name,
+            step_count=0,
+            current_beam_index=0,
+            current_beam_name=self.config.beams[0].name if self.config.beams else None,
+            agent_positions=list(self.config.agent_starts),
+            carrying=False,
+            completed_beams=[],
+            resources=[
+                ConstructionResourceState(**resource.model_dump(), delivered=False)
+                for resource in self.config.derived_resources()
+            ],
+            blueprint_slots=[
+                BlueprintSlotState(**slot.model_dump(), completed=False)
+                for slot in self.config.derived_blueprint_slots()
+            ],
+            progress=ConstructionProgress(),
+            available_options=[],
+        )
+
     def get_backend_status(self) -> BackendStatus:
         notes = list(self.readiness_notes)
         notes.append(f"Runtime profile: {self.runtime_profile.name}")
@@ -193,4 +221,10 @@ def build_assembly_backend(
         return CollaborativeAssemblyEnv(config=config, seed=seed)
     if runtime_profile.backend == "mujoco_local":
         return MuJoCoAssemblyBackend(config=config, runtime_profile=runtime_profile, seed=seed)
+    if runtime_profile.backend == "coppelia_sim":
+        return CoppeliaSimAssemblyBackend(
+            config=config,
+            runtime_profile=runtime_profile,
+            seed=seed,
+        )
     return IsaacLabAssemblyBackend(config=config, runtime_profile=runtime_profile, seed=seed)

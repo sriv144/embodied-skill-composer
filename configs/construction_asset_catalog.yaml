@@ -1,0 +1,70 @@
+version: 1
+sources:
+  kenney_modular_buildings:
+    title: Kenney Modular Buildings 2.1
+    source_url: https://kenney.nl/assets/modular-buildings
+    license: CC0-1.0
+    local_root: assets/third_party/kenney_modular_buildings
+    attribution: Kenney Modular Buildings 2.1
+  coppeliasim_bundled_models:
+    title: CoppeliaSim Edu bundled model library
+    source_url: https://www.coppeliarobotics.com/
+    license: CoppeliaSim Edu educational license
+    redistributed: false
+
+robots:
+  mobile_manipulator:
+    source: coppeliasim_bundled_models
+    model_path: C:/Program Files/CoppeliaRobotics/CoppeliaSimEdu/models/robots/mobile/KUKA YouBot.ttm
+    role: First mobile manipulation prototype; replaceable through the backend contract.
+
+components:
+  wall_panel:
+    source: kenney_modular_buildings
+    visual_mesh: assets/third_party/kenney_modular_buildings/models/building-block.obj
+    collision_shape: box
+    mesh_scale: 0.75
+    orientation_rpy_degrees: [0.0, 0.0, 0.0]
+    dimensions_m: [0.75, 0.18, 0.75]
+  corner_column:
+    source: kenney_modular_buildings
+    visual_mesh: assets/third_party/kenney_modular_buildings/models/building-corner.obj
+    collision_shape: box
+    mesh_scale: 0.75
+    orientation_rpy_degrees: [0.0, 0.0, 0.0]
+    dimensions_m: [0.75, 0.18, 0.75]
+  door_panel:
+    source: kenney_modular_buildings
+    visual_mesh: assets/third_party/kenney_modular_buildings/models/building-door.obj
+    collision_shape: box
+    mesh_scale: 0.75
+    orientation_rpy_degrees: [0.0, 0.0, 0.0]
+    dimensions_m: [0.75, 0.18, 0.75]
+  window_panel:
+    source: kenney_modular_buildings
+    visual_mesh: assets/third_party/kenney_modular_buildings/models/building-window.obj
+    collision_shape: box
+    mesh_scale: 0.75
+    orientation_rpy_degrees: [0.0, 0.0, 0.0]
+    dimensions_m: [0.75, 0.18, 0.75]
+  flat_roof_panel:
+    source: kenney_modular_buildings
+    visual_mesh: assets/third_party/kenney_modular_buildings/models/roof-flat-top.obj
+    collision_shape: box
+    mesh_scale: 0.75
+    orientation_rpy_degrees: [0.0, 90.0, 0.0]
+    dimensions_m: [0.82, 0.82, 0.16]
+  gable_roof:
+    source: kenney_modular_buildings
+    visual_mesh: assets/third_party/kenney_modular_buildings/models/roof-gable.obj
+    collision_shape: convex_hull
+    mesh_scale: 0.75
+    orientation_rpy_degrees: [0.0, 90.0, 0.0]
+    dimensions_m: [0.82, 0.39, 0.75]
+  gable_end:
+    source: kenney_modular_buildings
+    visual_mesh: assets/third_party/kenney_modular_buildings/models/roof-gable-end.obj
+    collision_shape: convex_hull
+    mesh_scale: 0.75
+    orientation_rpy_degrees: [0.0, 90.0, 0.0]
+    dimensions_m: [0.82, 0.39, 0.75]

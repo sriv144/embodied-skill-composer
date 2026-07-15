@@ -3,4 +3,6 @@ backend: mujoco_local
 device: cuda
 requires_linux: false
 requires_nvidia_gpu: false
+manipulation_alignment_tolerance_m: 0.03
+manipulation_min_grip_force_n: 25.0
 notes: Windows-friendly MuJoCo 3D visual simulation backend for evaluating the current hierarchical assembly policy.

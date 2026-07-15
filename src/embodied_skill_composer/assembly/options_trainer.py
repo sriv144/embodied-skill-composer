@@ -125,6 +125,7 @@ class HierarchicalOptionTrainer:
         episodes = episodes or self.config.evaluation_episodes
         returns: list[float] = []
         beams_installed: list[int] = []
+        step_counts: list[int] = []
         option_switches: list[int] = []
         recovery_usage: list[int] = []
         successes = 0
@@ -147,6 +148,7 @@ class HierarchicalOptionTrainer:
             diagnostics = self.env.get_option_episode_diagnostics()
             returns.append(artifact.metrics.total_reward)
             beams_installed.append(artifact.metrics.beams_installed)
+            step_counts.append(artifact.metrics.step_count)
             option_switches.append(int(diagnostics["option_switch_count"]))
             recovery_usage.append(
                 int(sum(diagnostics["recovery_option_usage"].values()))  # type: ignore[union-attr]
@@ -159,6 +161,7 @@ class HierarchicalOptionTrainer:
             mean_beams_installed=float(sum(beams_installed) / max(1, len(beams_installed))),
             mean_option_switches=float(sum(option_switches) / max(1, len(option_switches))),
             mean_recovery_usage=float(sum(recovery_usage) / max(1, len(recovery_usage))),
+            mean_step_count=float(sum(step_counts) / max(1, len(step_counts))),
         )
 
     def evaluate_scripted_baseline(self, episodes: int = 5) -> float:
