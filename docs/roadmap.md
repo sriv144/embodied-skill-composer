@@ -4,7 +4,7 @@
 
 - [x] Foundation implementation
 - [x] Phase 1 — publish and protect the checkpoint
-- [ ] Phase 2 — quality, reproducibility, and durable jobs
+- [x] Phase 2 — quality, reproducibility, and durable jobs
 - [ ] Phase 3 — freeze the research protocol
 - [ ] Phase 4 — run the learned-policy evidence
 - [ ] Phase 5 — complete dynamic Coppelia evidence
@@ -16,7 +16,7 @@ Phase evidence:
 | Phase | Acceptance evidence |
 | --- | --- |
 | 1 | PR #19 merged as `8d88fa8`; protected `main`; Python, workbench, and secrets checks green; native secret scanning and push protection enabled; Pages preview returned HTTP 200. |
-| 2 | On clean commit `5d30174`, 213 tests passed and 2 live-Coppelia tests skipped with 82.19% combined statement/branch coverage; Ruff, full-source mypy (111 files), `pip check`, compile, secret scan, lock regeneration, and static build passed. Production subprocess run `20260716T080821Z-training-83d0f663` completed with checkpoint, ONNX, manifest, JSONL events, and clean source/environment fingerprints. Research-profile run `20260716T080907Z-training-6717722c` was terminated after its checkpoint, reconciled to `interrupted`, resumed as attempt 2 from the same zero-transition state (`training_resumed`), then cancelled cleanly. Remote PR checks and merge remain before the phase is checked. See [reproducibility](construction-intelligence-v1-reproducibility.md). |
+| 2 | PR #20 passed duplicate protected-branch and pull-request matrices: Python, workbench, and secret checks all green. On clean commit `5d30174`, 213 tests passed and 2 live-Coppelia tests skipped with 82.19% combined statement/branch coverage; Ruff, full-source mypy (111 files), `pip check`, compile, secret scan, lock regeneration, and static build passed. Production subprocess run `20260716T080821Z-training-83d0f663` completed with checkpoint, ONNX, manifest, JSONL events, and clean source/environment fingerprints. Research-profile run `20260716T080907Z-training-6717722c` was terminated after its checkpoint, reconciled to `interrupted`, resumed as attempt 2 from the same zero-transition state (`training_resumed`), then cancelled cleanly. See [reproducibility](construction-intelligence-v1-reproducibility.md). |
 | 3 | Pending versioned protocol manifest and split-isolation smoke evidence. |
 | 4 | Pending 20 research runs and held-out report. |
 | 5 | Pending live full-cottage nominal and unavailable-robot evidence. |
