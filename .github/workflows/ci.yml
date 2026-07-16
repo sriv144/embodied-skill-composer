@@ -11,10 +11,14 @@ jobs:
   python:
     runs-on: ubuntu-latest
     env:
-      MUJOCO_GL: egl
-      PYOPENGL_PLATFORM: egl
+      MUJOCO_GL: osmesa
+      PYOPENGL_PLATFORM: osmesa
     steps:
       - uses: actions/checkout@v4
+      - name: Install headless MuJoCo rendering
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libosmesa6
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
