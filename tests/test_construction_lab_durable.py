@@ -407,6 +407,11 @@ def test_dispatcher_builds_claim_bound_worker_command_without_running_training(
         return FinishedProcess()
 
     monkeypatch.setattr(lab_service_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        lab_service_module,
+        "_process_identity",
+        lambda _pid: "fixture-process-identity",
+    )
     service = LabService(registry)
     try:
         assert launched.wait(timeout=2)
@@ -473,6 +478,11 @@ def test_dispatcher_reconciles_heartbeats_while_worker_is_running(
         return []
 
     monkeypatch.setattr(lab_service_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        lab_service_module,
+        "_process_identity",
+        lambda _pid: "fixture-process-identity",
+    )
     monkeypatch.setattr(registry, "reconcile_stale_runs", fake_reconcile)
     service = LabService(registry)
     try:
