@@ -38,7 +38,9 @@ Expected benchmark summary:
 
 ## Git / Publishing
 
-This repository is intended to live in a **private GitHub repo** during active development.
+This repository is public. Do not commit credentials, local simulator assets, generated research runs,
+or unpublished checkpoints. Public Pages builds remain read-only and are labeled as previews until the
+v1 acceptance gates are complete.
 
 If `gh auth status` fails, refresh GitHub CLI authentication first:
 
@@ -46,10 +48,10 @@ If `gh auth status` fails, refresh GitHub CLI authentication first:
 gh auth login -h github.com
 ```
 
-Once authenticated, create and push the private repo:
+Once authenticated, verify the configured public repository before pushing:
 
 ```powershell
-gh repo create embodied-skill-composer --private --source=. --remote=origin --push
+gh repo view --json nameWithOwner,visibility,url
 ```
 
 ## Local Tooling

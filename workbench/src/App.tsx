@@ -82,14 +82,14 @@ export default function App() {
             </button>
           ))}
         </nav>
-        <div className="rail-status" title={mode === "local" ? "Local research lab" : "Static public trace"}><span className={mode === "local" ? "status-dot" : "status-dot static"} />{mode}</div>
+        <div className="rail-status" title={mode === "local" ? "Local research lab" : "Read-only public preview"}><span className={mode === "local" ? "status-dot" : "status-dot static"} />{mode === "local" ? "local" : "preview"}</div>
       </aside>
       <main className="main-shell">
         <header className="topbar">
           <div><p className="eyebrow">Construction Intelligence v1</p><h1>{project.design.title}</h1></div>
           <div className="topbar-meta">
             <span>{project.plan.modules.length} modules</span><span>{project.plan.robots.length} robots</span>
-            <span className="solver-ready"><Check size={14} /> {mode === "local" ? "Lab connected" : "Public replay"}</span>
+            <span className="solver-ready"><Check size={14} /> {mode === "local" ? "Lab connected" : "Preview replay"}</span>
           </div>
         </header>
         <motion.section key={view} className="view-stage" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>

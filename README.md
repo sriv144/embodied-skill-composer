@@ -152,13 +152,16 @@ Most recent comparison:
 See [assembly-hierarchical-options.md](docs/results/assembly-hierarchical-options.md) for the short write-up and [isaac-prep.md](docs/isaac-prep.md) for the next backend milestone assumptions.
 For current local setup and debugging workflows, see [windows-vscode.md](docs/setup/windows-vscode.md) and [linux-nvidia-isaac.md](docs/setup/linux-nvidia-isaac.md).
 
-Private-repo publishing is intended to happen through GitHub CLI once authentication is valid:
+The source repository is public. Use GitHub CLI to verify authentication and repository visibility
+before publishing a checkpoint:
 
 ```powershell
 gh auth status
-gh auth login -h github.com
-gh repo create embodied-skill-composer --private --source=. --remote=origin --push
+gh repo view --json nameWithOwner,visibility,url
 ```
+
+The GitHub Pages workbench is a read-only preview until the Construction Intelligence v1 research and
+live-simulator acceptance gates are complete.
 
 ## What It Does
 

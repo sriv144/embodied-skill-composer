@@ -95,7 +95,7 @@ export function ExperimentsView({
           <div><FidelityBadge level="MuJoCo" active /><span>skill profile</span></div>
           <div><FidelityBadge level="CoppeliaSim" active={Boolean(coppelia?.reachable)} /><span>{coppelia?.reachable ? "wheel control online" : "offline"}</span></div>
         </div>
-        <div className="runtime-note">{mode === "local" ? <><Cpu size={15} />Local lab controls enabled</> : <><Ban size={15} />Read-only public trace</>}</div>
+        <div className="runtime-note">{mode === "local" ? <><Cpu size={15} />Local lab controls enabled</> : <><Ban size={15} />Read-only public preview</>}</div>
       </aside>
     </div>
   );
