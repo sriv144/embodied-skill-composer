@@ -1,0 +1,135 @@
+version: 1
+blueprint_id: modular_room_v0
+title: Cooperative Modular Room v0
+grid_size: 24
+grid_scale_m: 0.35
+max_steps: 1600
+option_max_primitive_steps: 64
+agent_starts:
+  - [1, 10]
+  - [1, 11]
+materials:
+  - resource_id: material_column_nw
+    component_type: corner_column
+    asset_key: corner_column
+    source_cells: [[3, 1], [3, 2]]
+  - resource_id: material_column_ne
+    component_type: corner_column
+    asset_key: corner_column
+    source_cells: [[3, 4], [3, 5]]
+  - resource_id: material_column_se
+    component_type: corner_column
+    asset_key: corner_column
+    source_cells: [[3, 7], [3, 8]]
+  - resource_id: material_column_sw
+    component_type: corner_column
+    asset_key: corner_column
+    source_cells: [[3, 13], [3, 14]]
+  - resource_id: material_wall_north
+    component_type: wall_panel
+    asset_key: wall_panel
+    source_cells: [[6, 1], [6, 2]]
+  - resource_id: material_wall_east
+    component_type: window_panel
+    asset_key: window_panel
+    source_cells: [[6, 4], [6, 5]]
+  - resource_id: material_wall_south
+    component_type: door_panel
+    asset_key: door_panel
+    source_cells: [[6, 7], [6, 8]]
+  - resource_id: material_wall_west
+    component_type: wall_panel
+    asset_key: wall_panel
+    source_cells: [[6, 10], [6, 11]]
+  - resource_id: material_roof_left
+    component_type: gable_roof
+    asset_key: gable_roof
+    source_cells: [[9, 1], [9, 2]]
+  - resource_id: material_roof_right
+    component_type: gable_roof
+    asset_key: gable_roof
+    source_cells: [[9, 4], [9, 5]]
+components:
+  - component_id: column_nw
+    component_type: corner_column
+    asset_key: corner_column
+    required_material_id: material_column_nw
+    target_cells: [[15, 14], [15, 15]]
+    target_pose:
+      position_m: [0.7, 0.7, 0.38]
+  - component_id: column_ne
+    component_type: corner_column
+    asset_key: corner_column
+    required_material_id: material_column_ne
+    target_cells: [[15, 18], [15, 19]]
+    target_pose:
+      position_m: [0.7, 2.1, 0.38]
+      rotation_rpy_degrees: [0.0, 0.0, 90.0]
+  - component_id: column_se
+    component_type: corner_column
+    asset_key: corner_column
+    required_material_id: material_column_se
+    target_cells: [[19, 18], [19, 19]]
+    target_pose:
+      position_m: [2.1, 2.1, 0.38]
+      rotation_rpy_degrees: [0.0, 0.0, 180.0]
+  - component_id: column_sw
+    component_type: corner_column
+    asset_key: corner_column
+    required_material_id: material_column_sw
+    target_cells: [[19, 14], [19, 15]]
+    target_pose:
+      position_m: [2.1, 0.7, 0.38]
+      rotation_rpy_degrees: [0.0, 0.0, 270.0]
+  - component_id: wall_north
+    component_type: wall_panel
+    asset_key: wall_panel
+    required_material_id: material_wall_north
+    target_cells: [[14, 16], [14, 17]]
+    target_pose:
+      position_m: [0.7, 1.4, 0.38]
+    depends_on: [column_nw, column_ne]
+  - component_id: wall_east
+    component_type: window_panel
+    asset_key: window_panel
+    required_material_id: material_wall_east
+    target_cells: [[16, 20], [16, 21]]
+    target_pose:
+      position_m: [1.4, 2.1, 0.38]
+      rotation_rpy_degrees: [0.0, 0.0, 90.0]
+    depends_on: [column_ne, column_se]
+  - component_id: wall_south
+    component_type: door_panel
+    asset_key: door_panel
+    required_material_id: material_wall_south
+    target_cells: [[20, 16], [20, 17]]
+    target_pose:
+      position_m: [2.1, 1.4, 0.38]
+      rotation_rpy_degrees: [0.0, 0.0, 180.0]
+    depends_on: [column_se, column_sw]
+  - component_id: wall_west
+    component_type: wall_panel
+    asset_key: wall_panel
+    required_material_id: material_wall_west
+    target_cells: [[17, 12], [17, 13]]
+    target_pose:
+      position_m: [1.4, 0.7, 0.38]
+      rotation_rpy_degrees: [0.0, 0.0, 270.0]
+    depends_on: [column_sw, column_nw]
+  - component_id: roof_left
+    component_type: gable_roof
+    asset_key: gable_roof
+    required_material_id: material_roof_left
+    target_cells: [[16, 16], [16, 17]]
+    target_pose:
+      position_m: [1.05, 1.4, 1.12]
+    depends_on: [wall_north, wall_east, wall_south, wall_west]
+  - component_id: roof_right
+    component_type: gable_roof
+    asset_key: gable_roof
+    required_material_id: material_roof_right
+    target_cells: [[18, 16], [18, 17]]
+    target_pose:
+      position_m: [1.75, 1.4, 1.12]
+      rotation_rpy_degrees: [0.0, 0.0, 180.0]
+    depends_on: [wall_north, wall_east, wall_south, wall_west]

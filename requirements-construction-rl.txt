@@ -1,0 +1,8 @@
+-r requirements-construction.txt
+pettingzoo==1.26.1
+gymnasium==1.3.0
+tensordict==0.13.0
+torchrl==0.13.3
+tensorboard>=2.20,<3
+onnx>=1.19,<2
+onnxscript>=0.5,<1

@@ -1,0 +1,62 @@
+grid_size: 12
+max_steps: 140
+agent_starts:
+  - [0, 2]
+  - [0, 3]
+beams:
+  - name: beam_alpha
+    pickup_left: [2, 2]
+    pickup_right: [2, 3]
+    assembly_left: [8, 7]
+    assembly_right: [8, 8]
+  - name: beam_beta
+    pickup_left: [2, 6]
+    pickup_right: [2, 7]
+    assembly_left: [9, 7]
+    assembly_right: [9, 8]
+obstacle_cells:
+  - [5, 2]
+  - [5, 3]
+  - [5, 4]
+  - [5, 5]
+  - [5, 6]
+  - [5, 7]
+resources:
+  - resource_id: beam_alpha
+    resource_type: beam
+    source_cells: [[2, 2], [2, 3]]
+    assigned_slot_id: beam_alpha_slot
+  - resource_id: beam_beta
+    resource_type: beam
+    source_cells: [[2, 6], [2, 7]]
+    assigned_slot_id: beam_beta_slot
+blueprint_slots:
+  - slot_id: beam_alpha_slot
+    resource_type: beam
+    target_cells: [[8, 7], [8, 8]]
+    required_resource_id: beam_alpha
+  - slot_id: beam_beta_slot
+    resource_type: beam
+    target_cells: [[9, 7], [9, 8]]
+    required_resource_id: beam_beta
+manipulation_failures:
+  - beam_name: beam_alpha
+    phase: grasp
+    fail_first_attempts: 1
+    reason: gripper_slip
+  - beam_name: beam_beta
+    phase: install
+    fail_first_attempts: 1
+    reason: placement_rejected
+collision_penalty: 0.2
+invalid_action_penalty: 0.1
+manipulation_failure_penalty: 0.1
+step_penalty: 0.01
+grasp_reward: 0.6
+install_reward: 2.0
+completion_reward: 6.0
+distance_shaping: 0.03
+second_beam_pickup_bonus: 0.08
+second_beam_install_bonus: 0.12
+option_max_primitive_steps: 24
+curriculum_beam_stages: [1, 2]

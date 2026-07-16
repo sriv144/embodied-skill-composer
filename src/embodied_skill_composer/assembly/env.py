@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 from random import Random
+from typing import Callable
 
 import numpy as np
 
@@ -11,6 +13,12 @@ from embodied_skill_composer.assembly.models import (
     AssemblyPlaybackFrame,
     AssemblyScenarioConfig,
     BackendStatus,
+    BlueprintSlot,
+    BlueprintSlotState,
+    ConstructionBrainObservation,
+    ConstructionProgress,
+    ConstructionResource,
+    ConstructionResourceState,
     EpisodeArtifact,
     OptionExecutionResult,
     TeamOption,
@@ -38,6 +46,14 @@ class AssemblyState:
     collision_count: int
     invalid_action_count: int
     deadlock_steps: int
+    energy_cost: float
+    idle_step_count: int
+    wasted_step_count: int
+    obstacle_collision_count: int
+    manipulation_attempts: dict[str, int]
+    manipulation_failure_count: int
+    manipulation_recovery_count: int
+    last_manipulation_failure: str | None
 
 
 class CollaborativeAssemblyEnv:
@@ -57,6 +73,10 @@ class CollaborativeAssemblyEnv:
         self.active_beam_count = len(self.config.beams)
         self.active_stage_index: int | None = None
         self.state = self._initial_state()
+        self._queued_manipulation_failures: dict[str, list[str]] = {}
+        self._failed_manipulations: set[str] = set()
+        self._recovered_manipulations: set[str] = set()
+        self.manipulation_failure_history: list[dict[str, str | int | bool]] = []
         self.option_history: list[OptionExecutionResult] = []
         self.option_switch_count = 0
         self.recovery_option_usage = {"reset_to_pickup_route": 0, "reposition_after_install": 0}
@@ -84,6 +104,10 @@ class CollaborativeAssemblyEnv:
         if seed is not None:
             self.random.seed(seed)
         self.state = self._initial_state()
+        self._queued_manipulation_failures = {}
+        self._failed_manipulations = set()
+        self._recovered_manipulations = set()
+        self.manipulation_failure_history = []
         self.option_history = []
         self.option_switch_count = 0
         self.recovery_option_usage = {"reset_to_pickup_route": 0, "reposition_after_install": 0}
@@ -116,7 +140,19 @@ class CollaborativeAssemblyEnv:
         before_distance = self._distance_to_objective()
         before_second_pickup = self._second_beam_pickup_distance()
         before_second_install = self._second_beam_install_distance()
-        info = {"picked": False, "installed": False}
+        before_collision_count = self.state.collision_count
+        before_invalid_action_count = self.state.invalid_action_count
+        before_deadlock_steps = self.state.deadlock_steps
+        before_manipulation_failures = self.state.manipulation_failure_count
+        self.state.energy_cost += float(sum(1 for action in actions if AssemblyAction(action) != AssemblyAction.STAY))
+        self.state.idle_step_count += sum(1 for action in actions if AssemblyAction(action) == AssemblyAction.STAY)
+        info = {
+            "picked": False,
+            "installed": False,
+            "manipulation_failed": False,
+            "failure_reason": None,
+            "retryable": False,
+        }
 
         if self.state.carrying:
             reward += self._step_carrying(actions)
@@ -124,20 +160,34 @@ class CollaborativeAssemblyEnv:
             reward += self._step_independent(actions)
             if all(action == AssemblyAction.GRAB for action in actions):
                 if self._at_positions([beam.pickup_left, beam.pickup_right]):
-                    self.state.carrying = True
-                    reward += self.config.grasp_reward
-                    info["picked"] = True
+                    failure_reason = self._attempt_manipulation(beam.name, "grasp")
+                    if failure_reason is None:
+                        self.state.carrying = True
+                        reward += self.config.grasp_reward
+                        info["picked"] = True
+                    else:
+                        reward -= self.config.manipulation_failure_penalty
+                        info["manipulation_failed"] = True
+                        info["failure_reason"] = failure_reason
+                        info["retryable"] = True
                 else:
                     reward -= self.config.invalid_action_penalty
                     self.state.invalid_action_count += 1
 
         if self.state.carrying and all(action == AssemblyAction.INSTALL for action in actions):
             if self._at_positions([beam.assembly_left, beam.assembly_right]):
-                self.state.carrying = False
-                self.state.installed_beams.append(beam.name)
-                self.state.current_beam_index += 1
-                reward += self.config.install_reward
-                info["installed"] = True
+                failure_reason = self._attempt_manipulation(beam.name, "install")
+                if failure_reason is None:
+                    self.state.carrying = False
+                    self.state.installed_beams.append(beam.name)
+                    self.state.current_beam_index += 1
+                    reward += self.config.install_reward
+                    info["installed"] = True
+                else:
+                    reward -= self.config.manipulation_failure_penalty
+                    info["manipulation_failed"] = True
+                    info["failure_reason"] = failure_reason
+                    info["retryable"] = True
             else:
                 reward -= self.config.invalid_action_penalty
                 self.state.invalid_action_count += 1
@@ -145,6 +195,13 @@ class CollaborativeAssemblyEnv:
         after_distance = self._distance_to_objective()
         reward += self.config.distance_shaping * (before_distance - after_distance)
         reward += self._phase_two_bonus(before_second_pickup, before_second_install)
+        if (
+            self.state.collision_count > before_collision_count
+            or self.state.invalid_action_count > before_invalid_action_count
+            or self.state.deadlock_steps > before_deadlock_steps
+            or self.state.manipulation_failure_count > before_manipulation_failures
+        ):
+            self.state.wasted_step_count += 1
         self.state.step_count += 1
         self.state.total_reward += reward
 
@@ -156,6 +213,7 @@ class CollaborativeAssemblyEnv:
         return self.get_agent_observations(), self.get_privileged_state(), reward, done, info
 
     def build_artifact(self, policy_mode: str) -> EpisodeArtifact:
+        construction = self._construction_summaries()
         metrics = AssemblyMetrics(
             success=self.state.current_beam_index >= self.active_beam_count,
             beams_installed=len(self.state.installed_beams),
@@ -166,6 +224,14 @@ class CollaborativeAssemblyEnv:
             invalid_action_count=self.state.invalid_action_count,
             deadlock_steps=self.state.deadlock_steps,
             coordination_efficiency=len(self.state.installed_beams) / max(1, self.state.step_count),
+            structure_completion_rate=float(construction["structure_completion_rate"]),
+            resource_delivery_accuracy=float(construction["resource_delivery_accuracy"]),
+            energy_cost=self.state.energy_cost,
+            idle_step_count=self.state.idle_step_count,
+            wasted_step_count=self.state.wasted_step_count,
+            obstacle_collision_count=self.state.obstacle_collision_count,
+            manipulation_failure_count=self.state.manipulation_failure_count,
+            manipulation_recovery_count=self.state.manipulation_recovery_count,
         )
         return EpisodeArtifact(
             metrics=metrics,
@@ -173,6 +239,50 @@ class CollaborativeAssemblyEnv:
             carrying=self.state.carrying,
             completed_beams=self.state.installed_beams,
             policy_mode=policy_mode,  # type: ignore[arg-type]
+        )
+
+    def get_construction_observation(self) -> ConstructionBrainObservation:
+        construction = self._construction_summaries()
+        resource_inventory = construction["resource_inventory"]
+        blueprint_slots = construction["blueprint_slots"]
+        if not isinstance(resource_inventory, list) or not isinstance(blueprint_slots, list):
+            raise RuntimeError("construction summaries must contain list-based resource and slot state")
+
+        available_options = [
+            TeamOption(index)
+            for index, is_available in enumerate(self.get_team_option_mask())
+            if is_available > 0
+        ]
+        current_beam_name = None
+        if self.state.current_beam_index < self.active_beam_count:
+            current_beam_name = self._current_beam().name
+
+        return ConstructionBrainObservation(
+            backend=self.backend_name,
+            step_count=self.state.step_count,
+            current_beam_index=self.state.current_beam_index,
+            current_beam_name=current_beam_name,
+            agent_positions=list(self.state.agent_positions),
+            carrying=self.state.carrying,
+            completed_beams=list(self.state.installed_beams),
+            obstacle_cells=list(self.config.obstacle_cells),
+            manipulation_attempts=dict(self.state.manipulation_attempts),
+            last_manipulation_failure=self.state.last_manipulation_failure,
+            resources=[ConstructionResourceState.model_validate(item) for item in resource_inventory],
+            blueprint_slots=[BlueprintSlotState.model_validate(item) for item in blueprint_slots],
+            progress=ConstructionProgress(
+                structure_completion_rate=float(construction["structure_completion_rate"]),
+                resource_delivery_accuracy=float(construction["resource_delivery_accuracy"]),
+                energy_cost=self.state.energy_cost,
+                idle_step_count=self.state.idle_step_count,
+                wasted_step_count=self.state.wasted_step_count,
+                collision_count=self.state.collision_count,
+                obstacle_collision_count=self.state.obstacle_collision_count,
+                manipulation_failure_count=self.state.manipulation_failure_count,
+                manipulation_recovery_count=self.state.manipulation_recovery_count,
+                coordination_efficiency=len(self.state.installed_beams) / max(1, self.state.step_count),
+            ),
+            available_options=available_options,
         )
 
     def get_agent_observations(self) -> np.ndarray:
@@ -423,6 +533,7 @@ class CollaborativeAssemblyEnv:
         return result
 
     def get_option_episode_diagnostics(self) -> dict[str, object]:
+        construction = self._construction_summaries()
         return {
             "backend": self.backend_name,
             "backend_status": self.get_backend_status().model_dump(mode="json"),
@@ -433,6 +544,23 @@ class CollaborativeAssemblyEnv:
             "first_beam_completion_step": self.milestones["first_beam_completion_step"],
             "second_beam_pickup_step": self.milestones["second_beam_pickup_step"],
             "second_beam_install_step": self.milestones["second_beam_install_step"],
+            "resource_inventory": construction["resource_inventory"],
+            "blueprint_slots": construction["blueprint_slots"],
+            "construction_metrics": {
+                "structure_completion_rate": construction["structure_completion_rate"],
+                "resource_delivery_accuracy": construction["resource_delivery_accuracy"],
+                "energy_cost": self.state.energy_cost,
+                "idle_step_count": self.state.idle_step_count,
+                "wasted_step_count": self.state.wasted_step_count,
+                "collision_count": self.state.collision_count,
+                "obstacle_collision_count": self.state.obstacle_collision_count,
+                "manipulation_failure_count": self.state.manipulation_failure_count,
+                "manipulation_recovery_count": self.state.manipulation_recovery_count,
+            },
+            "obstacle_cells": [list(cell) for cell in self.config.obstacle_cells],
+            "manipulation_attempts": dict(self.state.manipulation_attempts),
+            "last_manipulation_failure": self.state.last_manipulation_failure,
+            "manipulation_failure_history": list(self.manipulation_failure_history),
             "state_snapshots": [frame.model_dump(mode="json") for frame in self.frame_history],
         }
 
@@ -445,6 +573,8 @@ class CollaborativeAssemblyEnv:
 
     def render_ascii(self) -> str:
         grid = [["." for _ in range(self.config.grid_size)] for _ in range(self.config.grid_size)]
+        for x, y in self.config.obstacle_cells:
+            grid[y][x] = "#"
         for beam in self._available_beams():
             for x, y in [beam.pickup_left, beam.pickup_right]:
                 grid[y][x] = "P"
@@ -465,12 +595,96 @@ class CollaborativeAssemblyEnv:
             collision_count=0,
             invalid_action_count=0,
             deadlock_steps=0,
+            energy_cost=0.0,
+            idle_step_count=0,
+            wasted_step_count=0,
+            obstacle_collision_count=0,
+            manipulation_attempts={},
+            manipulation_failure_count=0,
+            manipulation_recovery_count=0,
+            last_manipulation_failure=None,
         )
+
+    def queue_manipulation_failure(self, phase: str, reason: str) -> None:
+        if phase not in {"grasp", "install"}:
+            raise ValueError(f"unsupported manipulation phase: {phase}")
+        if self.state.current_beam_index >= self.active_beam_count:
+            raise RuntimeError("cannot queue a manipulation failure after task completion")
+        key = self._manipulation_key(self._current_beam().name, phase)
+        self._queued_manipulation_failures.setdefault(key, []).append(reason)
+
+    def _attempt_manipulation(self, beam_name: str, phase: str) -> str | None:
+        key = self._manipulation_key(beam_name, phase)
+        attempt = self.state.manipulation_attempts.get(key, 0) + 1
+        self.state.manipulation_attempts[key] = attempt
+
+        failure_reason = None
+        queued = self._queued_manipulation_failures.get(key, [])
+        if queued:
+            failure_reason = queued.pop(0)
+        else:
+            rule = next(
+                (
+                    item
+                    for item in self.config.manipulation_failures
+                    if item.beam_name == beam_name and item.phase == phase
+                ),
+                None,
+            )
+            if rule is not None and attempt <= rule.fail_first_attempts:
+                failure_reason = rule.reason
+
+        if failure_reason is not None:
+            self.state.manipulation_failure_count += 1
+            self.state.last_manipulation_failure = (
+                f"{beam_name} {phase} attempt {attempt}: {failure_reason}"
+            )
+            self._failed_manipulations.add(key)
+            self.manipulation_failure_history.append(
+                {
+                    "beam_name": beam_name,
+                    "phase": phase,
+                    "attempt": attempt,
+                    "success": False,
+                    "reason": failure_reason,
+                }
+            )
+            return failure_reason
+
+        recovered = key in self._failed_manipulations and key not in self._recovered_manipulations
+        if recovered:
+            self.state.manipulation_recovery_count += 1
+            self._recovered_manipulations.add(key)
+        self.state.last_manipulation_failure = None
+        self.manipulation_failure_history.append(
+            {
+                "beam_name": beam_name,
+                "phase": phase,
+                "attempt": attempt,
+                "success": True,
+                "reason": "recovered" if recovered else "completed",
+            }
+        )
+        return None
+
+    @staticmethod
+    def _manipulation_key(beam_name: str, phase: str) -> str:
+        return f"{beam_name}:{phase}"
 
     def _step_independent(self, actions: list[int]) -> float:
         reward = 0.0
         proposed = [self._apply_motion(position, AssemblyAction(action)) for position, action in zip(self.state.agent_positions, actions)]
-        if proposed[0] == proposed[1]:
+        for index, position in enumerate(proposed):
+            if position in self.config.obstacle_cells and position != self.state.agent_positions[index]:
+                proposed[index] = self.state.agent_positions[index]
+                self.state.collision_count += 1
+                self.state.obstacle_collision_count += 1
+                reward -= self.config.collision_penalty
+        positions_swapped = (
+            proposed[0] == self.state.agent_positions[1]
+            and proposed[1] == self.state.agent_positions[0]
+        )
+        if proposed[0] == proposed[1] or positions_swapped:
             self.state.collision_count += 1
             reward -= self.config.collision_penalty
             return reward
@@ -483,7 +697,8 @@ class CollaborativeAssemblyEnv:
                 moved = True
             next_positions[index] = proposed[index]
         self.state.agent_positions = next_positions
-        if not moved:
+        terminal_actions = {AssemblyAction.GRAB, AssemblyAction.INSTALL}
+        if not moved and any(AssemblyAction(action) not in terminal_actions for action in actions):
             self.state.deadlock_steps += 1
         return reward
 
@@ -496,6 +711,10 @@ class CollaborativeAssemblyEnv:
         if motion in {AssemblyAction.GRAB, AssemblyAction.INSTALL}:
             return 0.0
         proposed = [self._apply_motion(position, motion) for position in self.state.agent_positions]
+        if any(position in self.config.obstacle_cells for position in proposed):
+            self.state.collision_count += 1
+            self.state.obstacle_collision_count += 1
+            return -self.config.collision_penalty
         if proposed[0] == proposed[1]:
             self.state.collision_count += 1
             return -self.config.collision_penalty
@@ -558,6 +777,83 @@ class CollaborativeAssemblyEnv:
         if self.active_stage_index is not None and self.config.curriculum_stage_beams:
             return self.config.curriculum_stage_beams[self.active_stage_index]
         return self.config.beams[: self.active_beam_count]
+
+    def _active_construction_resources(self) -> list[ConstructionResource]:
+        beams = self._available_beams()
+        defaults = [ConstructionResource.from_beam(beam) for beam in beams]
+        if not self.config.resources:
+            return defaults
+        if self.active_stage_index is None and self.active_beam_count == len(self.config.beams):
+            return list(self.config.resources)
+
+        active_beam_names = {beam.name for beam in beams}
+        active_slot_ids = {f"{beam.name}_slot" for beam in beams}
+        resources = [
+            resource
+            for resource in self.config.resources
+            if resource.resource_id in active_beam_names or resource.assigned_slot_id in active_slot_ids
+        ]
+        return resources or defaults
+
+    def _active_blueprint_slots(self) -> list[BlueprintSlot]:
+        beams = self._available_beams()
+        defaults = [BlueprintSlot.from_beam(beam) for beam in beams]
+        if not self.config.blueprint_slots:
+            return defaults
+        if self.active_stage_index is None and self.active_beam_count == len(self.config.beams):
+            return list(self.config.blueprint_slots)
+
+        active_beam_names = {beam.name for beam in beams}
+        active_slot_ids = {f"{beam.name}_slot" for beam in beams}
+        slots = [
+            slot
+            for slot in self.config.blueprint_slots
+            if slot.slot_id in active_slot_ids or slot.required_resource_id in active_beam_names
+        ]
+        return slots or defaults
+
+    def _construction_summaries(self) -> dict[str, object]:
+        resources = self._active_construction_resources()
+        slots = self._active_blueprint_slots()
+        completed_slot_ids = {slot.slot_id for slot in slots if self._blueprint_slot_completed(slot)}
+        delivered_resource_ids = {
+            resource.resource_id
+            for resource in resources
+            if resource.assigned_slot_id in completed_slot_ids or resource.resource_id in self.state.installed_beams
+        }
+
+        return {
+            "resource_inventory": [
+                {
+                    **resource.model_dump(mode="json"),
+                    "delivered": resource.resource_id in delivered_resource_ids,
+                }
+                for resource in resources
+            ],
+            "blueprint_slots": [
+                {
+                    **slot.model_dump(mode="json"),
+                    "completed": slot.slot_id in completed_slot_ids,
+                }
+                for slot in slots
+            ],
+            "structure_completion_rate": len(completed_slot_ids) / max(1, len(slots)),
+            "resource_delivery_accuracy": len(delivered_resource_ids) / max(1, len(resources)),
+        }
+
+    def _blueprint_slot_completed(self, slot: BlueprintSlot) -> bool:
+        installed_beams = set(self.state.installed_beams)
+        if slot.required_resource_id in installed_beams:
+            return True
+        slot_targets = {tuple(cell) for cell in slot.target_cells}
+        for beam in self._available_beams():
+            if beam.name not in installed_beams:
+                continue
+            if slot_targets == {beam.assembly_left, beam.assembly_right}:
+                return True
+            if slot.slot_id == f"{beam.name}_slot":
+                return True
+        return False
 
     def _at_pickup(self) -> bool:
         beam = self._current_beam()
@@ -635,26 +931,183 @@ class CollaborativeAssemblyEnv:
         return [int(AssemblyAction.STAY), int(AssemblyAction.STAY)]
 
     def _joint_actions_towards(self, targets: list[tuple[int, int]], carrying: bool) -> list[int]:
-        actions: list[int] = []
-        for position, target in zip(self.state.agent_positions, targets):
-            actions.append(int(self._motion_towards(position, target)))
-        if carrying and actions[0] != actions[1]:
-            left_position, right_position = self.state.agent_positions
-            left_target, right_target = targets
-            delta = (right_position[0] - left_position[0], right_position[1] - left_position[1])
-            if left_target[0] - left_position[0] != 0 and right_target[0] - right_position[0] != 0:
-                return [actions[0], actions[0]]
-            if left_target[1] - left_position[1] != 0 and right_target[1] - right_position[1] != 0:
-                return [actions[0], actions[0]]
-            candidate_actions = [AssemblyAction.RIGHT, AssemblyAction.LEFT, AssemblyAction.DOWN, AssemblyAction.UP, AssemblyAction.STAY]
-            for candidate in candidate_actions:
-                proposed = [self._apply_motion(position, candidate) for position in self.state.agent_positions]
-                new_delta = (proposed[1][0] - proposed[0][0], proposed[1][1] - proposed[0][1])
-                if new_delta != delta or proposed[0] == proposed[1]:
+        if carrying:
+            path = self._rigid_shortest_path(targets)
+            if path is None or len(path) < 2:
+                return [int(AssemblyAction.STAY), int(AssemblyAction.STAY)]
+            action = self._motion_between(self.state.agent_positions[0], path[1])
+            return [int(action), int(action)]
+
+        at_target = [
+            position == target
+            for position, target in zip(self.state.agent_positions, targets)
+        ]
+        if at_target.count(True) == 1:
+            parked_index = at_target.index(True)
+            moving_index = 1 - parked_index
+            parked_cell = self.state.agent_positions[parked_index]
+            path = self._shortest_path(
+                self.state.agent_positions[moving_index],
+                targets[moving_index],
+                lambda cell: self._cell_is_open(cell) and cell != parked_cell,
+            )
+            actions = [AssemblyAction.STAY, AssemblyAction.STAY]
+            if path is not None and len(path) >= 2:
+                actions[moving_index] = self._motion_between(
+                    self.state.agent_positions[moving_index],
+                    path[1],
+                )
+            return [int(action) for action in actions]
+
+        paths = [
+            self._shortest_path(position, target, self._cell_is_open)
+            for position, target in zip(self.state.agent_positions, targets)
+        ]
+        actions = [
+            AssemblyAction.STAY
+            if path is None or len(path) < 2
+            else self._motion_between(self.state.agent_positions[index], path[1])
+            for index, path in enumerate(paths)
+        ]
+        return [int(action) for action in self._resolve_independent_conflict(actions, targets)]
+
+    def _rigid_shortest_path(
+        self,
+        targets: list[tuple[int, int]],
+    ) -> list[tuple[int, int]] | None:
+        start = self.state.agent_positions[0]
+        companion_offset = (
+            self.state.agent_positions[1][0] - start[0],
+            self.state.agent_positions[1][1] - start[1],
+        )
+        target_offset = (
+            targets[1][0] - targets[0][0],
+            targets[1][1] - targets[0][1],
+        )
+        if companion_offset != target_offset:
+            return None
+
+        def formation_is_open(anchor: tuple[int, int]) -> bool:
+            companion = (
+                anchor[0] + companion_offset[0],
+                anchor[1] + companion_offset[1],
+            )
+            return self._cell_is_open(anchor) and self._cell_is_open(companion)
+
+        return self._shortest_path(start, targets[0], formation_is_open)
+
+    def _shortest_path(
+        self,
+        start: tuple[int, int],
+        target: tuple[int, int],
+        is_valid: Callable[[tuple[int, int]], bool],
+    ) -> list[tuple[int, int]] | None:
+        if start == target:
+            return [start]
+        if not is_valid(target):
+            return None
+
+        frontier = deque([start])
+        previous: dict[tuple[int, int], tuple[int, int] | None] = {start: None}
+        while frontier:
+            current = frontier.popleft()
+            for neighbor in self._ordered_neighbors(current, target):
+                if neighbor in previous or not is_valid(neighbor):
                     continue
-                if self._distance_from_positions(proposed, targets) < self._distance_to_positions(targets):
-                    return [int(candidate), int(candidate)]
-        return actions
+                previous[neighbor] = current
+                if neighbor == target:
+                    path = [target]
+                    parent = previous[target]
+                    while parent is not None:
+                        path.append(parent)
+                        parent = previous[parent]
+                    return list(reversed(path))
+                frontier.append(neighbor)
+        return None
+
+    def _ordered_neighbors(
+        self,
+        position: tuple[int, int],
+        target: tuple[int, int],
+    ) -> list[tuple[int, int]]:
+        preferred: list[AssemblyAction] = []
+        if target[0] != position[0]:
+            preferred.append(AssemblyAction.RIGHT if target[0] > position[0] else AssemblyAction.LEFT)
+        if target[1] != position[1]:
+            preferred.append(AssemblyAction.DOWN if target[1] > position[1] else AssemblyAction.UP)
+        for action in [AssemblyAction.RIGHT, AssemblyAction.LEFT, AssemblyAction.DOWN, AssemblyAction.UP]:
+            if action not in preferred:
+                preferred.append(action)
+        return [
+            neighbor
+            for action in preferred
+            if (neighbor := self._apply_motion(position, action)) != position
+        ]
+
+    def _cell_is_open(self, cell: tuple[int, int]) -> bool:
+        return (
+            0 <= cell[0] < self.config.grid_size
+            and 0 <= cell[1] < self.config.grid_size
+            and cell not in self.config.obstacle_cells
+        )
+
+    def _resolve_independent_conflict(
+        self,
+        actions: list[AssemblyAction],
+        targets: list[tuple[int, int]],
+    ) -> list[AssemblyAction]:
+        proposed = [
+            self._apply_motion(position, action)
+            for position, action in zip(self.state.agent_positions, actions)
+        ]
+        same_destination = proposed[0] == proposed[1]
+        swapped = (
+            proposed[0] == self.state.agent_positions[1]
+            and proposed[1] == self.state.agent_positions[0]
+        )
+        if not same_destination and not swapped:
+            return actions
+
+        at_target = [
+            position == target
+            for position, target in zip(self.state.agent_positions, targets)
+        ]
+        priority = [1, 0] if at_target[0] and not at_target[1] else [0, 1]
+        if at_target[1] and not at_target[0]:
+            priority = [0, 1]
+        for index in priority:
+            other_index = 1 - index
+            other_position = self.state.agent_positions[other_index]
+            path = self._shortest_path(
+                self.state.agent_positions[index],
+                targets[index],
+                lambda cell, blocked=other_position: self._cell_is_open(cell)
+                and cell != blocked,
+            )
+            if path is None or len(path) < 2:
+                continue
+            replanned = self._motion_between(self.state.agent_positions[index], path[1])
+            result = [AssemblyAction.STAY, AssemblyAction.STAY]
+            result[index] = replanned
+            return result
+        return [AssemblyAction.STAY, AssemblyAction.STAY]
+
+    def _motion_between(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+    ) -> AssemblyAction:
+        delta = (end[0] - start[0], end[1] - start[1])
+        actions = {
+            (0, -1): AssemblyAction.UP,
+            (0, 1): AssemblyAction.DOWN,
+            (-1, 0): AssemblyAction.LEFT,
+            (1, 0): AssemblyAction.RIGHT,
+            (0, 0): AssemblyAction.STAY,
+        }
+        if delta not in actions:
+            raise ValueError(f"path contains non-adjacent cells: {start} -> {end}")
+        return actions[delta]
 
     def _motion_towards(self, position: tuple[int, int], target: tuple[int, int]) -> AssemblyAction:
         dx = target[0] - position[0]
@@ -706,4 +1159,10 @@ class CollaborativeAssemblyEnv:
             primitive_step_index=primitive_step_index,
             option_reward=option_reward,
             option_success=option_success,
+            completed_beams=list(self.state.installed_beams),
+            completed_component_ids=[
+                resource.component_id or resource.resource_id
+                for resource in self._active_construction_resources()
+                if resource.resource_id in self.state.installed_beams
+            ],
         )

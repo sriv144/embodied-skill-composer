@@ -1,6 +1,17 @@
+from numbers import Real
+from pathlib import Path
+
+import yaml
+
 from embodied_skill_composer.assembly.baseline import scripted_joint_policy
 from embodied_skill_composer.assembly.env import CollaborativeAssemblyEnv
-from embodied_skill_composer.assembly.models import AssemblyScenarioConfig, BeamTask, TeamOption
+from embodied_skill_composer.assembly.models import (
+    AssemblyScenarioConfig,
+    BeamTask,
+    BlueprintSlot,
+    ConstructionResource,
+    TeamOption,
+)
 
 
 def build_env() -> CollaborativeAssemblyEnv:
@@ -96,6 +107,55 @@ def test_assembly_env_reset_shapes() -> None:
     assert observations.shape[0] == 2
     assert state.ndim == 1
     assert env.obs_dim == observations.shape[1]
+
+
+def test_default_assembly_yaml_derives_construction_metadata() -> None:
+    workspace = Path(__file__).resolve().parents[1]
+    config_path = workspace / "configs" / "assembly_env.yaml"
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    config = AssemblyScenarioConfig.model_validate(data)
+
+    assert config.resources == []
+    assert config.blueprint_slots == []
+    assert len(config.derived_resources()) == len(config.beams)
+    assert len(config.derived_blueprint_slots()) == len(config.beams)
+
+
+def test_explicit_resource_blueprint_config_validates() -> None:
+    config = AssemblyScenarioConfig(
+        grid_size=10,
+        max_steps=60,
+        agent_starts=[(0, 2), (0, 3)],
+        beams=[
+            BeamTask(
+                name="beam_alpha",
+                pickup_left=(2, 2),
+                pickup_right=(2, 3),
+                assembly_left=(7, 6),
+                assembly_right=(7, 7),
+            )
+        ],
+        resources=[
+            ConstructionResource(
+                resource_id="steel_beam_alpha",
+                resource_type="steel_beam",
+                source_cells=[(2, 2), (2, 3)],
+                assigned_slot_id="slot_alpha",
+            )
+        ],
+        blueprint_slots=[
+            BlueprintSlot(
+                slot_id="slot_alpha",
+                resource_type="steel_beam",
+                target_cells=[(7, 6), (7, 7)],
+                required_resource_id="steel_beam_alpha",
+            )
+        ],
+    )
+
+    assert config.resources[0].resource_id == "steel_beam_alpha"
+    assert config.blueprint_slots[0].slot_id == "slot_alpha"
 
 
 def test_scripted_policy_solves_single_beam_task() -> None:
@@ -201,6 +261,39 @@ def test_scripted_team_option_solves_single_beam() -> None:
     assert artifact.metrics.success is True
     assert diagnostics["selected_options"] == selected_options
     assert selected_options == ["go_pickup", "grab", "go_assembly", "install"]
+
+
+def test_default_construction_diagnostics_are_beam_backed() -> None:
+    env = build_two_beam_env()
+    env.reset(seed=7)
+
+    diagnostics = env.get_option_episode_diagnostics()
+
+    assert len(diagnostics["resource_inventory"]) == 2
+    assert len(diagnostics["blueprint_slots"]) == 2
+    assert diagnostics["resource_inventory"][0]["resource_id"] == "beam_alpha"
+    assert diagnostics["blueprint_slots"][0]["required_resource_id"] == "beam_alpha"
+
+
+def test_scripted_team_options_complete_construction_metrics() -> None:
+    env = build_two_beam_env()
+    env.reset(seed=7)
+    done = False
+    while not done:
+        result = env.execute_team_option(env.scripted_team_option())
+        done = result.done
+
+    artifact = env.build_artifact(policy_mode="scripted")
+    diagnostics = env.get_option_episode_diagnostics()
+
+    assert artifact.metrics.success is True
+    assert artifact.metrics.structure_completion_rate == 1.0
+    assert artifact.metrics.resource_delivery_accuracy == 1.0
+    assert isinstance(artifact.metrics.energy_cost, Real)
+    assert isinstance(artifact.metrics.idle_step_count, int)
+    assert isinstance(artifact.metrics.wasted_step_count, int)
+    assert diagnostics["construction_metrics"]["structure_completion_rate"] == 1.0
+    assert diagnostics["construction_metrics"]["resource_delivery_accuracy"] == 1.0
 
 
 def test_recovery_options_activate_after_first_beam_install() -> None:

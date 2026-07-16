@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    env:
+      MUJOCO_GL: osmesa
+      PYOPENGL_PLATFORM: osmesa
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install headless MuJoCo rendering
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libosmesa6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+      - name: Install research dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-construction-rl.txt -r requirements-sim-mujoco.txt -r requirements-sim-coppelia.txt -r requirements-rl.txt
+      - name: Ruff
+        run: python -m ruff check src scripts tests
+      - name: Tests
+        run: python -m pytest -q
+
+  workbench:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workbench
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: workbench/package-lock.json
+      - run: npm ci
+      - run: npm run build:static
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/scan_secrets.py
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

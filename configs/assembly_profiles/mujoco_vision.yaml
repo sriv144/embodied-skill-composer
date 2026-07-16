@@ -1,0 +1,30 @@
+name: mujoco_vision
+backend: mujoco_local
+device: cpu
+requires_linux: false
+requires_nvidia_gpu: false
+manipulation_alignment_tolerance_m: 0.03
+manipulation_min_grip_force_n: 25.0
+physical_sensors:
+  enabled: true
+  alignment_noise_std_m: 0.002
+  force_noise_std_n: 1.5
+  joint_position_noise_std_m: 0.0004
+  dropout_probability: 0.15
+  ema_alpha: 0.6
+visual_perception:
+  enabled: true
+  camera_name: perception_cam
+  width: 256
+  height: 256
+  minimum_component_area_px: 30
+  tracking_enabled: true
+  tracking_max_missed_frames: 32
+  tracking_max_match_distance_m: 4.0
+  prediction_confidence_decay: 0.9
+  estimated_state_control_enabled: true
+  control_min_track_confidence: 0.1
+  grasp_agent_resource_tolerance_m: 0.3
+  install_agent_resource_tolerance_m: 0.3
+  install_resource_blueprint_tolerance_m: 0.3
+notes: RGB/depth assembly perception with noisy physical sensing for local Physical AI experiments.

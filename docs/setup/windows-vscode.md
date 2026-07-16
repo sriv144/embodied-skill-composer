@@ -10,6 +10,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pip install -r requirements-rl.txt
 .\.venv\Scripts\python.exe -m pip install -r requirements-sim-mujoco.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-sim-coppelia.txt
 ```
 
 ## Main Commands
@@ -20,10 +21,18 @@ Run these from the project root:
 .\.venv\Scripts\python.exe scripts\benchmark_assembly_policies.py --runtime-profile configs\assembly_profiles\local_dev.yaml --episodes 3
 .\.venv\Scripts\python.exe scripts\eval_assembly_options.py --policy learned --runtime-profile configs\assembly_profiles\local_dev.yaml --episodes 3
 .\.venv\Scripts\python.exe scripts\eval_assembly_policy.py --policy learned --runtime-profile configs\assembly_profiles\local_dev.yaml --episodes 3
+.\.venv\Scripts\python.exe scripts\run_construction_brain.py --brain heuristic --runtime-profile configs\assembly_profiles\local_dev.yaml --episodes 1
+.\.venv\Scripts\python.exe scripts\run_construction_brain.py --brain heuristic --env-config configs\assembly_obstacles.yaml --runtime-profile configs\assembly_profiles\mujoco_local.yaml --episodes 1
+.\.venv\Scripts\python.exe scripts\run_construction_brain.py --brain heuristic --env-config configs\assembly_recovery.yaml --runtime-profile configs\assembly_profiles\mujoco_local.yaml --episodes 1
+.\.venv\Scripts\python.exe scripts\run_construction_brain.py --brain heuristic --env-config configs\assembly_recovery.yaml --runtime-profile configs\assembly_profiles\mujoco_sensing.yaml --episodes 20
+.\.venv\Scripts\python.exe scripts\capture_assembly_perception.py --output-dir artifacts\assembly_perception\initial
+.\.venv\Scripts\python.exe scripts\run_construction_brain.py --brain heuristic --env-config configs\assembly_recovery.yaml --runtime-profile configs\assembly_profiles\mujoco_vision.yaml --episodes 20
 .\.venv\Scripts\python.exe -m pytest -q --basetemp .pytest_tmp
 .\.venv\Scripts\python.exe scripts\visualize_assembly_episode.py --policy scripted --runtime-profile configs\assembly_profiles\local_dev.yaml
 .\.venv\Scripts\python.exe scripts\run_mujoco_assembly.py --policy scripted --runtime-profile configs\assembly_profiles\mujoco_local.yaml --record artifacts\mujoco_scripted.mp4
 .\.venv\Scripts\python.exe scripts\check_gpu_runtime.py --runtime-profile configs\assembly_profiles\local_gpu.yaml
+.\.venv\Scripts\python.exe scripts\check_coppelia_runtime.py
+.\.venv\Scripts\python.exe scripts\run_coppelia_assembly.py
 ```
 
 ## Fix Local CUDA PyTorch
@@ -52,8 +61,12 @@ The helper script uses Windows BITS because the CUDA torch wheel is large and re
   - `learned_options`: success `1.000`
   - `low_level_learned`: success `0.000`
 - `visualize_assembly_episode.py` writes per-frame PNGs plus a `summary.png` into `artifacts/assembly_playback/`
-- `run_mujoco_assembly.py` opens the MuJoCo scene with `--gui` and writes an MP4 with `--record`
+- `run_mujoco_assembly.py` uses physics-stepped pose tracking, opens the scene with `--gui`, and writes the physical trajectory with `--record`
+- `mujoco_sensing.yaml` adds reproducible physical sensor noise, filtering, dropout, and brain safety holds
+- `mujoco_vision.yaml` adds RGB/depth pose estimation and oracle-only perception evaluation
 - `check_gpu_runtime.py` confirms whether the active Python environment can actually see CUDA
+- `check_coppelia_runtime.py` verifies the CoppeliaSim executable and live ZeroMQ endpoint
+- `run_coppelia_assembly.py` generates and saves the first CoppeliaSim construction scene
 
 ## VS Code
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import matplotlib
 import pytest
+import yaml
 
 from embodied_skill_composer.assembly.backends import build_assembly_backend
 from embodied_skill_composer.assembly.gpu import inspect_gpu_runtime
@@ -85,6 +86,8 @@ def test_mujoco_backend_factory_and_scripted_episode(tmp_path: Path) -> None:
     )
     assert isinstance(backend, MuJoCoAssemblyBackend)
     assert backend.get_backend_status().is_ready is True
+    assert backend.model.nmocap == 2 + len(backend.config.beams)
+    assert backend.model.neq == 2 + 2 * len(backend.config.beams)
 
     backend.reset(seed=7)
     done = False
@@ -95,12 +98,36 @@ def test_mujoco_backend_factory_and_scripted_episode(tmp_path: Path) -> None:
     artifact = backend.build_artifact(policy_mode="scripted")
     diagnostics = backend.get_option_episode_diagnostics()
     recording = backend.record_episode(tmp_path / "mujoco_scripted.mp4", diagnostics=diagnostics, width=640, height=480)
+    recorded_diagnostics = backend.get_option_episode_diagnostics()
+    physics = recorded_diagnostics["mujoco_physics_control"]
 
     assert artifact.metrics.success is True
     assert artifact.metrics.beams_installed == 2
     assert diagnostics["backend"] == "mujoco_local"
     assert diagnostics["selected_options"]
+    assert physics["mode"] == "mocap_weld_pose_tracking"
+    control_segment_steps = physics["control_substeps"] + physics["settle_substeps"]
+    grasp_preparations = sum(
+        check["phase"] == "grasp" and check["beam_represented_in_model"]
+        for check in physics["physical_manipulation_checks"]
+    )
+    attachments = sum(
+        event["event"] == "attached" for event in physics["attachment_events"]
+    )
+    gripper_commands = len(physics["articulated_grippers"]["events"])
+    assert physics["physics_step_count"] == (
+        artifact.metrics.step_count * control_segment_steps
+        + grasp_preparations * control_segment_steps
+        + attachments * physics["settle_substeps"]
+        + gripper_commands * physics["articulated_grippers"]["control_steps"]
+    )
+    assert physics["trajectory_frame_count"] > len(diagnostics["state_snapshots"])
+    assert physics["max_target_error"] < 0.02
+    assert physics["recording_source"] == "physics_trajectory"
     assert recording.exists()
+    import imageio.v3 as imageio
+
+    assert imageio.imread(recording, index=0).shape == (480, 640, 3)
 
 
 @pytest.mark.skipif(
@@ -193,6 +220,12 @@ def test_vscode_tasks_and_docs_stay_in_sync() -> None:
         "Assembly Benchmark": "scripts\\benchmark_assembly_policies.py --runtime-profile configs\\assembly_profiles\\local_dev.yaml --episodes 3",
         "Hierarchical Eval": "scripts\\eval_assembly_options.py --policy learned --runtime-profile configs\\assembly_profiles\\local_dev.yaml --episodes 3",
         "Low-Level Eval": "scripts\\eval_assembly_policy.py --policy learned --runtime-profile configs\\assembly_profiles\\local_dev.yaml --episodes 3",
+        "ConstructionBrain Heuristic": "scripts\\run_construction_brain.py --brain heuristic --runtime-profile configs\\assembly_profiles\\local_dev.yaml --episodes 1",
+        "ConstructionBrain MuJoCo Obstacles": "scripts\\run_construction_brain.py --brain heuristic --env-config configs\\assembly_obstacles.yaml --runtime-profile configs\\assembly_profiles\\mujoco_local.yaml --episodes 1",
+        "ConstructionBrain MuJoCo Recovery": "scripts\\run_construction_brain.py --brain heuristic --env-config configs\\assembly_recovery.yaml --runtime-profile configs\\assembly_profiles\\mujoco_local.yaml --episodes 1",
+        "ConstructionBrain MuJoCo Sensing": "scripts\\run_construction_brain.py --brain heuristic --env-config configs\\assembly_recovery.yaml --runtime-profile configs\\assembly_profiles\\mujoco_sensing.yaml --episodes 20",
+        "Assembly Perception Capture": "scripts\\capture_assembly_perception.py --output-dir artifacts\\assembly_perception\\initial",
+        "ConstructionBrain MuJoCo Vision": "scripts\\run_construction_brain.py --brain heuristic --env-config configs\\assembly_recovery.yaml --runtime-profile configs\\assembly_profiles\\mujoco_vision.yaml --episodes 20",
         "Pytest": "-m pytest -q --basetemp .pytest_tmp",
     }
 
@@ -201,3 +234,74 @@ def test_vscode_tasks_and_docs_stay_in_sync() -> None:
         rendered_args = " ".join(task["args"])
         assert command_fragment in rendered_args
         assert command_fragment in windows_doc or command_fragment in readme
+
+
+def test_project_vision_and_roadmap_docs_are_linked() -> None:
+    workspace = Path(__file__).resolve().parents[1]
+    readme = (workspace / "README.md").read_text(encoding="utf-8")
+    vision = (workspace / "docs" / "vision.md").read_text(encoding="utf-8")
+    roadmap = (workspace / "docs" / "roadmap.md").read_text(encoding="utf-8")
+    research = (workspace / "docs" / "research-landscape.md").read_text(
+        encoding="utf-8"
+    )
+    asset_manifest = (workspace / "assets" / "ASSETS.md").read_text(
+        encoding="utf-8"
+    )
+    asset_catalog = (
+        workspace / "configs" / "construction_asset_catalog.yaml"
+    ).read_text(encoding="utf-8")
+
+    assert "[vision.md](docs/vision.md)" in readme
+    assert "[roadmap.md](docs/roadmap.md)" in readme
+    assert "Physical AI" in vision
+    assert "AI construction swarm simulator" in vision
+    assert "resources" in vision
+    assert "blueprint" in vision
+    assert "AI brain" in vision
+    assert "mission planner" in vision.lower()
+    assert "Isaac Lab" in vision
+    assert "Phase 1: Stabilize The Research Workbench" in roadmap
+    assert "CoppeliaSim" in roadmap
+    assert "MuJoCo" in roadmap
+    assert "Isaac Lab" in roadmap
+    assert "Blender is optional" in roadmap
+    assert "Do not require ROS 2 yet" in roadmap
+    assert "python scripts\\run_copilot.py nvidia-check" in roadmap
+    assert "python scripts\\run_construction_brain.py --brain heuristic --episodes 1" in readme
+    assert "configs\\assembly_profiles\\mujoco_sensing.yaml" in readme
+    assert "Physical Sensing v0" in roadmap
+    assert "Visual Perception v0" in roadmap
+    assert "Tracking and Occlusion Recovery v0" in roadmap
+    assert "Estimated-State Control v0" in roadmap
+    assert "CoppeliaSim Backend Spike v0" in roadmap
+    assert "KUKA YouBot" in readme
+    assert "blueprint-to-scene" in readme
+    assert "CC0-1.0" in asset_manifest
+    assert "redistributed: false" in asset_catalog
+    assert "wall_panel" in asset_catalog
+    assert "gable_roof" in asset_catalog
+    assert "scripts\\capture_assembly_perception.py" in readme
+    assert "scripts\\check_coppelia_runtime.py" in readme
+    assert "scripts\\run_coppelia_assembly.py" in readme
+    assert "scripts\\run_modular_construction.py" in readme
+    assert "scripts\\preview_construction_assets.py" in readme
+    assert "Modular Room v0 is complete" in roadmap
+    assert "Fabrica" in research
+    assert "WorkBenchMark" in research
+    assert "Learn2Assemble" in research
+    assert "TERMES" in research
+    assert "Status: active" in roadmap
+
+
+def test_construction_asset_catalog_references_local_meshes() -> None:
+    workspace = Path(__file__).resolve().parents[1]
+    catalog_path = workspace / "configs" / "construction_asset_catalog.yaml"
+    catalog = yaml.safe_load(catalog_path.read_text(encoding="utf-8"))
+
+    assert catalog["version"] == 1
+    assert catalog["sources"]["kenney_modular_buildings"]["license"] == "CC0-1.0"
+    assert catalog["sources"]["coppeliasim_bundled_models"]["redistributed"] is False
+    for component in catalog["components"].values():
+        mesh_path = workspace / component["visual_mesh"]
+        assert mesh_path.is_file(), mesh_path
+        assert mesh_path.with_suffix(".mtl").is_file(), mesh_path.with_suffix(".mtl")
