@@ -5,7 +5,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, cast
 
 import numpy as np
 
@@ -17,6 +17,7 @@ from embodied_skill_composer.assembly.models import (
     AssemblyScenarioConfig,
     AssetCatalog,
     BackendStatus,
+    BlueprintSlot,
     ConstructionBrainObservation,
     ConstructionResource,
     CoppeliaSimConfig,
@@ -228,8 +229,10 @@ class CoppeliaSimAssemblyBackend:
     def __post_init__(self) -> None:
         self.logical_env = CollaborativeAssemblyEnv(self.config, seed=self.seed)
         self._workspace_root = Path(__file__).resolve().parents[3]
-        self._client = None
-        self._sim = None
+        # The ZeroMQ remote API is dynamically imported and intentionally
+        # untyped at this optional dependency boundary.
+        self._client: Any = None
+        self._sim: Any = None
         self._root_handle: int | None = None
         self._camera_handle: int | None = None
         self._camera_handles: dict[str, int] = {}
@@ -386,7 +389,10 @@ class CoppeliaSimAssemblyBackend:
         self._advance_simulation()
         return result
 
-    def build_artifact(self, policy_mode: str) -> EpisodeArtifact:
+    def build_artifact(
+        self,
+        policy_mode: Literal["scripted", "learned", "brain"],
+    ) -> EpisodeArtifact:
         return self.logical_env.build_artifact(policy_mode=policy_mode)
 
     def get_agent_observations(self) -> np.ndarray:
@@ -570,11 +576,11 @@ class CoppeliaSimAssemblyBackend:
             if output_path.suffix.lower() == ".gif":
                 imageio.mimsave(
                     output_path,
-                    rendered_frames,
+                    cast(Any, rendered_frames),
                     duration=1000 / fps,
                 )
             else:
-                imageio.mimsave(output_path, rendered_frames, fps=fps)
+                imageio.mimsave(output_path, cast(Any, rendered_frames), fps=fps)
             recording_path = output_path
             self._recording_fallback_reason = None
         except Exception as exc:
@@ -625,7 +631,7 @@ class CoppeliaSimAssemblyBackend:
         )
         self._sim.setObjectInt32Param(handle, self._sim.shapeintparam_static, 1)
         self._object_handles[spec.alias] = handle
-        return handle
+        return int(handle)
 
     def _load_asset_catalog(self) -> None:
         config = self.runtime_profile.coppelia
@@ -707,7 +713,7 @@ class CoppeliaSimAssemblyBackend:
         self._sim.setObjectOrientation(handle, list(orientation))
         self._sim.setObjectInt32Param(handle, self._sim.shapeintparam_static, 1)
         self._object_handles[spec.alias] = handle
-        return handle
+        return int(handle)
 
     def _create_robot_model(self, spec: CoppeliaSceneObjectSpec) -> int:
         config = self.runtime_profile.coppelia
@@ -734,7 +740,7 @@ class CoppeliaSimAssemblyBackend:
         self._sim.setObjectOrientation(handle, [0.0, 0.0, spec.yaw_radians])
         self._object_handles[spec.alias] = handle
         self._loaded_robot_models += 1
-        return handle
+        return int(handle)
 
     def _robot_model_available(self) -> bool:
         config = self.runtime_profile.coppelia
@@ -789,7 +795,7 @@ class CoppeliaSimAssemblyBackend:
             )
             self._sim.setObjectOrientation(handle, [math.pi, 0.0, 0.0])
         self._object_handles[alias] = handle
-        return handle
+        return int(handle)
 
     def _set_camera_look_at(
         self,
@@ -921,12 +927,14 @@ class CoppeliaSimAssemblyBackend:
         for beam in self.config.beams:
             alias = f"construction_resource_{beam.name}"
             if beam.name in installed:
-                slot = slots.get(beam.name)
-                if slot is not None and slot.target_pose is not None:
-                    position = slot.target_pose.position_m
+                target_slot = slots.get(beam.name)
+                if target_slot is not None and target_slot.target_pose is not None:
+                    position = target_slot.target_pose.position_m
                     self._set_orientation(
                         alias,
-                        self._resource_target_orientation(resources.get(beam.name), slot),
+                        self._resource_target_orientation(
+                            resources.get(beam.name), target_slot
+                        ),
                     )
                 else:
                     position = self._beam_center(
@@ -960,8 +968,10 @@ class CoppeliaSimAssemblyBackend:
     def _resource_target_orientation(
         self,
         resource: ConstructionResource | None,
-        slot,
+        slot: BlueprintSlot,
     ) -> tuple[float, float, float]:
+        if slot.target_pose is None:
+            raise ValueError("target orientation requires a blueprint target pose")
         target = slot.target_pose.rotation_rpy_degrees
         asset_rotation = (0.0, 0.0, 0.0)
         if (
@@ -973,9 +983,10 @@ class CoppeliaSimAssemblyBackend:
             asset_rotation = self._asset_catalog.components[
                 resource.asset_key
             ].orientation_rpy_degrees
-        return tuple(
-            math.radians(target[index] + asset_rotation[index])
-            for index in range(3)
+        return (
+            math.radians(target[0] + asset_rotation[0]),
+            math.radians(target[1] + asset_rotation[1]),
+            math.radians(target[2] + asset_rotation[2]),
         )
 
     def _beam_center(

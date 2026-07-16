@@ -85,6 +85,7 @@ def main() -> int:
         if args.controller == "auction":
             return auction_temporal_actions(active_env)
         if args.controller == "cp_sat":
+            assert priority is not None
             return cp_sat_expert_actions(active_env, priority)
         assert bundle is not None
         return policy_actions(
@@ -144,9 +145,10 @@ def main() -> int:
 
 
 def _report(controller: str, diagnostics: dict[str, object]) -> str:
-    logical = diagnostics.get("logical_metrics") or {}
-    measured = float(diagnostics["measured_duration_s"])
-    planned = float(logical.get("makespan_s", 0))
+    raw_logical = diagnostics.get("logical_metrics")
+    logical = raw_logical if isinstance(raw_logical, dict) else {}
+    measured = _numeric_value(diagnostics.get("measured_duration_s"), "measured_duration_s")
+    planned = _numeric_value(logical.get("makespan_s", 0), "makespan_s")
     return "\n".join(
         [
             "# Dynamic Coppelia Construction Run",
@@ -168,6 +170,12 @@ def _report(controller: str, diagnostics: dict[str, object]) -> str:
             "",
         ]
     )
+
+
+def _numeric_value(value: object, field_name: str) -> float:
+    if not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be numeric, got {type(value).__name__}")
+    return float(value)
 
 
 if __name__ == "__main__":

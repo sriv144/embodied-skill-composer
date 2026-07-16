@@ -1,5 +1,31 @@
 # Roadmap: From Two-Robot Assembly To Physical AI Construction Swarms
 
+## Construction Intelligence v1 Completion Roadmap
+
+- [x] Foundation implementation
+- [x] Phase 1 — publish and protect the checkpoint
+- [ ] Phase 2 — quality, reproducibility, and durable jobs
+- [ ] Phase 3 — freeze the research protocol
+- [ ] Phase 4 — run the learned-policy evidence
+- [ ] Phase 5 — complete dynamic Coppelia evidence
+- [ ] Phase 6 — complete the product workbench
+- [ ] Phase 7 — publish Construction Intelligence v1.0.0
+
+Phase evidence:
+
+| Phase | Acceptance evidence |
+| --- | --- |
+| 1 | PR #19 merged as `8d88fa8`; protected `main`; Python, workbench, and secrets checks green; native secret scanning and push protection enabled; Pages preview returned HTTP 200. |
+| 2 | Local gates passed on `codex/phase-2-hardening`: 213 tests passed and 2 live-Coppelia tests skipped; combined statement/branch coverage is 82.19%; Ruff, full-source mypy (111 files), `pip check`, compile, secret scan, lock regeneration, and static build passed. The durable runner now has full-state resume, atomic claim-fenced finalization, source/environment execution checks, and PID-reuse-safe stale-worker reconciliation. A clean committed subprocess smoke plus remote PR checks and merge remain before the phase is checked. See [reproducibility](construction-intelligence-v1-reproducibility.md). |
+| 3 | Pending versioned protocol manifest and split-isolation smoke evidence. |
+| 4 | Pending 20 research runs and held-out report. |
+| 5 | Pending live full-cottage nominal and unavailable-robot evidence. |
+| 6 | Pending editor, complete lab UX, accessibility, and browser test gates. |
+| 7 | Pending canonical artifact publication, tag, and release. |
+
+The checklist advances only after a phase's branch is reviewed, required checks are green, and the linked
+evidence exists. Product work may proceed while the serial GPU queue runs.
+
 ## Construction Intelligence v1: Learned Swarm Brain
 
 Status: active. The implementation checkpoint is complete; long research training and live dynamic

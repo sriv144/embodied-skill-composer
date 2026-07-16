@@ -3,13 +3,21 @@ from __future__ import annotations
 from collections import Counter
 
 from embodied_skill_composer.core.interfaces import SimulationAdapter
-from embodied_skill_composer.core.models import ObjectState, PerceptionReport, SensorObservation, TaskSpec, WorldState
+from embodied_skill_composer.core.models import (
+    ObjectState,
+    PerceptionReport,
+    SensorObservation,
+    TaskSpec,
+    WorldState,
+)
 
 
 class OraclePerception:
     mode = "oracle"
 
-    def build_world(self, adapter: SimulationAdapter, task: TaskSpec) -> tuple[WorldState, PerceptionReport]:
+    def build_world(
+        self, adapter: SimulationAdapter, task: TaskSpec
+    ) -> tuple[WorldState, PerceptionReport]:
         if hasattr(adapter, "get_oracle_world_state"):
             world = getattr(adapter, "get_oracle_world_state")()
         else:
@@ -19,7 +27,11 @@ class OraclePerception:
             mode=self.mode,
             detected_objects=detected,
             missed_targets=[name for name in task.target_objects if name not in detected],
-            station_predictions={obj.station_name or "unknown": obj.name for obj in world.objects.values() if obj.station_name},
+            station_predictions={
+                obj.station_name or "unknown": obj.name
+                for obj in world.objects.values()
+                if obj.station_name
+            },
             confidence_by_object={name: 1.0 for name in detected},
         )
         return world, report
@@ -34,8 +46,12 @@ class ClassicalWarehousePerception:
         (220, 200, 80): "yellow",
     }
 
-    def build_world(self, adapter: SimulationAdapter, task: TaskSpec) -> tuple[WorldState, PerceptionReport]:
-        if not hasattr(adapter, "capture_observation") or not hasattr(adapter, "get_oracle_world_state"):
+    def build_world(
+        self, adapter: SimulationAdapter, task: TaskSpec
+    ) -> tuple[WorldState, PerceptionReport]:
+        if not hasattr(adapter, "capture_observation") or not hasattr(
+            adapter, "get_oracle_world_state"
+        ):
             raise TypeError("classical warehouse perception requires a collection adapter")
         observation: SensorObservation = getattr(adapter, "capture_observation")()
         oracle_world: WorldState = getattr(adapter, "get_oracle_world_state")()
@@ -48,7 +64,12 @@ class ClassicalWarehousePerception:
             sampled: list[tuple[int, int, int]] = []
             for y in range(y_center - 8, y_center + 8):
                 for x in range(x_center - 18, x_center + 18):
-                    pixel = tuple(observation.rgb[y][x])
+                    raw_pixel = observation.rgb[y][x]
+                    pixel = (
+                        int(raw_pixel[0]),
+                        int(raw_pixel[1]),
+                        int(raw_pixel[2]),
+                    )
                     if pixel != (230, 230, 230) and pixel != (245, 245, 245):
                         sampled.append(pixel)
             if not sampled:
@@ -64,7 +85,9 @@ class ClassicalWarehousePerception:
                 matching = [
                     obj
                     for obj in oracle_world.objects.values()
-                    if obj.color_name == color_name and obj.station_name == station_name and not obj.collected
+                    if obj.color_name == color_name
+                    and obj.station_name == station_name
+                    and not obj.collected
                 ]
                 if not matching:
                     continue
@@ -72,7 +95,9 @@ class ClassicalWarehousePerception:
                 predicted_names.append(obj.name)
                 detected_objects[obj.name] = obj
                 confidence[obj.name] = min(0.95, count / max(1, len(sampled)))
-            station_predictions[station_name] = ",".join(predicted_names) if predicted_names else None
+            station_predictions[station_name] = (
+                ",".join(predicted_names) if predicted_names else None
+            )
 
         perceived_world = WorldState(
             robot=oracle_world.robot,

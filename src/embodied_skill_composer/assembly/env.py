@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 from random import Random
-from typing import Callable
+from typing import Callable, Literal
 
 import numpy as np
 
@@ -13,6 +13,7 @@ from embodied_skill_composer.assembly.models import (
     AssemblyPlaybackFrame,
     AssemblyScenarioConfig,
     BackendStatus,
+    BeamTask,
     BlueprintSlot,
     BlueprintSlotState,
     ConstructionBrainObservation,
@@ -130,9 +131,19 @@ class CollaborativeAssemblyEnv:
             self.active_beam_count = len(self._available_beams())
             return
         self.active_stage_index = None
-        self.active_beam_count = max(1, min(int(beam_count), len(self.config.beams)))
+        requested_beam_count = len(self.config.beams) if beam_count is None else beam_count
+        self.active_beam_count = max(1, min(requested_beam_count, len(self.config.beams)))
 
-    def step(self, actions: list[int]) -> tuple[np.ndarray, np.ndarray, float, bool, dict]:
+    def step(
+        self,
+        actions: list[int],
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        float,
+        bool,
+        dict[str, str | float | int | bool | None],
+    ]:
         if len(actions) != self.num_agents:
             raise ValueError(f"expected {self.num_agents} actions, got {len(actions)}")
         beam = self._current_beam()
@@ -146,7 +157,7 @@ class CollaborativeAssemblyEnv:
         before_manipulation_failures = self.state.manipulation_failure_count
         self.state.energy_cost += float(sum(1 for action in actions if AssemblyAction(action) != AssemblyAction.STAY))
         self.state.idle_step_count += sum(1 for action in actions if AssemblyAction(action) == AssemblyAction.STAY)
-        info = {
+        info: dict[str, str | float | int | bool | None] = {
             "picked": False,
             "installed": False,
             "manipulation_failed": False,
@@ -212,7 +223,10 @@ class CollaborativeAssemblyEnv:
 
         return self.get_agent_observations(), self.get_privileged_state(), reward, done, info
 
-    def build_artifact(self, policy_mode: str) -> EpisodeArtifact:
+    def build_artifact(
+        self,
+        policy_mode: Literal["scripted", "learned", "brain"],
+    ) -> EpisodeArtifact:
         construction = self._construction_summaries()
         metrics = AssemblyMetrics(
             success=self.state.current_beam_index >= self.active_beam_count,
@@ -224,8 +238,14 @@ class CollaborativeAssemblyEnv:
             invalid_action_count=self.state.invalid_action_count,
             deadlock_steps=self.state.deadlock_steps,
             coordination_efficiency=len(self.state.installed_beams) / max(1, self.state.step_count),
-            structure_completion_rate=float(construction["structure_completion_rate"]),
-            resource_delivery_accuracy=float(construction["resource_delivery_accuracy"]),
+            structure_completion_rate=_metric_float(
+                construction["structure_completion_rate"],
+                "structure_completion_rate",
+            ),
+            resource_delivery_accuracy=_metric_float(
+                construction["resource_delivery_accuracy"],
+                "resource_delivery_accuracy",
+            ),
             energy_cost=self.state.energy_cost,
             idle_step_count=self.state.idle_step_count,
             wasted_step_count=self.state.wasted_step_count,
@@ -238,7 +258,7 @@ class CollaborativeAssemblyEnv:
             final_positions=self.state.agent_positions,
             carrying=self.state.carrying,
             completed_beams=self.state.installed_beams,
-            policy_mode=policy_mode,  # type: ignore[arg-type]
+            policy_mode=policy_mode,
         )
 
     def get_construction_observation(self) -> ConstructionBrainObservation:
@@ -271,8 +291,14 @@ class CollaborativeAssemblyEnv:
             resources=[ConstructionResourceState.model_validate(item) for item in resource_inventory],
             blueprint_slots=[BlueprintSlotState.model_validate(item) for item in blueprint_slots],
             progress=ConstructionProgress(
-                structure_completion_rate=float(construction["structure_completion_rate"]),
-                resource_delivery_accuracy=float(construction["resource_delivery_accuracy"]),
+                structure_completion_rate=_metric_float(
+                    construction["structure_completion_rate"],
+                    "structure_completion_rate",
+                ),
+                resource_delivery_accuracy=_metric_float(
+                    construction["resource_delivery_accuracy"],
+                    "resource_delivery_accuracy",
+                ),
                 energy_cost=self.state.energy_cost,
                 idle_step_count=self.state.idle_step_count,
                 wasted_step_count=self.state.wasted_step_count,
@@ -769,11 +795,11 @@ class CollaborativeAssemblyEnv:
             bonus += self.config.second_beam_install_bonus * (before_second_install - after_install)
         return bonus
 
-    def _current_beam(self):
+    def _current_beam(self) -> BeamTask:
         available_beams = self._available_beams()
         return available_beams[min(self.state.current_beam_index, len(available_beams) - 1)]
 
-    def _available_beams(self):
+    def _available_beams(self) -> list[BeamTask]:
         if self.active_stage_index is not None and self.config.curriculum_stage_beams:
             return self.config.curriculum_stage_beams[self.active_stage_index]
         return self.config.beams[: self.active_beam_count]
@@ -887,7 +913,8 @@ class CollaborativeAssemblyEnv:
         if self._at_positions(staging_targets):
             return False
         pickup_x = self._current_beam().pickup_left[0]
-        return max(position[0] for position in self.state.agent_positions) > pickup_x + 1
+        furthest_x = max(int(position[0]) for position in self.state.agent_positions)
+        return furthest_x > pickup_x + 1
 
     def _pickup_staging_targets(self) -> list[tuple[int, int]]:
         beam = self._current_beam()
@@ -1078,11 +1105,14 @@ class CollaborativeAssemblyEnv:
         for index in priority:
             other_index = 1 - index
             other_position = self.state.agent_positions[other_index]
+
+            def is_open_away_from_other(cell: tuple[int, int]) -> bool:
+                return self._cell_is_open(cell) and cell != other_position
+
             path = self._shortest_path(
                 self.state.agent_positions[index],
                 targets[index],
-                lambda cell, blocked=other_position: self._cell_is_open(cell)
-                and cell != blocked,
+                is_open_away_from_other,
             )
             if path is None or len(path) < 2:
                 continue
@@ -1108,7 +1138,6 @@ class CollaborativeAssemblyEnv:
         if delta not in actions:
             raise ValueError(f"path contains non-adjacent cells: {start} -> {end}")
         return actions[delta]
-
     def _motion_towards(self, position: tuple[int, int], target: tuple[int, int]) -> AssemblyAction:
         dx = target[0] - position[0]
         dy = target[1] - position[1]
@@ -1166,3 +1195,9 @@ class CollaborativeAssemblyEnv:
                 if resource.resource_id in self.state.installed_beams
             ],
         )
+
+
+def _metric_float(value: object, name: str) -> float:
+    if not isinstance(value, (int, float)):
+        raise TypeError(f"construction summary '{name}' must be numeric")
+    return float(value)

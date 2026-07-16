@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw
+from pydantic import BaseModel
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = PROJECT_ROOT / "src"
@@ -30,6 +31,11 @@ from embodied_skill_composer.assembly.runtime import (
 )
 
 
+class AssetPreviewDiagnostics(BaseModel):
+    loaded_asset_meshes: int
+    asset_fallbacks: list[str]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Import and preview every construction asset in CoppeliaSim."
@@ -42,9 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runtime-profile",
         type=Path,
-        default=(
-            PROJECT_ROOT / "configs" / "assembly_profiles" / "coppelia_local.yaml"
-        ),
+        default=(PROJECT_ROOT / "configs" / "assembly_profiles" / "coppelia_local.yaml"),
     )
     parser.add_argument(
         "--output-dir",
@@ -80,9 +84,7 @@ def build_preview_blueprint(asset_keys: list[str]) -> ModularBlueprint:
                 asset_key=asset_key,
                 required_material_id=resource_id,
                 target_cells=[(target_x, target_y), (target_x, target_y + 1)],
-                target_pose=ScenePose(
-                    position_m=(float(column), float(row), 0.5)
-                ),
+                target_pose=ScenePose(position_m=(float(column), float(row), 0.5)),
             )
         )
     return ModularBlueprint(
@@ -149,16 +151,18 @@ def main() -> int:
         )
         add_asset_legend(image_path, asset_keys)
         scene_path = backend.save_scene(output_dir / "asset_preview.ttt")
-        diagnostics = backend.get_option_episode_diagnostics()["coppelia_sim"]
+        diagnostics = AssetPreviewDiagnostics.model_validate(
+            backend.get_option_episode_diagnostics()["coppelia_sim"]
+        )
     finally:
         backend.close()
 
     print(f"Catalog assets: {len(asset_keys)}")
-    print(f"Imported meshes: {diagnostics['loaded_asset_meshes']}")
-    print(f"Primitive fallbacks: {len(diagnostics['asset_fallbacks'])}")
+    print(f"Imported meshes: {diagnostics.loaded_asset_meshes}")
+    print(f"Primitive fallbacks: {len(diagnostics.asset_fallbacks)}")
     print(f"Contact sheet: {image_path}")
     print(f"Scene: {scene_path}")
-    return 0 if not diagnostics["asset_fallbacks"] else 2
+    return 0 if not diagnostics.asset_fallbacks else 2
 
 
 if __name__ == "__main__":

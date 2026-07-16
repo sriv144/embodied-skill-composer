@@ -1,2 +1,2 @@
-pybullet>=3.2.6,<4
-
+# Compatibility entry point. Canonical dependency definitions live in pyproject.toml.
+-e .[pybullet]

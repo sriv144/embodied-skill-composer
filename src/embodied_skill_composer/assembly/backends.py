@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, NoReturn, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -18,6 +18,7 @@ from embodied_skill_composer.assembly.models import (
     ConstructionResourceState,
     EpisodeArtifact,
     OptionExecutionResult,
+    TeamOption,
 )
 from embodied_skill_composer.assembly.mujoco_backend import MuJoCoAssemblyBackend
 
@@ -25,22 +26,56 @@ from embodied_skill_composer.assembly.mujoco_backend import MuJoCoAssemblyBacken
 @runtime_checkable
 class AssemblyTaskBackend(Protocol):
     config: AssemblyScenarioConfig
-    obs_dim: int
-    state_dim: int
-    team_option_obs_dim: int
-    action_size: int
-    option_size: int
     backend_name: str
     is_ready: bool
     readiness_notes: list[str]
+
+    @property
+    def num_agents(self) -> int: ...
+
+    @property
+    def obs_dim(self) -> int: ...
+
+    @property
+    def state_dim(self) -> int: ...
+
+    @property
+    def team_option_obs_dim(self) -> int: ...
+
+    @property
+    def action_size(self) -> int: ...
+
+    @property
+    def option_size(self) -> int: ...
+
+    @property
+    def active_beam_count(self) -> int: ...
+
+    @property
+    def active_stage_index(self) -> int | None: ...
+
+    @property
+    def recovery_option_usage(self) -> dict[str, int]: ...
 
     def reset(self, seed: int | None = None) -> tuple[np.ndarray, np.ndarray]: ...
 
     def set_curriculum_stage(self, beam_count: int | None = None, stage_index: int | None = None) -> None: ...
 
-    def step(self, actions: list[int]) -> tuple[np.ndarray, np.ndarray, float, bool, dict]: ...
+    def step(
+        self,
+        actions: list[int],
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        float,
+        bool,
+        dict[str, str | float | int | bool | None],
+    ]: ...
 
-    def build_artifact(self, policy_mode: str) -> EpisodeArtifact: ...
+    def build_artifact(
+        self,
+        policy_mode: Literal["scripted", "learned", "brain"],
+    ) -> EpisodeArtifact: ...
 
     def get_agent_observations(self) -> np.ndarray: ...
 
@@ -52,7 +87,7 @@ class AssemblyTaskBackend(Protocol):
 
     def get_team_option_mask(self) -> np.ndarray: ...
 
-    def scripted_team_option(self): ...
+    def scripted_team_option(self) -> TeamOption: ...
 
     def execute_team_option(self, option: int, max_primitive_steps: int | None = None) -> OptionExecutionResult: ...
 
@@ -77,6 +112,16 @@ class IsaacLabAssemblyBackend:
     team_option_obs_dim: int = 25
     action_size: int = 7
     option_size: int = 8
+    num_agents: int = 2
+    active_beam_count: int = field(default=0, init=False)
+    active_stage_index: int | None = field(default=None, init=False)
+    recovery_option_usage: dict[str, int] = field(
+        default_factory=lambda: {
+            "reset_to_pickup_route": 0,
+            "reposition_after_install": 0,
+        },
+        init=False,
+    )
     _last_seed: int | None = field(default=None, init=False)
     backend_name: str = field(default="isaac_lab", init=False)
     is_ready: bool = field(default=False, init=False)
@@ -90,6 +135,9 @@ class IsaacLabAssemblyBackend:
         init=False,
     )
 
+    def __post_init__(self) -> None:
+        self.active_beam_count = len(self.config.beams)
+
     def reset(self, seed: int | None = None) -> tuple[np.ndarray, np.ndarray]:
         self._last_seed = self.seed if seed is None else seed
         return (
@@ -98,14 +146,29 @@ class IsaacLabAssemblyBackend:
         )
 
     def set_curriculum_stage(self, beam_count: int | None = None, stage_index: int | None = None) -> None:
-        _ = (beam_count, stage_index)
+        self.active_stage_index = stage_index
+        if beam_count is not None:
+            self.active_beam_count = max(1, min(beam_count, len(self.config.beams)))
+        elif stage_index is None:
+            self.active_beam_count = len(self.config.beams)
 
-    def step(self, actions: list[int]) -> tuple[np.ndarray, np.ndarray, float, bool, dict]:
+    def step(
+        self,
+        actions: list[int],
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        float,
+        bool,
+        dict[str, str | float | int | bool | None],
+    ]:
         _ = actions
         self._raise_not_ready("step")
 
-    def build_artifact(self, policy_mode: str) -> EpisodeArtifact:
-        _ = policy_mode
+    def build_artifact(
+        self,
+        policy_mode: Literal["scripted", "learned", "brain"],
+    ) -> EpisodeArtifact:
         return EpisodeArtifact(
             metrics=AssemblyMetrics(
                 success=False,
@@ -121,7 +184,7 @@ class IsaacLabAssemblyBackend:
             final_positions=list(self.config.agent_starts),
             carrying=False,
             completed_beams=[],
-            policy_mode="scripted",
+            policy_mode=policy_mode,
         )
 
     def get_agent_observations(self) -> np.ndarray:
@@ -139,7 +202,7 @@ class IsaacLabAssemblyBackend:
     def get_team_option_mask(self) -> np.ndarray:
         return np.ones(self.option_size, dtype=np.float32)
 
-    def scripted_team_option(self):
+    def scripted_team_option(self) -> TeamOption:
         self._raise_not_ready("scripted_team_option")
 
     def execute_team_option(self, option: int, max_primitive_steps: int | None = None) -> OptionExecutionResult:
@@ -201,7 +264,7 @@ class IsaacLabAssemblyBackend:
             readiness_notes=notes,
         )
 
-    def _raise_not_ready(self, method_name: str):
+    def _raise_not_ready(self, method_name: str) -> NoReturn:
         raise IsaacBackendNotReadyError(self._error_message(method_name))
 
     def _error_message(self, method_name: str) -> str:

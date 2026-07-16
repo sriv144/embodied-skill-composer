@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -45,7 +46,7 @@ class CentralCritic(nn.Module):
         )
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.net(state).squeeze(-1)
+        return cast(torch.Tensor, self.net(state).squeeze(-1))
 
 
 @dataclass
@@ -378,7 +379,10 @@ class MAPPOTrainer:
         return logits.masked_fill(invalid, -1e4)
 
     def _current_phase_indices(self) -> torch.Tensor:
-        phase = min(self.env.state.current_beam_index, self.num_phases - 1)
+        phase = min(
+            self.env.get_construction_observation().current_beam_index,
+            self.num_phases - 1,
+        )
         return torch.full((self.env.num_agents,), phase, dtype=torch.int64, device=self.device)
 
     def _is_better(self, candidate: dict[str, float], incumbent: dict[str, float]) -> bool:

@@ -1,4 +1,2 @@
-mujoco>=3.7,<4
-imageio>=2.37,<3
-imageio-ffmpeg>=0.6,<1
-opencv-python-headless>=4.10,<5
+# Compatibility entry point. Canonical dependency definitions live in pyproject.toml.
+-e .[sim-mujoco]

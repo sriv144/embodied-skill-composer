@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -17,6 +18,20 @@ from embodied_skill_composer.construction.models import BuildPlan, Pose3D, Vec2,
 
 
 WHEEL_NAMES = ("fl", "rl", "rr", "fr")
+RobotCommandSource = Literal[
+    "settling",
+    "path_follower",
+    "collision_stop",
+    "formation_hold",
+    "recovery",
+]
+
+
+class _DynamicAssignment(BaseModel):
+    module_id: str
+    robot_ids: list[str]
+    approach_routes: dict[str, list[Vec2]]
+    carry_route: list[Vec2]
 
 
 class DynamicCoppeliaConfig(BaseModel):
@@ -140,7 +155,7 @@ class DynamicCoppeliaExecutor:
         lateral_velocity: float,
         angular_velocity: float,
         *,
-        source: str = "path_follower",
+        source: RobotCommandSource = "path_follower",
         target: Vec2 | None = None,
     ) -> RobotCommand:
         self._require_started()
@@ -344,7 +359,11 @@ class DynamicCoppeliaExecutor:
         self.logical_attachments.pop(module_id)
         self.installed_modules.add(module_id)
 
-    def diagnostics(self, *, logical_metrics: dict[str, object] | None = None) -> dict[str, object]:
+    def diagnostics(
+        self,
+        *,
+        logical_metrics: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
         return {
             "backend": "coppelia_sim",
             "controller": self.controller_name,
@@ -369,27 +388,28 @@ class DynamicCoppeliaExecutor:
         }
 
     def _execute_assignments(self, assignments: list[dict[str, object]]) -> None:
+        parsed = [_DynamicAssignment.model_validate(assignment) for assignment in assignments]
         approach_routes = {
-            robot_id: [Vec2.model_validate(point) for point in route]
-            for assignment in assignments
-            for robot_id, route in assignment["approach_routes"].items()
+            robot_id: route
+            for assignment in parsed
+            for robot_id, route in assignment.approach_routes.items()
         }
         self.follow_routes(approach_routes)
-        for assignment in assignments:
+        for assignment in parsed:
             self.attach_logical_payload(
-                str(assignment["module_id"]),
-                list(assignment["robot_ids"]),
+                assignment.module_id,
+                assignment.robot_ids,
             )
-        carry_routes = {}
-        for assignment in assignments:
-            base_route = [Vec2.model_validate(point) for point in assignment["carry_route"]]
-            robot_ids = list(assignment["robot_ids"])
+        carry_routes: dict[str, list[Vec2]] = {}
+        for assignment in parsed:
+            base_route = assignment.carry_route
+            robot_ids = assignment.robot_ids
             for index, robot_id in enumerate(robot_ids):
                 offset = 0.0 if len(robot_ids) == 1 else (-0.35 if index == 0 else 0.35)
                 carry_routes[robot_id] = [Vec2(x=point.x, y=point.y + offset) for point in base_route]
         self.follow_routes(carry_routes)
-        for assignment in assignments:
-            self.install_logical_payload(str(assignment["module_id"]))
+        for assignment in parsed:
+            self.install_logical_payload(assignment.module_id)
 
     def _build_scene(self) -> None:
         self.root_handle = self.sim.createDummy(0.01)
@@ -466,7 +486,7 @@ class DynamicCoppeliaExecutor:
             list(color),
         )
         self.sim.setObjectInt32Param(handle, self.sim.shapeintparam_static, 1)
-        return handle
+        return int(handle)
 
     def _resolve_wheels(self, robot_handle: int) -> dict[str, int]:
         descendants = self.sim.getObjectsInTree(robot_handle)
@@ -543,7 +563,12 @@ def youbot_wheel_targets(
     )
     largest = max(max(abs(value) for value in raw), maximum)
     scale = maximum / largest
-    return tuple(float(value * scale) for value in raw)
+    return (
+        float(raw[0] * scale),
+        float(raw[1] * scale),
+        float(raw[2] * scale),
+        float(raw[3] * scale),
+    )
 
 
 def world_error_to_youbot_body(dx: float, dy: float, yaw: float) -> tuple[float, float]:

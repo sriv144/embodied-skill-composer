@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Literal
+
 from embodied_skill_composer.construction.models import (
     BrainEvent,
     BuildPlan,
@@ -9,6 +12,7 @@ from embodied_skill_composer.construction.models import (
     ExecutionTrace,
     ModuleTraceState,
     RobotTraceState,
+    Vec2,
     Vec3,
 )
 
@@ -47,18 +51,18 @@ def build_execution_trace(
             progress = (timestamp - active.start_s) / max(active.end_s - active.start_s, 1)
             if timestamp < active.pickup_s:
                 position = module.staging_pose.position
-                status = "moving"
+                robot_status: Literal["moving", "carrying", "installing"] = "moving"
             elif progress < 0.78:
                 position = _interpolate_route(active.route, (progress - 0.2) / 0.58)
-                status = "carrying"
+                robot_status = "carrying"
             else:
                 position = module.target_pose.position
-                status = "installing"
+                robot_status = "installing"
             robot_states.append(
                 RobotTraceState(
                     robot_id=robot.robot_id,
                     position=position,
-                    status=status,
+                    status=robot_status,
                     module_id=module.module_id,
                 )
             )
@@ -67,19 +71,23 @@ def build_execution_trace(
         for module in plan.modules:
             job = jobs[module.module_id]
             if timestamp >= job.end_s:
-                status = "installed"
+                module_status: Literal["staged", "in_transit", "installed"] = "installed"
                 position = module.target_pose.position
             elif timestamp >= job.pickup_s:
-                status = "in_transit"
+                module_status = "in_transit"
                 position = _interpolate_route(
                     job.route,
                     (timestamp - job.pickup_s) / max(job.end_s - job.pickup_s, 1),
                 )
             else:
-                status = "staged"
+                module_status = "staged"
                 position = module.staging_pose.position
             module_states.append(
-                ModuleTraceState(module_id=module.module_id, status=status, position=position)
+                ModuleTraceState(
+                    module_id=module.module_id,
+                    status=module_status,
+                    position=position,
+                )
             )
         frames.append(
             ExecutionFrame(
@@ -93,9 +101,7 @@ def build_execution_trace(
     events = _brain_events(plan, schedule)
     busy_by_robot = {
         robot.robot_id: sum(
-            job.end_s - job.start_s
-            for job in schedule.jobs
-            if robot.robot_id in job.robot_ids
+            job.end_s - job.start_s for job in schedule.jobs if robot.robot_id in job.robot_ids
         )
         for robot in plan.robots
     }
@@ -128,8 +134,7 @@ def _brain_events(plan: BuildPlan, schedule: ConstructionSchedule) -> list[Brain
         candidates = sorted(
             module.module_id
             for module in plan.modules
-            if module.module_id not in completed
-            and set(module.dependencies) <= completed
+            if module.module_id not in completed and set(module.dependencies) <= completed
         )
         events.append(
             BrainEvent(
@@ -177,7 +182,7 @@ def _brain_events(plan: BuildPlan, schedule: ConstructionSchedule) -> list[Brain
     return events
 
 
-def _interpolate_route(route: list[object], progress: float) -> Vec3:
+def _interpolate_route(route: Sequence[Vec2], progress: float) -> Vec3:
     progress = max(0.0, min(1.0, progress))
     if len(route) < 2:
         point = route[0]

@@ -66,11 +66,11 @@ def render_construction_lab_report(
 
     lines.extend(["", "## Decision Timeline", ""])
     for step in episode.steps:
-        assignment = step.decision.assignment
+        timeline_assignment = step.decision.assignment
         component = (
             "none"
-            if assignment is None
-            else assignment.component_id or assignment.resource_id
+            if timeline_assignment is None
+            else timeline_assignment.component_id or timeline_assignment.resource_id
         )
         lines.append(
             f"- `{step.decision_index:02d}` "

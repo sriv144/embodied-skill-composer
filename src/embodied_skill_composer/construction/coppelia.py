@@ -72,26 +72,30 @@ class CoppeliaConstructionAdapter:
     def sync_frame(self, frame: ExecutionFrame) -> None:
         self._require_ready()
         module_by_id = {item.module_id: item for item in self.plan.modules}
-        for state in frame.modules:
-            handle = self.module_handles[state.module_id]
-            module = module_by_id[state.module_id]
+        for module_state in frame.modules:
+            handle = self.module_handles[module_state.module_id]
+            module = module_by_id[module_state.module_id]
             self.sim.setObjectPosition(
                 handle,
-                [state.position.x, state.position.y, max(state.position.z, 0.04)],
+                [
+                    module_state.position.x,
+                    module_state.position.y,
+                    max(module_state.position.z, 0.04),
+                ],
             )
             rotation = (
                 module.target_pose.rotation_rpy_degrees
-                if state.status == "installed"
+                if module_state.status == "installed"
                 else module.staging_pose.rotation_rpy_degrees
             )
             self.sim.setObjectOrientation(
                 handle,
                 [math.radians(rotation.x), math.radians(rotation.y), math.radians(rotation.z)],
             )
-        for state in frame.robots:
+        for robot_state in frame.robots:
             self.sim.setObjectPosition(
-                self.robot_handles[state.robot_id],
-                [state.position.x, state.position.y, 0.12],
+                self.robot_handles[robot_state.robot_id],
+                [robot_state.position.x, robot_state.position.y, 0.12],
             )
 
     def save_scene(self, output_path: Path) -> Path:
@@ -187,7 +191,7 @@ class CoppeliaConstructionAdapter:
             list(color),
         )
         self.sim.setObjectInt32Param(handle, self.sim.shapeintparam_static, 1)
-        return handle
+        return int(handle)
 
     def _create_robot(self, robot_id: str, position: Any) -> int:
         if not self._robot_model_available():
@@ -204,7 +208,7 @@ class CoppeliaConstructionAdapter:
         self.sim.setObjectParent(handle, self.root_handle, True)
         self.sim.setObjectPosition(handle, [position.x, position.y, 0.05])
         self.loaded_robot_models += 1
-        return handle
+        return int(handle)
 
     def _robot_model_available(self) -> bool:
         return self.config.use_robot_models and Path(self.config.robot_model_path).is_file()

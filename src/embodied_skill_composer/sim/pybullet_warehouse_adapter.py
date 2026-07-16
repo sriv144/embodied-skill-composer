@@ -15,11 +15,13 @@ class PyBulletWarehouseAdapter(MockWarehouseAdapter):
     without changing the public interfaces.
     """
 
-    def __init__(self, runtime_config: dict[str, Any], scene_config: dict[str, Any], gui: bool = False) -> None:
+    def __init__(
+        self, runtime_config: dict[str, Any], scene_config: dict[str, Any], gui: bool = False
+    ) -> None:
         self.gui = gui
         self._pybullet = None
         try:
-            import pybullet as p  # type: ignore[import-not-found]
+            import pybullet as p
         except ModuleNotFoundError as exc:
             raise SystemExit(
                 "PyBullet warehouse adapter requested, but pybullet is not installed. "

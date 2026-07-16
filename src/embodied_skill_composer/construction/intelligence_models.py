@@ -139,8 +139,18 @@ class PolicyManifest(BaseModel):
     environment_schema: str = "construction_coordination_v1"
     git_sha: str
     seed: int
+    experiment_id: str = "ad_hoc"
+    experiment_variant: str = "default"
+    training_seed: int | None = None
     transition_count: int = Field(ge=0)
     checkpoint_path: str | None = None
     checkpoint_sha256: str | None = None
+    checkpoint_lineage: list[str] = Field(default_factory=list)
+    configuration_digest: str | None = None
+    source_commit: str | None = None
+    source_dirty: bool = False
+    source_tree_digest: str | None = None
+    resume_provenance: dict[str, object] = Field(default_factory=dict)
+    environment_fingerprint: dict[str, object] = Field(default_factory=dict)
     onnx_path: str | None = None
     config: dict[str, object] = Field(default_factory=dict)

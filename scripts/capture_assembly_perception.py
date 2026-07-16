@@ -17,7 +17,8 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from embodied_skill_composer.assembly.backends import build_assembly_backend
-from embodied_skill_composer.assembly.models import TeamOption
+from embodied_skill_composer.assembly.models import TeamOption, VisualObjectEstimate
+from embodied_skill_composer.assembly.mujoco_backend import MuJoCoAssemblyBackend
 from embodied_skill_composer.assembly.perception import (
     ClassicalAssemblyPerception,
     MultiObjectVisualTracker,
@@ -65,6 +66,8 @@ def main() -> int:
     if not profile.visual_perception.enabled:
         raise ValueError("runtime profile must enable visual_perception")
     env = build_assembly_backend(config, profile, seed=args.seed)
+    if not isinstance(env, MuJoCoAssemblyBackend):
+        raise ValueError("runtime profile must use the 'mujoco_local' backend")
     if not env.get_backend_status().is_ready:
         raise RuntimeError("MuJoCo backend is not ready")
     env.reset(seed=args.seed)
@@ -190,7 +193,10 @@ def _segmentation_visualization(segmentation: np.ndarray) -> np.ndarray:
     return result
 
 
-def _overlay(rgb: np.ndarray, estimates: list) -> np.ndarray:
+def _overlay(
+    rgb: np.ndarray,
+    estimates: list[VisualObjectEstimate],
+) -> np.ndarray:
     result = rgb.copy()
     occupied_labels: list[tuple[int, int, int, int]] = []
     category_colors = {
@@ -218,7 +224,7 @@ def _overlay(rgb: np.ndarray, estimates: list) -> np.ndarray:
             y,
             width,
             height,
-            text_size,
+            (int(text_size[0]), int(text_size[1])),
             result.shape[1],
             result.shape[0],
             occupied_labels,

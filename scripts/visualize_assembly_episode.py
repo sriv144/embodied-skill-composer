@@ -74,11 +74,13 @@ def main() -> int:
         env.reset(seed=args.seed)
         done = False
         while not done:
+            option: int
             if args.policy == "scripted":
-                option = env.scripted_team_option()
+                option = int(env.scripted_team_option())
             else:
                 import torch
 
+                assert trainer is not None
                 observation = torch.as_tensor(
                     env.get_team_option_observation(), dtype=torch.float32, device=trainer.device
                 ).unsqueeze(0)
