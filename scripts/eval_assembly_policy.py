@@ -73,6 +73,7 @@ def main() -> int:
                 observations = env.get_agent_observations()
                 import torch
 
+                assert trainer is not None
                 with torch.no_grad():
                     logits = trainer._masked_logits(
                         trainer.actor(

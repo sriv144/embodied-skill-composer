@@ -43,14 +43,21 @@ def summarize_json_file(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {"notes": [f"Expected artifact not found: {path}"]}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload: object = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         return {"notes": [f"Could not parse JSON artifact {path}: {exc}"]}
+    if not isinstance(payload, dict):
+        return {"notes": [f"Expected a JSON object in artifact {path}"]}
+    return {str(key): value for key, value in payload.items()}
 
 
 def _summarize_payload(payload: dict[str, Any]) -> list[str]:
     if {"scripted_options", "learned_options", "low_level_learned"}.issubset(payload):
-        rows = [payload["scripted_options"], payload["learned_options"], payload["low_level_learned"]]
+        rows = [
+            payload["scripted_options"],
+            payload["learned_options"],
+            payload["low_level_learned"],
+        ]
         lines = [
             "| Policy | Success | Return | Beams | Steps |",
             "| --- | ---: | ---: | ---: | ---: |",
@@ -89,4 +96,3 @@ def _summarize_payload(payload: dict[str, Any]) -> list[str]:
     if "notes" in payload:
         return [f"- {note}" for note in payload["notes"]]
     return ["```json", json.dumps(payload, indent=2), "```"]
-

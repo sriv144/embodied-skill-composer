@@ -10,6 +10,7 @@ from embodied_skill_composer.copilot.registry import default_registry
 from embodied_skill_composer.copilot.reports import write_report
 from embodied_skill_composer.copilot.runner import (
     ConfirmationRequired,
+    CopilotRunResult,
     run_benchmark,
     run_eval_options,
     run_sweep,
@@ -25,19 +26,29 @@ def build_parser() -> argparse.ArgumentParser:
     ask = subparsers.add_parser("ask", help="Ask the OpenAI Agents SDK copilot.")
     ask.add_argument("prompt")
     ask.add_argument("--model", default=None)
-    ask.add_argument("--yes", action="store_true", help="Allow training/sweep tools during the agent run.")
+    ask.add_argument(
+        "--yes", action="store_true", help="Allow training/sweep tools during the agent run."
+    )
 
-    benchmark = subparsers.add_parser("benchmark", help="Run policy benchmark and record artifacts.")
+    benchmark = subparsers.add_parser(
+        "benchmark", help="Run policy benchmark and record artifacts."
+    )
     benchmark.add_argument("--episodes", type=int, default=5)
     benchmark.add_argument("--runtime-profile", default="configs/assembly_profiles/local_dev.yaml")
 
     eval_options = subparsers.add_parser("eval-options", help="Run option-policy evaluation.")
     eval_options.add_argument("--policy", choices=["scripted", "learned"], default="scripted")
     eval_options.add_argument("--episodes", type=int, default=1)
-    eval_options.add_argument("--runtime-profile", default="configs/assembly_profiles/local_dev.yaml")
+    eval_options.add_argument(
+        "--runtime-profile", default="configs/assembly_profiles/local_dev.yaml"
+    )
 
-    train_options = subparsers.add_parser("train-options", help="Train hierarchical options into a run folder.")
-    train_options.add_argument("--runtime-profile", default="configs/assembly_profiles/local_dev.yaml")
+    train_options = subparsers.add_parser(
+        "train-options", help="Train hierarchical options into a run folder."
+    )
+    train_options.add_argument(
+        "--runtime-profile", default="configs/assembly_profiles/local_dev.yaml"
+    )
     train_options.add_argument("--yes", action="store_true")
 
     train_marl = subparsers.add_parser("train-marl", help="Train low-level MARL into a run folder.")
@@ -51,7 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     sweep.add_argument("--runtime-profile", default="configs/assembly_profiles/local_dev.yaml")
     sweep.add_argument("--yes", action="store_true")
 
-    nvidia = subparsers.add_parser("nvidia-check", help="Run NVIDIA/CUDA/Isaac/AI-Q readiness checks.")
+    nvidia = subparsers.add_parser(
+        "nvidia-check", help="Run NVIDIA/CUDA/Isaac/AI-Q readiness checks."
+    )
     nvidia.add_argument("--runtime-profile", default="configs/assembly_profiles/local_gpu.yaml")
     nvidia.add_argument("--aiq-url", default="http://localhost:8000")
     return parser
@@ -72,7 +85,11 @@ def main() -> int:
         if args.command == "train-marl":
             return _print_result(run_train_marl(args.runtime_profile, yes=args.yes))
         if args.command == "sweep":
-            return _print_result(run_sweep(args.scenarios, args.seeds, args.beam_count, args.runtime_profile, yes=args.yes))
+            return _print_result(
+                run_sweep(
+                    args.scenarios, args.seeds, args.beam_count, args.runtime_profile, yes=args.yes
+                )
+            )
         if args.command == "nvidia-check":
             return _run_nvidia_check(args.runtime_profile, args.aiq_url)
     except ConfirmationRequired as exc:
@@ -84,7 +101,7 @@ def main() -> int:
     raise AssertionError(f"Unhandled command: {args.command}")
 
 
-def _print_result(result) -> int:
+def _print_result(result: CopilotRunResult) -> int:
     print(f"Run ID: {result.run_id}")
     print(f"Run dir: {result.run_dir}")
     print(f"Report: {result.report_path}")
@@ -99,7 +116,9 @@ def _run_nvidia_check(runtime_profile: str, aiq_url: str) -> int:
     summary_path = record.run_dir / "nvidia_readiness.json"
     summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     report_path = write_report(record.run_dir, "NVIDIA Readiness Check", [], 0, summary)
-    registry.add_artifact(record.id, "summary", summary_path, "CUDA, Isaac, and AI-Q readiness JSON.")
+    registry.add_artifact(
+        record.id, "summary", summary_path, "CUDA, Isaac, and AI-Q readiness JSON."
+    )
     registry.add_artifact(record.id, "report", report_path, "Markdown readiness report.")
     registry.complete_run(record.id, "completed", 0, report_path)
     print(json.dumps(summary, indent=2))

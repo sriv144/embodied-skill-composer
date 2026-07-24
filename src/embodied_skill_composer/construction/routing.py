@@ -111,8 +111,8 @@ class W9RoutingAdapter(RoutingAdapter):
         )
         if not paths or len(paths) != len(agent_ids):
             raise RoutingError("w9 CBS did not find a complete route set")
-        mapped = {
-            agent_id: [tuple(int(value) for value in cell) for cell in path]
+        mapped: dict[str, list[Cell]] = {
+            agent_id: [(int(cell[0]), int(cell[1])) for cell in path]
             for agent_id, path in zip(agent_ids, paths, strict=True)
         }
         return _route_plan("w9_cbs", grid, mapped)
@@ -174,9 +174,7 @@ def count_path_conflicts(paths: Mapping[str, list[Cell]]) -> int:
     conflicts = 0
     agent_ids = sorted(paths)
     for step in range(horizon):
-        positions = {
-            agent: paths[agent][min(step, len(paths[agent]) - 1)] for agent in agent_ids
-        }
+        positions = {agent: paths[agent][min(step, len(paths[agent]) - 1)] for agent in agent_ids}
         for left_index, left in enumerate(agent_ids):
             for right in agent_ids[left_index + 1 :]:
                 if positions[left] == positions[right]:
@@ -271,8 +269,7 @@ def _reserve_path(
 
 def _route_plan(backend: str, grid: SiteGrid, paths: dict[str, list[Cell]]) -> RoutePlan:
     world_paths = {
-        agent_id: [cell_to_world(cell, grid) for cell in path]
-        for agent_id, path in paths.items()
+        agent_id: [cell_to_world(cell, grid) for cell in path] for agent_id, path in paths.items()
     }
     total_distance = sum(
         hypot(right.x - left.x, right.y - left.y)

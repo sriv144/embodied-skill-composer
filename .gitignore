@@ -17,6 +17,8 @@ output/
 *.tsbuildinfo
 .coverage
 .coverage.*
+coverage.xml
+*.egg-info/
 .env
 .env.*
 htmlcov/

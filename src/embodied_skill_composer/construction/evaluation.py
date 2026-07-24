@@ -77,6 +77,20 @@ class EvaluationArtifacts(BaseModel):
     report_path: Path
 
 
+class TemporalEpisodeMetrics(BaseModel):
+    structure_completion_rate: float
+    makespan_s: float
+    total_travel_m: float
+    total_energy_wh: float
+    idle_robot_seconds: float
+    robot_utilization: dict[str, float]
+    collision_count: int
+    wasted_work_s: float
+    invalid_bid_count: int
+    drop_count: int
+    routing_backend: str | None = None
+
+
 def evaluate_controller_episode(
     base_design: HouseDesign,
     *,
@@ -101,8 +115,7 @@ def evaluate_controller_episode(
     if controller == "cp_sat":
         schedule = schedule_build(scenario.plan, "optimized")
         priority = {
-            job.module_id: (job.start_s, job.end_s, tuple(job.robot_ids))
-            for job in schedule.jobs
+            job.module_id: (job.start_s, job.end_s, tuple(job.robot_ids)) for job in schedule.jobs
         }
     while env.agents:
         diagnostics = None
@@ -128,26 +141,25 @@ def evaluate_controller_episode(
         observations, _, _, _, _ = env.step(actions)
         if diagnostics:
             env.annotate_latest_decisions(controller, diagnostics)
-    metrics = env.metrics()
-    utilization = metrics["robot_utilization"]
+    metrics = TemporalEpisodeMetrics.model_validate(env.metrics())
     return EpisodeEvaluation(
         scenario_id=scenario.scenario_id,
         seed=seed,
         split=scenario.split.value,
         controller=controller,
         failure_enabled=failure_enabled,
-        structure_completion_rate=float(metrics["structure_completion_rate"]),
-        makespan_s=float(metrics["makespan_s"]),
-        total_travel_m=float(metrics["total_travel_m"]),
-        total_energy_wh=float(metrics["total_energy_wh"]),
-        idle_robot_seconds=float(metrics["idle_robot_seconds"]),
-        mean_robot_utilization=float(np.mean(list(utilization.values()))),
-        collision_count=int(metrics["collision_count"]),
-        wasted_work_s=float(metrics["wasted_work_s"]),
-        invalid_bid_count=int(metrics["invalid_bid_count"]),
-        drop_count=int(metrics["drop_count"]),
+        structure_completion_rate=metrics.structure_completion_rate,
+        makespan_s=metrics.makespan_s,
+        total_travel_m=metrics.total_travel_m,
+        total_energy_wh=metrics.total_energy_wh,
+        idle_robot_seconds=metrics.idle_robot_seconds,
+        mean_robot_utilization=float(np.mean(list(metrics.robot_utilization.values()))),
+        collision_count=metrics.collision_count,
+        wasted_work_s=metrics.wasted_work_s,
+        invalid_bid_count=metrics.invalid_bid_count,
+        drop_count=metrics.drop_count,
         decision_count=env.decision_count,
-        routing_backend=metrics["routing_backend"],
+        routing_backend=metrics.routing_backend,
     )
 
 
@@ -289,9 +301,7 @@ def sequential_temporal_actions(
     env: TemporalConstructionCoordinationEnv,
 ) -> dict[str, int]:
     actions = {agent: 0 for agent in env.agents}
-    available = [
-        agent for agent in env.agents if env.robot_runtime[agent].status == "idle"
-    ]
+    available = [agent for agent in env.agents if env.robot_runtime[agent].status == "idle"]
     for module in sorted(env.ready_modules(), key=lambda item: item.module_id):
         team = env._select_capable_team(module, available)
         if team is None:
@@ -322,9 +332,7 @@ def _metric_summary(values: np.ndarray, *, seed: int) -> MetricSummary:
 
 
 def _acceptance_audit(suite: EvaluationSuite) -> list[str]:
-    lookup = {
-        (item.controller, item.failure_enabled): item for item in suite.summaries
-    }
+    lookup = {(item.controller, item.failure_enabled): item for item in suite.summaries}
     lines = []
     for controller in ("mappo", "ippo"):
         no_failure = lookup.get((controller, False))
@@ -353,5 +361,7 @@ def _acceptance_audit(suite: EvaluationSuite) -> list[str]:
             f"{'PASS' if completion >= 0.85 else 'NOT YET'} ({completion:.3f})."
         )
     if not lines:
-        lines.append("- Learned-policy acceptance cannot be audited until learned runs are included.")
+        lines.append(
+            "- Learned-policy acceptance cannot be audited until learned runs are included."
+        )
     return lines

@@ -1,2 +1,2 @@
-coppeliasim-zmqremoteapi-client>=2.0,<3
-imageio>=2.37,<3
+# Compatibility entry point. Canonical dependency definitions live in pyproject.toml.
+-e .[sim-coppelia]

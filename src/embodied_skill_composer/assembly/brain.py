@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, TypeAlias, runtime_checkable
 
 from embodied_skill_composer.assembly.backends import AssemblyTaskBackend
 from embodied_skill_composer.assembly.models import (
@@ -14,6 +14,14 @@ from embodied_skill_composer.assembly.models import (
     ConstructionResourceState,
     TeamOption,
 )
+
+
+SafetyHoldReason: TypeAlias = Literal[
+    "sensor_unavailable",
+    "alignment_error",
+    "visual_target_unavailable",
+    "blocked_dependency",
+]
 
 
 @runtime_checkable
@@ -100,7 +108,7 @@ class PrecedenceConstructionBrain:
     def decide(self, observation: ConstructionBrainObservation) -> ConstructionBrainDecision:
         assignment = _active_assignment(self.assignments(observation), observation)
         blocked = _blocked_prerequisites(assignment, observation)
-        if blocked:
+        if assignment is not None and blocked:
             return ConstructionBrainDecision(
                 option=TeamOption.WAIT,
                 rationale=(
@@ -332,7 +340,7 @@ def _physical_feedback_rationale(
 
 def _physical_safety_hold_reason(
     observation: ConstructionBrainObservation,
-) -> str | None:
+) -> SafetyHoldReason | None:
     terminal_option = TeamOption.INSTALL if observation.carrying else TeamOption.GRAB
     if terminal_option not in observation.available_options:
         return None
@@ -348,7 +356,7 @@ def _physical_safety_hold_reason(
 
 def _visual_safety_hold_reason(
     observation: ConstructionBrainObservation,
-) -> str | None:
+) -> SafetyHoldReason | None:
     terminal_option = TeamOption.INSTALL if observation.carrying else TeamOption.GRAB
     if terminal_option not in observation.available_options:
         return None
@@ -370,7 +378,7 @@ def _visual_safety_hold_reason(
 
 def _terminal_safety_hold_reason(
     observation: ConstructionBrainObservation,
-) -> str | None:
+) -> SafetyHoldReason | None:
     return _physical_safety_hold_reason(observation) or _visual_safety_hold_reason(
         observation
     )

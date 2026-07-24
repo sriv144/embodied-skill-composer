@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,7 @@ if str(SRC_ROOT) not in sys.path:
 from embodied_skill_composer.assembly.backends import build_assembly_backend
 from embodied_skill_composer.assembly.blueprint import compile_modular_blueprint
 from embodied_skill_composer.assembly.brain import (
+    ConstructionBrain,
     HeuristicConstructionBrain,
     PrecedenceConstructionBrain,
     ScriptedConstructionBrain,
@@ -49,9 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--runtime-profile",
         type=Path,
-        default=(
-            PROJECT_ROOT / "configs" / "assembly_profiles" / "coppelia_local.yaml"
-        ),
+        default=(PROJECT_ROOT / "configs" / "assembly_profiles" / "coppelia_local.yaml"),
     )
     parser.add_argument(
         "--brain",
@@ -80,14 +80,13 @@ def main() -> int:
         workspace_root=PROJECT_ROOT,
     )
     runtime_profile = load_runtime_profile(args.runtime_profile.resolve())
-    brain_types = {
+    brain_factories: dict[str, Callable[[], ConstructionBrain]] = {
         "precedence": PrecedenceConstructionBrain,
         "heuristic": HeuristicConstructionBrain,
         "scripted": ScriptedConstructionBrain,
     }
     run_id = args.run_id or (
-        f"{blueprint.blueprint_id}-"
-        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        f"{blueprint.blueprint_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
     )
     output_root = args.output_root.resolve()
     log_dir = output_root / "logs" / "construction_runs" / run_id
@@ -114,7 +113,7 @@ def main() -> int:
     try:
         episode = run_construction_brain_episode(
             backend,
-            brain_types[args.brain](),
+            brain_factories[args.brain](),
             seed=args.seed,
         )
         if isinstance(backend, CoppeliaSimAssemblyBackend):

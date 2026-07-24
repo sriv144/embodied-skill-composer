@@ -20,7 +20,7 @@ Implemented now:
 - masked parameter-shared actors, centralized MAPPO and independent IPPO critics,
 - CP-SAT behavior-cloning demonstrations, real PPO updates, checkpoints, ONNX, TensorBoard, and manifests,
 - sequential, greedy, decentralized auction, and CP-SAT evaluation baselines with bootstrap intervals,
-- persisted SQLite scenarios, policies, runs, progress events, and approval-gated training,
+- a persistent single-GPU subprocess queue with JSONL events, cancellation, strict full-state resume,
 - dynamic CoppeliaSim wheel commands and measured telemetry with honest logical payload attachment,
 - a read-only static workbench bundle that requires no Python, API key, Blender, MuJoCo, or CoppeliaSim.
 
@@ -46,6 +46,10 @@ The Coppelia controller is `dynamic_base_logical_payload`: bases are wheel-drive
 while payload attachment remains a logical carrier constraint rather than arm/gripper contact dynamics.
 A live one-module gate has passed with `2,274` physics steps, `4,540` wheel commands, `4,536` measured
 pose samples, and zero post-start robot pose writes; full-cottage and live-recovery acceptance remain open.
+
+Dependency groups, experiment fingerprints, durable job states, checkpoint compatibility, and queue
+management commands are documented in
+[Construction Intelligence v1 reproducibility](docs/construction-intelligence-v1-reproducibility.md).
 
 See [dependencies-and-assets.md](docs/dependencies-and-assets.md) for licenses and asset provenance.
 

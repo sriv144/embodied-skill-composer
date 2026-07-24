@@ -3,18 +3,26 @@ from __future__ import annotations
 from collections import defaultdict
 from itertools import combinations
 from math import ceil, hypot
+from typing import Literal
 
 from embodied_skill_composer.construction.models import (
     BuildModule,
     BuildPlan,
     ConstructionSchedule,
     Pose3D,
+    RobotSpec,
     ScheduledJob,
     Vec2,
 )
 
 
-def schedule_build(plan: BuildPlan, controller: str) -> ConstructionSchedule:
+ScheduleController = Literal["sequential", "greedy", "optimized"]
+
+
+def schedule_build(
+    plan: BuildPlan,
+    controller: ScheduleController,
+) -> ConstructionSchedule:
     if controller == "sequential":
         return _schedule_sequential(plan)
     if controller == "greedy":
@@ -25,10 +33,12 @@ def schedule_build(plan: BuildPlan, controller: str) -> ConstructionSchedule:
 
 
 def compare_controllers(plan: BuildPlan) -> dict[str, ConstructionSchedule]:
-    return {
-        name: schedule_build(plan, name)
-        for name in ("sequential", "greedy", "optimized")
-    }
+    controllers: tuple[ScheduleController, ...] = (
+        "sequential",
+        "greedy",
+        "optimized",
+    )
+    return {name: schedule_build(plan, name) for name in controllers}
 
 
 def _schedule_sequential(plan: BuildPlan) -> ConstructionSchedule:
@@ -103,17 +113,17 @@ def _schedule_optimized(plan: BuildPlan) -> ConstructionSchedule:
         max(_duration_and_distance(module, group)[0] for group in _eligible_groups(plan, module))
         for module in plan.modules
     )
-    starts: dict[str, object] = {}
-    ends: dict[str, object] = {}
-    selections: dict[tuple[str, int], object] = {}
-    group_data: dict[str, list[tuple[list[object], int, float]]] = {}
-    intervals_by_robot: dict[str, list[object]] = defaultdict(list)
+    starts: dict[str, cp_model.IntVar] = {}
+    ends: dict[str, cp_model.IntVar] = {}
+    selections: dict[tuple[str, int], cp_model.IntVar] = {}
+    group_data: dict[str, list[tuple[list[RobotSpec], int, float]]] = {}
+    intervals_by_robot: dict[str, list[cp_model.IntervalVar]] = defaultdict(list)
 
     for module in plan.modules:
         starts[module.module_id] = model.new_int_var(0, horizon, f"start_{module.module_id}")
         ends[module.module_id] = model.new_int_var(0, horizon, f"end_{module.module_id}")
-        options: list[tuple[list[object], int, float]] = []
-        choice_vars = []
+        options: list[tuple[list[RobotSpec], int, float]] = []
+        choice_vars: list[cp_model.IntVar] = []
         for index, group in enumerate(_eligible_groups(plan, module)):
             duration, distance = _duration_and_distance(module, group)
             selected = model.new_bool_var(f"select_{module.module_id}_{index}")
@@ -180,8 +190,8 @@ def _schedule_optimized(plan: BuildPlan) -> ConstructionSchedule:
     )
 
 
-def _eligible_groups(plan: BuildPlan, module: BuildModule) -> list[list[object]]:
-    groups = []
+def _eligible_groups(plan: BuildPlan, module: BuildModule) -> list[list[RobotSpec]]:
+    groups: list[list[RobotSpec]] = []
     for group in combinations(plan.robots, module.required_team_size):
         if sum(robot.payload_capacity_kg for robot in group) >= module.mass_kg:
             groups.append(list(group))
@@ -196,7 +206,10 @@ def _eligible_groups(plan: BuildPlan, module: BuildModule) -> list[list[object]]
     return groups
 
 
-def _duration_and_distance(module: BuildModule, robots: list[object]) -> tuple[int, float]:
+def _duration_and_distance(
+    module: BuildModule,
+    robots: list[RobotSpec],
+) -> tuple[int, float]:
     staging = module.staging_pose.position
     target = module.target_pose.position
     distance = hypot(target.x - staging.x, target.y - staging.y)
@@ -206,7 +219,7 @@ def _duration_and_distance(module: BuildModule, robots: list[object]) -> tuple[i
 
 def _job(
     module: BuildModule,
-    robots: list[object],
+    robots: list[RobotSpec],
     start: int,
     duration: int,
     distance: float,
@@ -233,15 +246,13 @@ def _orthogonal_route(source: Pose3D, target: Pose3D) -> list[Vec2]:
 
 def _finish_schedule(
     plan: BuildPlan,
-    controller: str,
+    controller: ScheduleController,
     jobs: list[ScheduledJob],
     solver_status: str,
 ) -> ConstructionSchedule:
     jobs.sort(key=lambda item: (item.start_s, item.module_id))
     critical_path = _critical_path(plan.modules)
-    jobs = [
-        item.model_copy(update={"critical": item.module_id in critical_path}) for item in jobs
-    ]
+    jobs = [item.model_copy(update={"critical": item.module_id in critical_path}) for item in jobs]
     makespan = max(item.end_s for item in jobs)
     busy = sum((item.end_s - item.start_s) * len(item.robot_ids) for item in jobs)
     total_travel = sum(item.travel_distance_m * len(item.robot_ids) for item in jobs)
@@ -290,7 +301,7 @@ def _critical_path(modules: list[BuildModule]) -> list[str]:
         predecessor = max(module.dependencies, key=lambda item: score[item])
         score[module_id] = score[predecessor] + module.install_duration_s
         parent[module_id] = predecessor
-    current = max(score, key=score.get)
+    current: str | None = max(score, key=lambda item: score[item])
     path: list[str] = []
     while current is not None:
         path.append(current)

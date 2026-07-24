@@ -4,6 +4,7 @@ import importlib.util
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Literal, cast
 
 import numpy as np
 
@@ -18,6 +19,7 @@ from embodied_skill_composer.assembly.models import (
     OptionExecutionResult,
     PhysicalManipulationFeedback,
     TeamOption,
+    VisualPerceptionEvaluation,
     VisualPerceptionFeedback,
 )
 from embodied_skill_composer.assembly.perception import (
@@ -49,8 +51,11 @@ class MuJoCoAssemblyBackend:
 
     def __post_init__(self) -> None:
         self.logical_env = CollaborativeAssemblyEnv(self.config, seed=self.seed)
-        self.model = None
-        self.data = None
+        # MuJoCo is an optional, dynamically imported dependency.  Keep its
+        # runtime objects at the untyped boundary rather than importing it at
+        # module load time (which would make the optional backend mandatory).
+        self.model: Any = None
+        self.data: Any = None
         self._scale = 0.35
         self._agent_joint_names = ["agent0_free", "agent1_free"]
         self._beam_joint_names = [f"{beam.name}_free" for beam in self.config.beams]
@@ -64,10 +69,10 @@ class MuJoCoAssemblyBackend:
             for agent in range(2)
             for side in ("left", "right")
         ]
-        self._mujoco = None
-        self._renderer = None
+        self._mujoco: Any = None
+        self._renderer: Any = None
         self._renderer_size = (960, 720)
-        self._perception_renderer = None
+        self._perception_renderer: Any = None
         self._perception_renderer_size = (256, 256)
         self._last_seed: int | None = None
         self._control_substeps = 10
@@ -98,8 +103,8 @@ class MuJoCoAssemblyBackend:
             self.runtime_profile.visual_perception
         )
         self._visual_sample_count = 0
-        self._visual_evaluations = []
-        self._visual_feedback_history = []
+        self._visual_evaluations: list[VisualPerceptionEvaluation] = []
+        self._visual_feedback_history: list[VisualPerceptionFeedback] = []
         self.readiness_notes = [
             "MuJoCo local backend executes assembly motion with physics-stepped mocap-weld pose tracking.",
             "Dual gripper contacts gate grasping and runtime weld constraints attach carried beams.",
@@ -181,7 +186,10 @@ class MuJoCoAssemblyBackend:
             self._activate_beam_attachment(beam_name)
         return result
 
-    def build_artifact(self, policy_mode: str) -> EpisodeArtifact:
+    def build_artifact(
+        self,
+        policy_mode: Literal["scripted", "learned", "brain"],
+    ) -> EpisodeArtifact:
         return self.logical_env.build_artifact(policy_mode=policy_mode)
 
     def get_agent_observations(self) -> np.ndarray:
@@ -243,11 +251,13 @@ class MuJoCoAssemblyBackend:
 
     def get_physics_control_diagnostics(self) -> dict[str, object]:
         errors = self._control_errors
-        grip_force_samples = [
-            float(check["minimum_contact_force_n"])
-            for check in self._physical_manipulation_checks
-            if check.get("contact_required") and check.get("dual_gripper_contact")
-        ]
+        grip_force_samples: list[float] = []
+        for check in self._physical_manipulation_checks:
+            if not check.get("contact_required") or not check.get("dual_gripper_contact"):
+                continue
+            force = check.get("minimum_contact_force_n")
+            if isinstance(force, (int, float)):
+                grip_force_samples.append(float(force))
         return {
             "mode": "mocap_weld_pose_tracking",
             "control_substeps": self._control_substeps,
@@ -329,11 +339,11 @@ class MuJoCoAssemblyBackend:
     ) -> dict[str, list[tuple[float, float, float]]]:
         return {
             "agent": [
-                tuple(float(value) for value in self._body_position(f"agent{index}"))
+                self._xyz_tuple(self._body_position(f"agent{index}"))
                 for index in range(self.num_agents)
             ],
             "resource": [
-                tuple(float(value) for value in self._body_position(beam.name))
+                self._xyz_tuple(self._body_position(beam.name))
                 for beam in self.config.beams
             ],
             "blueprint_cell": [
@@ -412,20 +422,26 @@ class MuJoCoAssemblyBackend:
         if not isinstance(raw_forces, dict):
             raw_forces = {}
         positions = self._finger_positions()
+        gripper_state: Literal["open", "closed", "transitioning", "unknown"]
         if not positions or max(abs(position) for position in positions.values()) < 0.001:
             gripper_state = "open"
         elif min(positions.values()) > 0.005:
             gripper_state = "closed"
         else:
             gripper_state = "transitioning"
+        last_check_phase: Literal["grasp", "install"] | None = None
+        if latest_check is not None:
+            raw_phase = latest_check.get("phase")
+            if raw_phase == "grasp":
+                last_check_phase = "grasp"
+            elif raw_phase == "install":
+                last_check_phase = "install"
         return PhysicalManipulationFeedback(
             backend=self.backend_name,
             current_alignment_error_m=self._terminal_alignment_error(),
             alignment_tolerance_m=self._manipulation_alignment_tolerance,
             required_minimum_grip_force_n=self._minimum_grip_force,
-            last_check_phase=(
-                None if latest_check is None else str(latest_check.get("phase"))
-            ),
+            last_check_phase=last_check_phase,
             last_check_passed=(
                 None if latest_check is None else bool(latest_check.get("passed"))
             ),
@@ -451,7 +467,7 @@ class MuJoCoAssemblyBackend:
             self._renderer = self._mujoco.Renderer(self.model, height=height, width=width)
             self._renderer_size = (width, height)
         self._renderer.update_scene(self.data, camera="portfolio_cam")
-        return self._renderer.render()
+        return np.asarray(self._renderer.render())
 
     def capture_visual_frame(
         self,
@@ -517,7 +533,7 @@ class MuJoCoAssemblyBackend:
             rendered_frames = [self.render_frame(frame, width=width, height=height) for frame in frames]
             self._last_recording_source = "logical_snapshots"
         try:
-            imageio.mimsave(output_path, rendered_frames, fps=fps)
+            imageio.mimsave(output_path, cast(Any, rendered_frames), fps=fps)
         except Exception:
             fallback_dir = output_path.with_suffix("")
             fallback_dir.mkdir(parents=True, exist_ok=True)
@@ -1147,7 +1163,7 @@ class MuJoCoAssemblyBackend:
             body_name,
         )
         mocap_id = self.model.body_mocapid[body_id]
-        return self.data.mocap_pos[mocap_id].copy()
+        return np.asarray(self.data.mocap_pos[mocap_id]).copy()
 
     def _body_position(self, body_name: str) -> np.ndarray:
         body_id = self._mujoco.mj_name2id(
@@ -1155,7 +1171,11 @@ class MuJoCoAssemblyBackend:
             self._mujoco.mjtObj.mjOBJ_BODY,
             body_name,
         )
-        return self.data.xpos[body_id].copy()
+        return np.asarray(self.data.xpos[body_id]).copy()
+
+    @staticmethod
+    def _xyz_tuple(values: np.ndarray) -> tuple[float, float, float]:
+        return (float(values[0]), float(values[1]), float(values[2]))
 
     def _world_xy(self, coord: tuple[int, int]) -> tuple[float, float]:
         center = (self.config.grid_size - 1) / 2.0

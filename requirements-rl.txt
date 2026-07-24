@@ -1,1 +1,2 @@
-torch>=2.3,<3
+# Compatibility entry point. Canonical dependency definitions live in pyproject.toml.
+-e .[rl]

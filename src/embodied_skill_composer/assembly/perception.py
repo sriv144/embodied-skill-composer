@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import permutations
+from typing import Literal
 
 import numpy as np
 
@@ -70,7 +71,13 @@ class ClassicalAssemblyPerception:
                 centroid = (float(centroids[label, 0]), float(centroids[label, 1]))
                 component_mask = labels == label
                 position = self._backproject_component(frame, component_mask, centroid)
-                category = "agent" if detector_name.startswith("agent") else detector_name
+                category: Literal["agent", "resource", "blueprint_cell"]
+                if detector_name.startswith("agent"):
+                    category = "agent"
+                elif detector_name == "resource":
+                    category = "resource"
+                else:
+                    category = "blueprint_cell"
                 components.append(
                     VisualObjectEstimate(
                         track_id=detector_name,
@@ -139,7 +146,11 @@ class ClassicalAssemblyPerception:
             ]
         )
         world_point = frame.camera_position_m + frame.camera_rotation @ camera_point
-        return tuple(float(value) for value in world_point)
+        return (
+            float(world_point[0]),
+            float(world_point[1]),
+            float(world_point[2]),
+        )
 
     @staticmethod
     def _component_confidence(area: int, hsv_pixels: np.ndarray) -> float:
@@ -347,7 +358,7 @@ def assess_visual_terminal_readiness(
 ) -> VisualTerminalAssessment | None:
     if not config.estimated_state_control_enabled:
         return None
-    phase = "install" if carrying else "grasp"
+    phase: Literal["grasp", "install"] = "install" if carrying else "grasp"
     eligible = [
         estimate
         for estimate in feedback.estimates

@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping, cast
 
 import numpy as np
 import torch
@@ -27,7 +28,7 @@ class OptionActor(nn.Module):
         )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        return self.net(observations)
+        return cast(torch.Tensor, self.net(observations))
 
 
 class OptionCritic(nn.Module):
@@ -42,7 +43,7 @@ class OptionCritic(nn.Module):
         )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        return self.net(observations).squeeze(-1)
+        return cast(torch.Tensor, self.net(observations).squeeze(-1))
 
 
 @dataclass
@@ -141,7 +142,7 @@ class HierarchicalOptionTrainer:
                 mask = torch.as_tensor(self._masked_option_array(), dtype=torch.float32, device=self.device).unsqueeze(0)
                 with torch.no_grad():
                     logits = self._masked_logits(self.actor(observation), mask)
-                    option = torch.argmax(logits, dim=-1).item()
+                    option = int(torch.argmax(logits, dim=-1).item())
                 result = self.env.execute_team_option(option, max_primitive_steps=self.env.config.option_max_primitive_steps)
                 done = result.done
             artifact = self.env.build_artifact(policy_mode="learned")
@@ -149,10 +150,18 @@ class HierarchicalOptionTrainer:
             returns.append(artifact.metrics.total_reward)
             beams_installed.append(artifact.metrics.beams_installed)
             step_counts.append(artifact.metrics.step_count)
-            option_switches.append(int(diagnostics["option_switch_count"]))
-            recovery_usage.append(
-                int(sum(diagnostics["recovery_option_usage"].values()))  # type: ignore[union-attr]
-            )
+            option_switch_count = diagnostics.get("option_switch_count")
+            recovery_counts = diagnostics.get("recovery_option_usage")
+            if not isinstance(option_switch_count, int) or not isinstance(
+                recovery_counts,
+                Mapping,
+            ):
+                raise TypeError("option diagnostics contain invalid counters")
+            option_switches.append(option_switch_count)
+            recovery_values = list(recovery_counts.values())
+            if not all(isinstance(value, int) for value in recovery_values):
+                raise TypeError("recovery option diagnostics must contain integer counts")
+            recovery_usage.append(sum(cast(list[int], recovery_values)))
             successes += int(artifact.metrics.success)
 
         return OptionPolicyMetrics(

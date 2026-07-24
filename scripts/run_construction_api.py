@@ -14,13 +14,12 @@ import uvicorn  # noqa: E402
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the Construction v2 API.")
-    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8008)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
     uvicorn.run(
         "embodied_skill_composer.construction.api:app",
-        host=args.host,
+        host="127.0.0.1",
         port=args.port,
         reload=args.reload,
     )

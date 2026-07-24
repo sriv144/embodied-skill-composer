@@ -130,7 +130,10 @@ def main() -> int:
         f"{artifact.metrics.beams_installed}/{artifact.metrics.total_beams}"
     )
     print(f"Steps: {artifact.metrics.step_count}")
-    print(f"Simulation steps: {diagnostics['coppelia_sim']['simulation_step_count']}")
+    coppelia_diagnostics = diagnostics.get("coppelia_sim")
+    if not isinstance(coppelia_diagnostics, dict):
+        raise TypeError("Coppelia diagnostics payload is missing")
+    print(f"Simulation steps: {coppelia_diagnostics['simulation_step_count']}")
     print(f"Final image: {image_path}")
     print(f"Scene: {scene_path}")
     print(f"Diagnostics: {diagnostics_path}")

@@ -52,9 +52,7 @@ def main() -> int:
     config = load_assembly_scenario(Path(args.env_config))
     runtime_profile = load_runtime_profile(Path(args.runtime_profile))
     brain_type = (
-        ScriptedConstructionBrain
-        if args.brain == "scripted"
-        else HeuristicConstructionBrain
+        ScriptedConstructionBrain if args.brain == "scripted" else HeuristicConstructionBrain
     )
     episodes = []
     for episode_index in range(args.episodes):
@@ -75,15 +73,24 @@ def main() -> int:
         item.artifact.metrics.structure_completion_rate for item in episodes
     ) / len(episodes)
     mean_sensor_safety_holds = sum(
-        int(item.diagnostics.get("construction_brain", {}).get("sensor_safety_hold_count", 0))
+        _construction_brain_count(
+            item.diagnostics,
+            "sensor_safety_hold_count",
+        )
         for item in episodes
     ) / len(episodes)
     mean_visual_safety_holds = sum(
-        int(item.diagnostics.get("construction_brain", {}).get("visual_safety_hold_count", 0))
+        _construction_brain_count(
+            item.diagnostics,
+            "visual_safety_hold_count",
+        )
         for item in episodes
     ) / len(episodes)
     mean_terminal_safety_holds = sum(
-        int(item.diagnostics.get("construction_brain", {}).get("terminal_safety_hold_count", 0))
+        _construction_brain_count(
+            item.diagnostics,
+            "terminal_safety_hold_count",
+        )
         for item in episodes
     ) / len(episodes)
     visual_diagnostics = [
@@ -104,8 +111,7 @@ def main() -> int:
     mean_visual_samples = (
         0.0
         if not visual_diagnostics
-        else sum(int(item["sample_count"]) for item in visual_diagnostics)
-        / len(visual_diagnostics)
+        else sum(int(item["sample_count"]) for item in visual_diagnostics) / len(visual_diagnostics)
     )
     final_visible_blueprint_recall = [
         float(item["latest_evaluation"]["visible_recall_by_category"]["blueprint_cell"])
@@ -118,9 +124,7 @@ def main() -> int:
         if item.get("latest_evaluation")
     ]
     backend_status = episodes[0].diagnostics.get("backend_status", {})
-    backend_ready = bool(
-        isinstance(backend_status, dict) and backend_status.get("is_ready", False)
-    )
+    backend_ready = bool(isinstance(backend_status, dict) and backend_status.get("is_ready", False))
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_path = args.output or (
         PROJECT_ROOT / "logs" / "construction_brain" / f"{args.brain}-{timestamp}.json"
@@ -158,7 +162,9 @@ def main() -> int:
     print(f"Runtime profile: {runtime_profile.name} ({runtime_profile.backend})")
     print(f"Backend ready: {backend_ready}")
     if not backend_ready:
-        print("Backend note: execution used logical task semantics without a ready simulator model.")
+        print(
+            "Backend note: execution used logical task semantics without a ready simulator model."
+        )
     print(f"Episodes: {len(episodes)}")
     print(f"Success rate: {success_rate:.3f}")
     print(f"Mean structure completion: {mean_completion:.3f}")
@@ -175,6 +181,21 @@ def main() -> int:
         )
     print(f"Artifact: {output_path}")
     return 0
+
+
+def _construction_brain_count(
+    diagnostics: dict[str, object],
+    field: str,
+) -> int:
+    section = diagnostics.get("construction_brain")
+    if section is None:
+        return 0
+    if not isinstance(section, dict):
+        raise TypeError("construction_brain diagnostics must be a mapping")
+    value = section.get(field, 0)
+    if not isinstance(value, (str, bytes, bytearray, int, float)):
+        raise TypeError(f"construction_brain.{field} must be numeric")
+    return int(value)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from math import sqrt
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 import torch
@@ -24,10 +24,7 @@ from embodied_skill_composer.construction.marl_env_v1 import (
 
 SELF_FEATURES = ROBOT_FEATURES + 1
 GLOBAL_STATE_FEATURES = (
-    MAX_MODULES * MODULE_FEATURES
-    + MAX_MODULES * MAX_MODULES
-    + FLEET_SIZE * ROBOT_FEATURES
-    + 2
+    MAX_MODULES * MODULE_FEATURES + MAX_MODULES * MAX_MODULES + FLEET_SIZE * ROBOT_FEATURES + 2
 )
 
 
@@ -99,7 +96,10 @@ class CentralValueNetwork(nn.Module):
 
     def forward(self, state: Tensor) -> Tensor:
         value = self.network(state)
-        return value.unsqueeze(-2).expand(*value.shape[:-1], FLEET_SIZE, 1)
+        return cast(
+            Tensor,
+            value.unsqueeze(-2).expand(*value.shape[:-1], FLEET_SIZE, 1),
+        )
 
 
 class IndependentValueNetwork(nn.Module):
@@ -122,7 +122,10 @@ class IndependentValueNetwork(nn.Module):
         module_count = module_mask.sum(dim=-2).clamp_min(1.0)
         module_context = (self.module_encoder(module_features) * module_mask).sum(dim=-2)
         module_context = module_context / module_count
-        return self.value(torch.cat([own, module_context], dim=-1))
+        return cast(
+            Tensor,
+            self.value(torch.cat([own, module_context], dim=-1)),
+        )
 
 
 @dataclass

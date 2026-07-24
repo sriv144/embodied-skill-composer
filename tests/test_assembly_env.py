@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 
 from embodied_skill_composer.assembly.baseline import scripted_joint_policy
-from embodied_skill_composer.assembly.env import CollaborativeAssemblyEnv
+from embodied_skill_composer.assembly.env import AssemblyAction, CollaborativeAssemblyEnv
 from embodied_skill_composer.assembly.models import (
     AssemblyScenarioConfig,
     BeamTask,
@@ -214,6 +214,37 @@ def test_stage_specific_curriculum_beams_override_default_beams() -> None:
 
     assert env.active_beam_count == 2
     assert env._available_beams()[1].name == "beam_beta_easy"
+
+
+def test_scripted_policy_uses_stage_specific_current_beam() -> None:
+    env = build_two_beam_env()
+    env.set_curriculum_stage(stage_index=1)
+    env.reset(seed=7)
+    env.state.current_beam_index = 1
+    env.state.agent_positions = [(2, 5), (2, 6)]
+
+    assert scripted_joint_policy(env) == [
+        int(AssemblyAction.GRAB),
+        int(AssemblyAction.GRAB),
+    ]
+
+
+def test_scripted_policy_prefers_same_name_stage_override() -> None:
+    env = build_two_beam_env()
+    stage_beams = env.config.curriculum_stage_beams[1]
+    env.config.curriculum_stage_beams[1] = [
+        stage_beams[0],
+        stage_beams[1].model_copy(update={"name": "beam_beta"}),
+    ]
+    env.set_curriculum_stage(stage_index=1)
+    env.reset(seed=7)
+    env.state.current_beam_index = 1
+    env.state.agent_positions = [(2, 5), (2, 6)]
+
+    assert scripted_joint_policy(env) == [
+        int(AssemblyAction.GRAB),
+        int(AssemblyAction.GRAB),
+    ]
 
 
 def test_team_option_mask_unlocks_grab_only_at_pickup() -> None:

@@ -14,6 +14,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from embodied_skill_composer.assembly.backends import build_assembly_backend
+from embodied_skill_composer.assembly.models import EpisodeArtifact
 from embodied_skill_composer.assembly.runtime import (
     load_assembly_scenario,
     load_runtime_profile,
@@ -62,15 +63,18 @@ def main() -> int:
 
     env.set_curriculum_stage(None)
     episodes: list[dict[str, object]] = []
+    artifacts: list[EpisodeArtifact] = []
     for episode in range(args.episodes):
         env.reset(seed=train_config.seed + episode)
         done = False
         while not done:
+            option: int
             if args.policy == "scripted":
-                option = env.scripted_team_option()
+                option = int(env.scripted_team_option())
             else:
                 import torch
 
+                assert trainer is not None
                 observation = torch.as_tensor(
                     env.get_team_option_observation(), dtype=torch.float32, device=trainer.device
                 ).unsqueeze(0)
@@ -81,6 +85,7 @@ def main() -> int:
             result = env.execute_team_option(option, max_primitive_steps=env.config.option_max_primitive_steps)
             done = result.done
         artifact = env.build_artifact(policy_mode=args.policy)
+        artifacts.append(artifact)
         episodes.append(
             {
                 "artifact": artifact.model_dump(mode="json"),
@@ -88,9 +93,15 @@ def main() -> int:
             }
         )
 
-    success_rate = sum(int(item["artifact"]["metrics"]["success"]) for item in episodes) / max(1, len(episodes))
-    mean_return = sum(float(item["artifact"]["metrics"]["total_reward"]) for item in episodes) / max(1, len(episodes))
-    mean_beams_installed = sum(int(item["artifact"]["metrics"]["beams_installed"]) for item in episodes) / max(1, len(episodes))
+    success_rate = sum(int(artifact.metrics.success) for artifact in artifacts) / max(
+        1, len(artifacts)
+    )
+    mean_return = sum(artifact.metrics.total_reward for artifact in artifacts) / max(
+        1, len(artifacts)
+    )
+    mean_beams_installed = sum(
+        artifact.metrics.beams_installed for artifact in artifacts
+    ) / max(1, len(artifacts))
     print(f"Policy: {args.policy}")
     print(f"Runtime profile: {runtime_profile.name} ({runtime_profile.backend})")
     print(f"Episodes: {args.episodes}")

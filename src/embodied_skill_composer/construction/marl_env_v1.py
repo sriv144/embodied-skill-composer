@@ -80,11 +80,13 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
         max_decisions: int = 256,
         max_sim_time_s: float = 1800.0,
     ) -> None:
+        self.scenario: ScenarioManifest | None
         if isinstance(scenario, ScenarioManifest):
-            self.scenario = scenario.model_copy(deep=True)
-            self.plan = self.scenario.plan
-            self.failures = list(self.scenario.failures)
-            route_seed = self.scenario.seed
+            scenario_manifest = scenario.model_copy(deep=True)
+            self.scenario = scenario_manifest
+            self.plan = scenario_manifest.plan
+            self.failures = list(scenario_manifest.failures)
+            route_seed = scenario_manifest.seed
         else:
             self.scenario = None
             self.plan = scenario.model_copy(deep=True)
@@ -99,13 +101,9 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
         self.skill_profile = skill_profile or default_skill_profile()
         self.router = router or create_routing_adapter(seed=route_seed)
         self.possible_agents = [robot.robot_id for robot in self.plan.robots]
-        self.agent_name_mapping = {
-            agent: index for index, agent in enumerate(self.possible_agents)
-        }
+        self.agent_name_mapping = {agent: index for index, agent in enumerate(self.possible_agents)}
         self.modules = list(self.plan.modules)
-        self.module_index = {
-            module.module_id: index for index, module in enumerate(self.modules)
-        }
+        self.module_index = {module.module_id: index for index, module in enumerate(self.modules)}
         self.module_by_id = {module.module_id: module for module in self.modules}
         self.robots = {robot.robot_id: robot for robot in self.plan.robots}
         self.np_random, self.np_random_seed = seeding.np_random(None)
@@ -213,8 +211,7 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
         if done:
             team_reward += 2.0
         truncated = (
-            self.decision_count >= self.max_decisions
-            or self.sim_time_s >= self.max_sim_time_s
+            self.decision_count >= self.max_decisions or self.sim_time_s >= self.max_sim_time_s
         ) and not done
         rewards = {agent: float(team_reward) for agent in acting_agents}
         terminations = {agent: done for agent in acting_agents}
@@ -269,7 +266,7 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
     def metrics(self) -> dict[str, object]:
         elapsed = max(self.sim_time_s, 1e-9)
         return {
-            "environment": self.metadata["name"],
+            "environment": str(self.metadata["name"]),
             "structure_completion_rate": len(self.completed) / len(self.modules),
             "completed_modules": len(self.completed),
             "total_modules": len(self.modules),
@@ -303,12 +300,23 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
             if event is None:
                 continue
             event.controller = controller
-            event.action_probability = float(values["selected_probability"])
-            event.uncertainty = float(values["uncertainty"])
+            event.action_probability = _diagnostic_float(
+                values["selected_probability"],
+                field="selected_probability",
+            )
+            event.uncertainty = _diagnostic_float(
+                values["uncertainty"],
+                field="uncertainty",
+            )
             probabilities = values["action_probabilities"]
+            if not isinstance(probabilities, (list, tuple)):
+                raise TypeError("action_probabilities must be a sequence")
             for candidate in event.candidates:
                 action = self.module_index[candidate.module_id] + 1
-                candidate.probability = float(probabilities[action])
+                candidate.probability = _diagnostic_float(
+                    probabilities[action],
+                    field=f"action_probabilities[{action}]",
+                )
 
     def _allocate(self, actions: dict[str, int]) -> list[dict[str, object]]:
         ready = self.ready_modules()
@@ -431,7 +439,10 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
                 "travel_distance_m": travel_distance,
                 "routing_backend": approach_routes.backend,
                 "approach_routes": {
-                    agent: [point.model_dump(mode="json") for point in approach_routes.world_paths[agent]]
+                    agent: [
+                        point.model_dump(mode="json")
+                        for point in approach_routes.world_paths[agent]
+                    ]
                     for agent in team
                 },
                 "carry_route": [
@@ -561,19 +572,20 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
             affected = [
                 job
                 for job in self.active_jobs.values()
-                if any(
-                    failure.obstacle_cell in path for path in job.routes.cell_paths.values()
-                )
+                if any(failure.obstacle_cell in path for path in job.routes.cell_paths.values())
             ]
             for job in affected:
                 self._cancel_job(job, reason=failure.failure_id)
         else:
-            job = self.active_jobs.get(failure.module_id or "")
-            if job is None and self.active_jobs:
-                job = sorted(self.active_jobs.values(), key=lambda item: item.module_id)[0]
-            if job is not None:
+            failed_job = self.active_jobs.get(failure.module_id or "")
+            if failed_job is None and self.active_jobs:
+                failed_job = sorted(
+                    self.active_jobs.values(),
+                    key=lambda item: item.module_id,
+                )[0]
+            if failed_job is not None:
                 self.drop_count += 1
-                self._cancel_job(job, reason=failure.failure_id)
+                self._cancel_job(failed_job, reason=failure.failure_id)
         self.event_log.append(
             {
                 "timestamp_s": self.sim_time_s,
@@ -587,9 +599,7 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
         module: BuildModule,
         candidates: list[str],
     ) -> list[str] | None:
-        eligible = [
-            agent for agent in candidates if self.robot_runtime[agent].status == "idle"
-        ]
+        eligible = [agent for agent in candidates if self.robot_runtime[agent].status == "idle"]
         for team in combinations(sorted(eligible), module.required_team_size):
             if sum(self.robots[agent].payload_capacity_kg for agent in team) >= module.mass_kg:
                 return list(team)
@@ -626,11 +636,14 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
                     rejection_reason=None if selected else "lower controller preference",
                 )
             )
-        remaining_duration = sum(
-            module.install_duration_s
-            for module in self.modules
-            if module.module_id not in self.completed
-        ) / FLEET_SIZE
+        remaining_duration = (
+            sum(
+                module.install_duration_s
+                for module in self.modules
+                if module.module_id not in self.completed
+            )
+            / FLEET_SIZE
+        )
         selected_id = None if action == 0 else self.modules[action - 1].module_id
         self.brain_events.append(
             SwarmBrainEvent(
@@ -749,9 +762,7 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
 
     def _normalize_y(self, value: float) -> float:
         height_m = (self.plan.site_grid.height - 1) * self.plan.site_grid.resolution_m
-        return float(
-            np.clip(2 * (value - self.plan.site_grid.origin.y) / height_m - 1, -1, 1)
-        )
+        return float(np.clip(2 * (value - self.plan.site_grid.origin.y) / height_m - 1, -1, 1))
 
     def _last_routing_backend(self) -> str | None:
         if not self.assignment_history:
@@ -779,13 +790,17 @@ def default_skill_profile() -> SkillProfile:
     )
 
 
+def _diagnostic_float(value: object, *, field: str) -> float:
+    if not isinstance(value, (str, bytes, bytearray, int, float)):
+        raise TypeError(f"{field} must be numeric")
+    return float(value)
+
+
 def scripted_temporal_actions(
     env: TemporalConstructionCoordinationEnv,
 ) -> dict[str, int]:
     actions = {agent: 0 for agent in env.agents}
-    available = [
-        agent for agent in env.agents if env.robot_runtime[agent].status == "idle"
-    ]
+    available = [agent for agent in env.agents if env.robot_runtime[agent].status == "idle"]
     for module in sorted(
         env.ready_modules(),
         key=lambda item: (-item.required_team_size, item.module_id),
@@ -808,9 +823,7 @@ def auction_temporal_actions(
     env: TemporalConstructionCoordinationEnv,
 ) -> dict[str, int]:
     actions = {agent: 0 for agent in env.agents}
-    available = {
-        agent for agent in env.agents if env.robot_runtime[agent].status == "idle"
-    }
+    available = {agent for agent in env.agents if env.robot_runtime[agent].status == "idle"}
     scored_modules = []
     for module in env.ready_modules():
         scored_teams = []
