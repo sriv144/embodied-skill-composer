@@ -13,6 +13,7 @@ from threading import Event
 import pytest
 from pydantic import ValidationError
 
+from embodied_skill_composer.construction import lab_registry as lab_registry_module
 from embodied_skill_composer.construction import lab_service as lab_service_module
 from embodied_skill_composer.construction.experiment_protocol import (
     load_experiment_protocol,
@@ -49,6 +50,165 @@ def test_process_identity_and_owned_termination_are_pid_reuse_safe() -> None:
         if process.poll() is None:
             process.terminate()
             process.wait(timeout=5)
+
+
+def test_windows_process_lease_helpers_are_platform_independent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ctypes
+    from types import SimpleNamespace
+
+    class KernelCall:
+        def __init__(self, implementation: object) -> None:
+            self.implementation = implementation
+            self.argtypes: object = None
+            self.restype: object = None
+
+        def __call__(self, *args: object) -> object:
+            assert callable(self.implementation)
+            return self.implementation(*args)
+
+    class Kernel32:
+        def __init__(self) -> None:
+            self.closed_handles = 0
+            self.terminated_handles = 0
+            self.open_process_result = 77
+            self.process_times_succeed = True
+            self.exit_code_succeeds = True
+            self.exit_code_value = 259
+            self.terminate_succeeds = True
+            self.OpenProcess = KernelCall(self.open_process)
+            self.GetProcessTimes = KernelCall(self.get_process_times)
+            self.GetExitCodeProcess = KernelCall(self.get_exit_code_process)
+            self.TerminateProcess = KernelCall(self.terminate_process)
+            self.WaitForSingleObject = KernelCall(lambda *_args: 0)
+            self.CloseHandle = KernelCall(self.close_handle)
+
+        def open_process(self, *_args: object) -> int:
+            return self.open_process_result
+
+        def get_process_times(
+            self,
+            _handle: object,
+            creation: object,
+            _exit_time: object,
+            _kernel_time: object,
+            _user_time: object,
+        ) -> int:
+            if not self.process_times_succeed:
+                return 0
+            creation_time = getattr(creation, "_obj")
+            creation_time.low = 7
+            creation_time.high = 1
+            return 1
+
+        def get_exit_code_process(
+            self,
+            _handle: object,
+            exit_code: object,
+        ) -> int:
+            getattr(exit_code, "_obj").value = self.exit_code_value
+            return int(self.exit_code_succeeds)
+
+        def terminate_process(self, _handle: object, _exit_code: object) -> int:
+            self.terminated_handles += 1
+            return int(self.terminate_succeeds)
+
+        def close_handle(self, _handle: object) -> int:
+            self.closed_handles += 1
+            return 1
+
+    kernel32 = Kernel32()
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+    monkeypatch.setattr(lab_registry_module, "os", SimpleNamespace(name="nt"))
+
+    expected_identity = f"windows:{(1 << 32) | 7}"
+    assert lab_registry_module._windows_process_identity(42) == expected_identity
+    assert lab_registry_module._process_identity(42) == expected_identity
+    assert lab_registry_module._process_alive(42) is True
+    assert (
+        lab_registry_module._terminate_owned_windows_process(
+            42,
+            expected_identity,
+            timeout_seconds=0.01,
+        )
+        is True
+    )
+    assert (
+        lab_registry_module._terminate_owned_process(
+            42,
+            expected_identity,
+            timeout_seconds=0.01,
+        )
+        is True
+    )
+    assert kernel32.terminated_handles == 2
+    assert kernel32.closed_handles == 6
+
+    kernel32.open_process_result = 0
+    assert lab_registry_module._windows_process_identity(42) is None
+    assert lab_registry_module._process_alive(42) is False
+    assert (
+        lab_registry_module._terminate_owned_windows_process(
+            42,
+            expected_identity,
+            timeout_seconds=0.01,
+        )
+        is True
+    )
+    assert (
+        lab_registry_module._terminate_owned_process(
+            42,
+            expected_identity,
+            timeout_seconds=0.01,
+        )
+        is True
+    )
+
+    kernel32.open_process_result = 77
+    kernel32.process_times_succeed = False
+    assert lab_registry_module._windows_process_identity(42) is None
+    assert (
+        lab_registry_module._terminate_owned_windows_process(
+            42,
+            expected_identity,
+            timeout_seconds=0.01,
+        )
+        is False
+    )
+
+    kernel32.process_times_succeed = True
+    kernel32.exit_code_succeeds = False
+    assert lab_registry_module._process_alive(42) is False
+
+    kernel32.exit_code_succeeds = True
+    assert (
+        lab_registry_module._terminate_owned_windows_process(
+            42,
+            "windows:different-process",
+            timeout_seconds=0.01,
+        )
+        is True
+    )
+    kernel32.exit_code_value = 0
+    assert (
+        lab_registry_module._terminate_owned_windows_process(
+            42,
+            expected_identity,
+            timeout_seconds=0.01,
+        )
+        is True
+    )
+    kernel32.exit_code_value = 259
+    kernel32.terminate_succeeds = False
+    assert (
+        lab_registry_module._terminate_owned_windows_process(
+            42,
+            expected_identity,
+            timeout_seconds=0.01,
+        )
+        is False
+    )
 
 
 def test_worker_mutations_are_fenced_by_claim_token(tmp_path: Path) -> None:

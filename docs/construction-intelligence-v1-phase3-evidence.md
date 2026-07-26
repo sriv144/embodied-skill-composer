@@ -80,7 +80,7 @@ The local gate refresh on 2026-07-26 passed:
 - Ruff across `src`, `scripts`, and `tests`;
 - mypy across 118 files in `src` and `scripts`;
 - `pip check` and byte compilation;
-- 277 tests passed, 3 opt-in/live tests skipped, and combined statement/branch coverage was 82.32%
+- 278 tests passed, 3 opt-in/live tests skipped, and combined statement/branch coverage was 82.42%
   against the required 82.19% floor;
 - the repository secret scanner;
 - a clean `npm ci` with zero reported vulnerabilities; and
@@ -89,3 +89,8 @@ The local gate refresh on 2026-07-26 passed:
 The existing Vite chunk-size warning remains explicitly assigned to Phase 6. The hosted Gitleaks
 action and the rest of the protected remote matrix remain pending until the review branch is
 published; their result will be appended before Phase 3 is checked on the project roadmap.
+
+The clean-checkout rerun also removed a legacy test dependency on an ignored
+`logs/assembly_options.pt` file. That test now trains and loads its own short deterministic policy,
+and platform-neutral Win32 API fixtures verify durable process identity and termination semantics
+on every CI operating system.
