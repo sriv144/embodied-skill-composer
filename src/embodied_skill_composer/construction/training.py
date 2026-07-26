@@ -10,6 +10,7 @@ import random
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import ROUND_HALF_UP, Decimal
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal, cast
@@ -50,6 +51,10 @@ class TrainingConfig(BaseModel):
     experiment_id: str = "ad_hoc"
     experiment_variant: str = "default"
     training_seed: int | None = None
+    protocol_run_digest: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
     transitions: int = Field(default=50_000, gt=0)
     expert_episodes: int = Field(default=24, ge=0)
     behavior_clone_epochs: int = Field(default=20, ge=0)
@@ -124,6 +129,7 @@ class TrainingConfig(BaseModel):
                 rollout_decisions=2048,
                 ppo_epochs=6,
                 minibatch_size=512,
+                checkpoint_fractions=[0.1, 0.25, 0.5, 0.75, 1.0],
             )
         return cls(algorithm=algorithm, profile=profile, seed=seed)
 
@@ -203,7 +209,7 @@ def train_swarm_policy(
         raise ValueError("training configuration digest does not match the supplied digest")
     config.source_commit = resolved_commit
     config.configuration_digest = resolved_digest
-    design_digest = _design_digest(base_design)
+    resolved_design_digest = design_digest(base_design)
     _seed_everything(config.seed)
     device = _resolve_device(config.device)
     if config.resume_checkpoint is not None:
@@ -241,7 +247,7 @@ def train_swarm_policy(
             ppo_optimizer=optimizer,
             bc_optimizer=bc_optimizer,
             expected_configuration_digest=resolved_digest,
-            expected_design_digest=design_digest,
+            expected_design_digest=resolved_design_digest,
             expected_source_commit=resolved_commit,
             expected_source_dirty=current_dirty,
             expected_source_tree_digest=current_tree_digest,
@@ -268,17 +274,21 @@ def train_swarm_policy(
             },
         )
 
-    checkpoint_targets = {
-        max(1, int(round(config.transitions * fraction))): fraction
-        for fraction in config.checkpoint_fractions
-    }
+    checkpoint_targets = checkpoint_transition_targets(config)
     saved_targets = {target for target in checkpoint_targets if target <= transitions}
 
-    def persist_checkpoint(*, event: str, fraction: float | None = None) -> Path:
+    def persist_checkpoint(
+        *,
+        event: str,
+        fraction: float | None = None,
+        target_transitions: int | None = None,
+    ) -> Path:
         latest_path = checkpoints_dir / "latest.pt"
         published_path = latest_path
+        policy_path: Path | None = None
         if fraction is not None:
             published_path = checkpoints_dir / f"checkpoint_{int(round(fraction * 100)):03d}pct.pt"
+            policy_path = checkpoints_dir / f"policy_{int(round(fraction * 100)):03d}pct.pt"
             if str(published_path) not in checkpoint_lineage:
                 checkpoint_lineage.append(str(published_path))
         save_training_checkpoint(
@@ -288,7 +298,7 @@ def train_swarm_policy(
             bc_optimizer=bc_optimizer,
             config=config,
             configuration_digest_value=resolved_digest,
-            design_digest=design_digest,
+            design_digest=resolved_design_digest,
             source_commit_value=resolved_commit,
             transitions=transitions,
             updates=updates,
@@ -296,6 +306,8 @@ def train_swarm_policy(
             bc_epoch=bc_epoch,
             curve_rows=curve_rows,
             checkpoint_lineage=checkpoint_lineage,
+            checkpoint_fraction=fraction,
+            checkpoint_target_transitions=target_transitions,
         )
         if fraction is not None:
             save_training_checkpoint(
@@ -305,7 +317,7 @@ def train_swarm_policy(
                 bc_optimizer=bc_optimizer,
                 config=config,
                 configuration_digest_value=resolved_digest,
-                design_digest=design_digest,
+                design_digest=resolved_design_digest,
                 source_commit_value=resolved_commit,
                 transitions=transitions,
                 updates=updates,
@@ -313,6 +325,13 @@ def train_swarm_policy(
                 bc_epoch=bc_epoch,
                 curve_rows=curve_rows,
                 checkpoint_lineage=checkpoint_lineage,
+                checkpoint_fraction=fraction,
+                checkpoint_target_transitions=target_transitions,
+            )
+            export_training_snapshot_as_policy_checkpoint(
+                published_path,
+                policy_path,
+                device="cpu",
             )
         _notify(
             progress_callback,
@@ -321,7 +340,9 @@ def train_swarm_policy(
             {
                 "checkpoint_path": str(latest_path),
                 "snapshot_path": str(published_path),
+                "policy_checkpoint_path": str(policy_path) if policy_path else None,
                 "fraction": fraction,
+                "target_transitions": target_transitions,
             },
         )
         return latest_path
@@ -427,6 +448,7 @@ def train_swarm_policy(
                     persist_checkpoint(
                         event="checkpoint_saved",
                         fraction=checkpoint_targets[target],
+                        target_transitions=target,
                     )
             else:
                 persist_checkpoint(event="checkpoint_saved")
@@ -747,6 +769,21 @@ def optimize_ppo_batch(
     return latest
 
 
+def checkpoint_transition_targets(config: TrainingConfig) -> dict[int, float]:
+    """Return stable transition targets without binary floating-point drift."""
+
+    total = Decimal(config.transitions)
+    targets: dict[int, float] = {}
+    for fraction in config.checkpoint_fractions:
+        target = int(
+            (total * Decimal(str(fraction))).to_integral_value(
+                rounding=ROUND_HALF_UP
+            )
+        )
+        targets[max(1, target)] = fraction
+    return targets
+
+
 def save_training_checkpoint(
     path: Path,
     *,
@@ -763,6 +800,8 @@ def save_training_checkpoint(
     bc_epoch: int,
     curve_rows: list[dict[str, float | int]],
     checkpoint_lineage: list[str],
+    checkpoint_fraction: float | None = None,
+    checkpoint_target_transitions: int | None = None,
 ) -> Path:
     """Atomically persist all state required for an exact local resume."""
 
@@ -789,10 +828,112 @@ def save_training_checkpoint(
         "source_dirty": config.source_dirty,
         "source_tree_digest": config.source_tree_digest,
         "checkpoint_lineage": checkpoint_lineage,
+        "checkpoint_fraction": checkpoint_fraction,
+        "checkpoint_target_transitions": checkpoint_target_transitions,
     }
     torch.save(payload, temporary)
     os.replace(temporary, path)
     return path
+
+
+def export_training_snapshot_as_policy_checkpoint(
+    snapshot_path: Path,
+    policy_path: Path | None = None,
+    *,
+    device: torch.device | str = "cpu",
+) -> Path:
+    """Convert a trusted resumable snapshot into an evaluation policy checkpoint."""
+
+    payload_value = torch.load(snapshot_path, map_location=device, weights_only=False)
+    if not isinstance(payload_value, dict):
+        raise ValueError("training snapshot payload is not a dictionary")
+    payload = cast(dict[str, object], payload_value)
+    if payload.get("schema_version") != 2:
+        raise ValueError(
+            "unsupported training snapshot schema_version "
+            f"{payload.get('schema_version')!r}"
+        )
+
+    algorithm = payload.get("algorithm")
+    config_value = payload.get("config")
+    actor_state = payload.get("actor_state_dict")
+    critic_state = payload.get("critic_state_dict")
+    if algorithm not in {"mappo", "ippo"}:
+        raise ValueError(f"unsupported training snapshot algorithm {algorithm!r}")
+    if not isinstance(config_value, dict):
+        raise ValueError("training snapshot is missing configuration metadata")
+    if not isinstance(actor_state, dict) or not isinstance(critic_state, dict):
+        raise ValueError("training snapshot is missing actor or critic state")
+
+    hidden_dim_value = config_value.get("hidden_dim", 128)
+    if not isinstance(hidden_dim_value, int):
+        raise ValueError("training snapshot hidden_dim must be an integer")
+    transition_count = _checkpoint_int(payload, "transitions")
+    total_transitions = config_value.get("transitions")
+    if not isinstance(total_transitions, int) or total_transitions <= 0:
+        raise ValueError("training snapshot total transitions must be a positive integer")
+    checkpoint_fraction_value = payload.get("checkpoint_fraction")
+    if checkpoint_fraction_value is not None and not isinstance(
+        checkpoint_fraction_value, (int, float)
+    ):
+        raise ValueError("training snapshot checkpoint_fraction must be numeric or null")
+    checkpoint_fraction = (
+        float(checkpoint_fraction_value)
+        if checkpoint_fraction_value is not None
+        else min(transition_count, total_transitions) / total_transitions
+    )
+    configuration_digest_value = payload.get("configuration_digest")
+    source_commit_value = payload.get("source_commit")
+    lineage_value = payload.get("checkpoint_lineage")
+    if not isinstance(configuration_digest_value, str):
+        raise ValueError("training snapshot is missing configuration_digest")
+    if not isinstance(source_commit_value, str):
+        raise ValueError("training snapshot is missing source_commit")
+    if not isinstance(lineage_value, list) or not all(
+        isinstance(item, str) for item in lineage_value
+    ):
+        raise ValueError("training snapshot checkpoint_lineage must be a list of strings")
+
+    bundle = build_torchrl_policy(
+        cast(Literal["mappo", "ippo"], algorithm),
+        hidden_dim=hidden_dim_value,
+    )
+    bundle.actor_model.load_state_dict(cast(dict[str, Tensor], actor_state))
+    bundle.critic_model.load_state_dict(cast(dict[str, Tensor], critic_state))
+    bundle = bundle.to(device)
+    resolved_policy_path = policy_path or snapshot_path.with_name(
+        f"{snapshot_path.stem}.policy.pt"
+    )
+    metadata: dict[str, object] = {
+        "hidden_dim": hidden_dim_value,
+        "experiment_id": config_value.get("experiment_id"),
+        "experiment_variant": config_value.get("experiment_variant"),
+        "training_seed": config_value.get("training_seed"),
+        "seed": config_value.get("seed"),
+        "transition_count": transition_count,
+        "transitions": transition_count,
+        "fraction": checkpoint_fraction,
+        "checkpoint_fraction": checkpoint_fraction,
+        "checkpoint_target_transitions": payload.get(
+            "checkpoint_target_transitions"
+        ),
+        "configuration_digest": configuration_digest_value,
+        "source_commit": source_commit_value,
+        "source_dirty": payload.get("source_dirty"),
+        "source_tree_digest": payload.get("source_tree_digest"),
+        "design_digest": payload.get("design_digest"),
+        "environment_fingerprint": config_value.get(
+            "environment_fingerprint",
+            {},
+        ),
+        "checkpoint_lineage": list(lineage_value),
+        "resume_provenance": config_value.get("resume_provenance", {}),
+        "training_snapshot_path": str(snapshot_path.resolve()),
+        "training_snapshot_schema_version": 2,
+        "environment_schema": payload.get("environment_schema"),
+    }
+    save_policy_checkpoint(bundle, resolved_policy_path, metadata=metadata)
+    return resolved_policy_path
 
 
 def load_training_checkpoint(
@@ -1067,7 +1208,7 @@ def _canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _design_digest(design: HouseDesign) -> str:
+def design_digest(design: HouseDesign) -> str:
     serialized = _canonical_json(design.model_dump(mode="json"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 

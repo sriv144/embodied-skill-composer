@@ -12,9 +12,16 @@ from starlette.websockets import WebSocketDisconnect
 
 from embodied_skill_composer.construction import api as api_module
 from embodied_skill_composer.construction import evaluation as evaluation_module
+from embodied_skill_composer.construction import (
+    experiment_execution as experiment_execution_module,
+)
 from embodied_skill_composer.construction import lab_worker as lab_worker_module
 from embodied_skill_composer.construction import policy as policy_module
 from embodied_skill_composer.construction.api import create_app
+from embodied_skill_composer.construction.experiment_protocol import (
+    load_experiment_protocol,
+    protocol_digest,
+)
 from embodied_skill_composer.construction.lab_registry import LabRegistry
 from embodied_skill_composer.construction.lab_service import LabService
 from embodied_skill_composer.construction.runtime import load_house_design
@@ -233,8 +240,25 @@ def test_api_cancel_resume_run_events_and_websockets(tmp_path: Path) -> None:
 
         assert client.get(f"/api/lab/runs/{cancellable}").json()["status"] == "cancelled"
         assert client.get("/api/lab/runs").status_code == 200
+        openapi = client.get("/openapi.json").json()
+        event_response_schema = openapi["paths"][
+            "/api/lab/runs/{run_id}/events"
+        ]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert event_response_schema["items"]["$ref"].endswith(
+            "/RunEventEnvelope"
+        )
+        payload_schema = openapi["components"]["schemas"][
+            "RunEventEnvelope"
+        ]["properties"]["payload"]
+        assert payload_schema["discriminator"]["propertyName"] == "event"
+        assert len(payload_schema["oneOf"]) >= 10
         events = client.get(f"/api/lab/runs/{cancellable}/events").json()
         assert events
+        assert [item["payload"]["event"] for item in events] == [
+            "run_created",
+            "cancelled",
+        ]
+        assert all(set(item) == {"sequence", "created_at", "payload"} for item in events)
         sequence = events[0]["sequence"]
         assert client.get(
             f"/api/lab/runs/{cancellable}/events?after={sequence}"
@@ -251,6 +275,7 @@ def test_api_cancel_resume_run_events_and_websockets(tmp_path: Path) -> None:
                     assert exc.code == 1000
                     break
         assert websocket_events
+        assert websocket_events == events
 
         with client.websocket_connect(
             "/api/lab/runs/missing/events/ws"
@@ -549,6 +574,10 @@ def test_lab_worker_success_resumes_and_registers_policy(
                 "event": "checkpoint_saved",
                 "transitions": received_config.transitions,
                 "checkpoint_path": str(latest_checkpoint),
+                "snapshot_path": str(latest_checkpoint),
+                "policy_checkpoint_path": None,
+                "fraction": None,
+                "target_transitions": None,
             }
         )
         return FakeArtifacts(
@@ -568,6 +597,14 @@ def test_lab_worker_success_resumes_and_registers_policy(
     assert completed["status"] == "completed"
     assert completed["progress"] == 1.0
     assert completed["latest_checkpoint"] == str(latest_checkpoint)
+    assert completed["config"] == config.model_dump(mode="json")
+    assert completed["resume_provenance_history"] == [
+        {
+            "run_id": run_id,
+            "attempt": 1,
+            "checkpoint": str(resume_checkpoint),
+        }
+    ]
     assert registry.list_policies()[0]["id"] == "worker-policy"
     assert captured["design"] == design
     assert any(
@@ -661,6 +698,155 @@ def test_lab_worker_failure_unknown_run_and_invalid_claim(
     _set_worker_argv(monkeypatch, registry, stale_id, "wrong-token")
     with pytest.raises(SystemExit, match="claim token is stale or invalid"):
         lab_worker_module.main()
+
+
+def test_lab_worker_completes_claimed_matrix_evaluation_subprocess_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = LabRegistry(tmp_path / "matrix-worker.sqlite")
+    design = load_house_design(api_module.DEFAULT_DESIGN)
+    protocol = load_experiment_protocol()
+    matrix_id = "matrix-worker-success"
+    registry.create_experiment_matrix(
+        matrix_id,
+        protocol_digest=protocol_digest(protocol),
+        protocol=protocol.model_dump(mode="json"),
+        execution_profile="unit",
+        design=design.model_dump(mode="json"),
+        runs=[("fixture-training", {}, None, None)],
+    )
+    evidence_root = tmp_path / "heldout"
+    run_id = registry.create_matrix_evaluation_run(
+        matrix_id,
+        {
+            "matrix_id": matrix_id,
+            "protocol_digest": protocol_digest(protocol),
+            "output_root": str(evidence_root),
+            "device": "cpu",
+            "selection_evidence_path": str(tmp_path / "missing-selections.json"),
+        },
+        input_payload={"design": design.model_dump(mode="json")},
+    )
+    claimed = registry.claim_next_durable_job(kinds=("matrix_evaluation",))
+    assert claimed is not None
+
+    class FakeResult:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self.payload = payload
+
+        def model_dump(self, *, mode: str = "python") -> dict[str, object]:
+            assert mode == "json"
+            return self.payload
+
+    class FakeSuite:
+        evaluation_id = "fixture-heldout-evaluation"
+
+    def fake_evaluate(
+        received_registry,
+        received_matrix_id,
+        received_design,
+        received_protocol,
+        *,
+        output_root,
+        device,
+        cancel_check,
+    ):
+        assert received_registry.path == registry.path
+        assert received_matrix_id == matrix_id
+        assert received_design == design
+        assert received_protocol == protocol
+        assert output_root == evidence_root.resolve()
+        assert device == "cpu"
+        assert cancel_check() is False
+        return FakeSuite(), FakeResult({"passed": True})
+
+    def fake_audit(_suite, _protocol, *, selection_evidence):
+        assert selection_evidence is None
+        return [FakeResult({"hypothesis": "behavior_cloning", "supported": True})]
+
+    monkeypatch.setattr(
+        experiment_execution_module,
+        "evaluate_frozen_heldout_matrix",
+        fake_evaluate,
+    )
+    monkeypatch.setattr(
+        experiment_execution_module,
+        "audit_ablation_hypotheses",
+        fake_audit,
+    )
+    _set_worker_argv(
+        monkeypatch,
+        registry,
+        run_id,
+        str(claimed["claim_token"]),
+    )
+
+    assert lab_worker_module.main() == 0
+    completed = registry.get_run(run_id)
+    assert completed is not None
+    assert completed["status"] == "completed"
+    assert completed["progress"] == 1.0
+    assert completed["artifact_dir"] == str(
+        evidence_root.resolve() / FakeSuite.evaluation_id
+    )
+    events = [item["payload"]["event"] for item in registry.list_events(run_id)]
+    assert "matrix_evaluation_started" in events
+    assert "selection_evidence_unavailable" in events
+    assert "matrix_evaluation_completed" in events
+
+
+def test_lab_worker_cooperatively_cancels_matrix_evaluation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = LabRegistry(tmp_path / "matrix-worker-cancel.sqlite")
+    design = load_house_design(api_module.DEFAULT_DESIGN)
+    protocol = load_experiment_protocol()
+    matrix_id = "matrix-worker-cancel"
+    registry.create_experiment_matrix(
+        matrix_id,
+        protocol_digest=protocol_digest(protocol),
+        protocol=protocol.model_dump(mode="json"),
+        execution_profile="unit",
+        design=design.model_dump(mode="json"),
+        runs=[("fixture-training", {}, None, None)],
+    )
+    run_id = registry.create_matrix_evaluation_run(
+        matrix_id,
+        {
+            "matrix_id": matrix_id,
+            "protocol_digest": protocol_digest(protocol),
+            "output_root": str(tmp_path / "heldout"),
+            "device": "cpu",
+        },
+        input_payload={"design": design.model_dump(mode="json")},
+    )
+    claimed = registry.claim_next_durable_job(kinds=("matrix_evaluation",))
+    assert claimed is not None
+
+    def cancelled_evaluation(*_args, cancel_check, **_kwargs):
+        assert registry.request_cancel(run_id) is True
+        assert cancel_check() is True
+        raise RuntimeError("matrix evaluation cancelled")
+
+    monkeypatch.setattr(
+        experiment_execution_module,
+        "evaluate_frozen_heldout_matrix",
+        cancelled_evaluation,
+    )
+    _set_worker_argv(
+        monkeypatch,
+        registry,
+        run_id,
+        str(claimed["claim_token"]),
+    )
+
+    assert lab_worker_module.main() == 2
+    cancelled = registry.get_run(run_id)
+    assert cancelled is not None
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["error"] == "matrix evaluation cancelled"
 
 
 def _unused_training_runner(*_args: object, **_kwargs: object) -> FakeArtifacts:

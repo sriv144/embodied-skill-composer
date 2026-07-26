@@ -13,9 +13,11 @@ from embodied_skill_composer.construction.evaluation import (
     ControllerEvaluation,
     ControllerName,
     EpisodeEvaluation,
+    EvaluationGridEntry,
     EvaluationSuite,
     MetricSummary,
 )
+from embodied_skill_composer.construction.intelligence_models import PolicyManifest
 from embodied_skill_composer.construction.models import HouseDesign
 from embodied_skill_composer.construction.runtime import load_house_design
 
@@ -222,6 +224,75 @@ def test_evaluate_learned_controller_requires_policy_bundle(
         )
 
 
+def test_learned_evaluation_records_manifest_provenance_and_enforces_split(
+    cottage_design: HouseDesign,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_episode_runtime(monkeypatch)
+    monkeypatch.setattr(
+        evaluation,
+        "policy_actions",
+        lambda actor, observations, agents, **kwargs: (
+            {agent: 1 for agent in agents},
+            {},
+        ),
+    )
+    manifest = PolicyManifest(
+        policy_id="mappo-full-seed-7",
+        controller="mappo",
+        git_sha="abc123",
+        seed=7,
+        experiment_id="construction_intelligence_v1",
+        experiment_variant="mappo_full",
+        training_seed=7,
+        transition_count=1_500_000,
+        checkpoint_path="checkpoints/mappo-full-seed-7.pt",
+        checkpoint_sha256="cafe",
+        checkpoint_lineage=["checkpoint-10.pt", "checkpoint-100.pt"],
+        configuration_digest="config-digest",
+        source_commit="abc123",
+        resume_provenance={"attempt": 2, "from": "checkpoint-10.pt"},
+    )
+    bundle = cast(Any, SimpleNamespace(actor_model=object()))
+
+    result = evaluation.evaluate_controller_episode(
+        cottage_design,
+        seed=800,
+        controller="mappo",
+        bundle=bundle,
+        policy_manifest=manifest,
+        expected_split="validation",
+    )
+
+    assert result.policy_id == manifest.policy_id
+    assert result.experiment_id == "construction_intelligence_v1"
+    assert result.experiment_variant == "mappo_full"
+    assert result.training_seed == 7
+    assert result.transition_count == 1_500_000
+    assert result.checkpoint_lineage == ["checkpoint-10.pt", "checkpoint-100.pt"]
+    assert result.configuration_digest == "config-digest"
+    assert result.source_commit == "abc123"
+    assert result.resume_provenance["attempt"] == 2
+
+    with pytest.raises(ValueError, match="expected 'test'"):
+        evaluation.evaluate_controller_episode(
+            cottage_design,
+            seed=800,
+            controller="mappo",
+            bundle=bundle,
+            policy_manifest=manifest,
+            expected_split="test",
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        evaluation.evaluate_controller_episode(
+            cottage_design,
+            seed=800,
+            controller="ippo",
+            bundle=bundle,
+            policy_manifest=manifest,
+        )
+
+
 def _episode(
     controller: ControllerName,
     *,
@@ -229,6 +300,9 @@ def _episode(
     failure_enabled: bool = False,
     completion: float = 1.0,
     makespan: float = 100.0,
+    experiment_id: str | None = None,
+    experiment_variant: str | None = None,
+    training_seed: int | None = None,
 ) -> EpisodeEvaluation:
     return EpisodeEvaluation(
         scenario_id=f"fixture-{seed}",
@@ -248,6 +322,9 @@ def _episode(
         drop_count=0,
         decision_count=5,
         routing_backend="astar",
+        experiment_id=experiment_id,
+        experiment_variant=experiment_variant,
+        training_seed=training_seed,
     )
 
 
@@ -314,6 +391,70 @@ def test_run_suite_expands_modes_policies_and_aggregates_deterministically(
     assert nominal_only.summaries[0].metrics["makespan_s"].std == 0.0
 
 
+def test_run_suite_accepts_explicit_identity_split_and_policy_manifest(
+    cottage_design: HouseDesign,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = PolicyManifest(
+        policy_id="mappo-seed-7",
+        controller="mappo",
+        git_sha="abc123",
+        seed=7,
+        experiment_id="construction_intelligence_v1",
+        experiment_variant="mappo_full",
+        training_seed=7,
+        transition_count=1_500_000,
+    )
+
+    def fake_evaluate(
+        design: HouseDesign,
+        *,
+        seed: int,
+        controller: ControllerName,
+        bundle: object,
+        policy_manifest: PolicyManifest,
+        failure_enabled: bool,
+        device: str,
+        expected_split: str,
+    ) -> EpisodeEvaluation:
+        assert design is cottage_design
+        assert bundle is policy_bundle
+        assert policy_manifest is manifest
+        assert device == "cpu"
+        assert expected_split == "validation"
+        return _episode(
+            controller,
+            seed=seed,
+            failure_enabled=failure_enabled,
+            experiment_id=policy_manifest.experiment_id,
+            experiment_variant=policy_manifest.experiment_variant,
+            training_seed=policy_manifest.training_seed,
+        )
+
+    policy_bundle = object()
+    monkeypatch.setattr(evaluation, "evaluate_controller_episode", fake_evaluate)
+    suite = evaluation.run_evaluation_suite(
+        cottage_design,
+        seeds=[800, 801],
+        controllers=["mappo"],
+        policies={"mappo": cast(Any, policy_bundle)},
+        policy_manifests={"mappo": manifest},
+        include_failure_suite=True,
+        evaluation_id="construction-intelligence-v1-validation-mappo-seed-7",
+        expected_split="validation",
+    )
+
+    assert (
+        suite.evaluation_id
+        == "construction-intelligence-v1-validation-mappo-seed-7"
+    )
+    assert suite.expected_split == "validation"
+    assert suite.grid_validation is not None
+    assert suite.grid_validation.expected_episode_count == 4
+    assert len(suite.per_training_seed) == 2
+    assert len(suite.per_scenario_seed) == 4
+
+
 def test_summarize_skips_missing_controller_mode_combinations() -> None:
     episodes = [
         _episode("greedy", seed=7, failure_enabled=False),
@@ -327,6 +468,131 @@ def test_summarize_skips_missing_controller_mode_combinations() -> None:
         ("mappo", True),
     ]
     assert all(len(item.metrics) == 9 for item in summaries)
+
+
+def test_complete_grid_validation_rejects_missing_duplicates_and_wrong_splits() -> None:
+    episodes = [
+        _episode(
+            "mappo",
+            seed=scenario_seed,
+            failure_enabled=failure_enabled,
+            experiment_id="construction_intelligence_v1",
+            experiment_variant="mappo_full",
+            training_seed=training_seed,
+        )
+        for training_seed in (7, 8)
+        for scenario_seed in (900, 901)
+        for failure_enabled in (False, True)
+    ]
+    policy_grid = [
+        EvaluationGridEntry(
+            controller="mappo",
+            experiment_id="construction_intelligence_v1",
+            experiment_variant="mappo_full",
+            training_seed=training_seed,
+        )
+        for training_seed in (7, 8)
+    ]
+
+    result = evaluation.validate_evaluation_grid(
+        episodes,
+        scenario_seeds=[900, 901],
+        policy_grid=policy_grid,
+        failure_modes=[False, True],
+        expected_split="validation",
+    )
+
+    assert result.complete is True
+    assert result.expected_episode_count == 8
+    assert result.observed_episode_count == 8
+    with pytest.raises(ValueError, match="missing cells"):
+        evaluation.validate_evaluation_grid(
+            episodes[:-1],
+            scenario_seeds=[900, 901],
+            policy_grid=policy_grid,
+            failure_modes=[False, True],
+            expected_split="validation",
+        )
+    with pytest.raises(ValueError, match="duplicate cells"):
+        evaluation.validate_evaluation_grid(
+            [*episodes, episodes[0]],
+            scenario_seeds=[900, 901],
+            policy_grid=policy_grid,
+            failure_modes=[False, True],
+            expected_split="validation",
+        )
+    wrong_split = episodes[0].model_copy(update={"split": "test"})
+    with pytest.raises(ValueError, match="split mismatches"):
+        evaluation.validate_evaluation_grid(
+            [wrong_split, *episodes[1:]],
+            scenario_seeds=[900, 901],
+            policy_grid=policy_grid,
+            failure_modes=[False, True],
+            expected_split="validation",
+        )
+
+
+def test_hierarchical_aggregation_is_reproducible_and_emits_seed_views() -> None:
+    episodes = [
+        _episode(
+            "mappo",
+            seed=scenario_seed,
+            completion=float(training_seed == 8),
+            makespan=float(training_seed * 10 + scenario_seed),
+            experiment_id="construction_intelligence_v1",
+            experiment_variant="mappo_full",
+            training_seed=training_seed,
+        )
+        for training_seed in (7, 8)
+        for scenario_seed in (900, 901)
+    ]
+
+    first = evaluation.summarize_evaluations(episodes)
+    second = evaluation.summarize_evaluations(episodes)
+    per_training = evaluation.summarize_by_training_seed(episodes)
+    per_scenario = evaluation.summarize_by_scenario_seed(episodes)
+
+    assert first == second
+    assert len(first) == 1
+    assert first[0].experiment_variant == "mappo_full"
+    assert first[0].training_seed_count == 2
+    assert first[0].scenario_seed_count == 2
+    assert first[0].metrics["structure_completion_rate"].mean == 0.5
+    assert first[0].metrics["structure_completion_rate"].bootstrap_ci95_low == 0.0
+    assert first[0].metrics["structure_completion_rate"].bootstrap_ci95_high == 1.0
+    assert [item.training_seed for item in per_training] == [7, 8]
+    assert [
+        item.metrics["structure_completion_rate"].mean for item in per_training
+    ] == [0.0, 1.0]
+    assert [item.scenario_seed for item in per_scenario] == [900, 901]
+    assert all(
+        item.metrics["structure_completion_rate"].mean == 0.5
+        for item in per_scenario
+    )
+
+
+def test_hierarchical_bootstrap_preserves_shared_scenario_pairing() -> None:
+    episodes = [
+        _episode(
+            "mappo",
+            seed=scenario_seed,
+            completion=float(scenario_seed == 901),
+            experiment_id="construction_intelligence_v1",
+            experiment_variant="mappo_full",
+            training_seed=training_seed,
+        )
+        for training_seed in (7, 8, 9, 10, 11)
+        for scenario_seed in (900, 901)
+    ]
+
+    first = evaluation.summarize_evaluations(episodes)[0]
+    second = evaluation.summarize_evaluations(list(reversed(episodes)))[0]
+    completion = first.metrics["structure_completion_rate"]
+
+    assert first == second
+    assert completion.mean == 0.5
+    assert completion.bootstrap_ci95_low == 0.0
+    assert completion.bootstrap_ci95_high == 1.0
 
 
 def test_metric_summary_singleton_and_bootstrap_are_reproducible() -> None:
@@ -364,6 +630,7 @@ def _controller_summary(
     failure_enabled: bool,
     completion: float,
     makespan: float,
+    experiment_variant: str | None = None,
 ) -> ControllerEvaluation:
     return ControllerEvaluation(
         controller=controller,
@@ -375,6 +642,7 @@ def _controller_summary(
             "total_travel_m": _metric(20.0),
             "mean_robot_utilization": _metric(0.8),
         },
+        experiment_variant=experiment_variant,
     )
 
 
@@ -469,8 +737,63 @@ def test_report_covers_failed_thresholds_and_missing_learned_results() -> None:
     )
 
 
+def test_acceptance_uses_primary_variants_instead_of_ablation_results() -> None:
+    suite = EvaluationSuite(
+        evaluation_id="primary-variant-audit",
+        seeds=[900],
+        controllers=["mappo", "ippo", "cp_sat"],
+        episodes=[],
+        summaries=[
+            _controller_summary(
+                "mappo",
+                failure_enabled=False,
+                completion=0.4,
+                makespan=200.0,
+                experiment_variant="mappo_no_bc",
+            ),
+            _controller_summary(
+                "mappo",
+                failure_enabled=False,
+                completion=0.96,
+                makespan=114.0,
+                experiment_variant="mappo_full",
+            ),
+            _controller_summary(
+                "ippo",
+                failure_enabled=False,
+                completion=0.95,
+                makespan=120.0,
+                experiment_variant="ippo_full",
+            ),
+            _controller_summary(
+                "cp_sat",
+                failure_enabled=False,
+                completion=1.0,
+                makespan=100.0,
+            ),
+            _controller_summary(
+                "mappo",
+                failure_enabled=True,
+                completion=0.86,
+                makespan=130.0,
+                experiment_variant="mappo_full",
+            ),
+        ],
+    )
+
+    report = evaluation.render_evaluation_report(suite)
+
+    assert "| mappo (mappo_no_bc) | no | 0.400" in report
+    assert "`mappo` no-failure completion >= 0.95: PASS (0.960)" in report
+    assert "MAPPO median makespan within 15% of CP-SAT: PASS (1.140x)" in report
+    assert "training seeds are resampled first, then scenario seeds" in report
+
+
 def test_sequential_actions_select_first_ready_capable_team() -> None:
-    modules = [SimpleNamespace(module_id="module-b"), SimpleNamespace(module_id="module-a")]
+    modules: list[object] = [
+        SimpleNamespace(module_id="module-b"),
+        SimpleNamespace(module_id="module-a"),
+    ]
     selections: list[tuple[str, list[str]]] = []
 
     class FakeSequentialEnv:
@@ -504,7 +827,7 @@ def test_sequential_actions_select_first_ready_capable_team() -> None:
     ]
 
     monkey_env = FakeSequentialEnv()
-    monkey_env._select_capable_team = lambda module, available: None
+    cast(Any, monkey_env)._select_capable_team = lambda module, available: None
     assert evaluation.sequential_temporal_actions(cast(Any, monkey_env)) == {
         "robot-1": 0,
         "robot-2": 0,

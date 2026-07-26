@@ -1,24 +1,37 @@
 from __future__ import annotations
 
 import asyncio
+import pickle
 import socket
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from embodied_skill_composer.construction.compiler import compile_house_design
+from embodied_skill_composer.construction.experiment_execution import (
+    evaluate_and_freeze_run_selection,
+    materialize_matrix_selection_evidence,
+)
+from embodied_skill_composer.construction.experiment_protocol import (
+    ExperimentProfile,
+    ExperimentProtocol,
+    expand_experiment_matrix,
+    load_experiment_protocol,
+    protocol_digest,
+)
 from embodied_skill_composer.construction.floorplan import infer_orthogonal_floor_plan
 from embodied_skill_composer.construction.evaluation import ControllerName
 from embodied_skill_composer.construction.lab_registry import (
     QUIESCENT_RUN_STATUSES,
     LabRegistry,
 )
+from embodied_skill_composer.construction.lab_events import RunEventEnvelope
 from embodied_skill_composer.construction.lab_service import LabService
 from embodied_skill_composer.construction.models import HouseDesign
 from embodied_skill_composer.construction.intelligence_models import PolicyManifest
@@ -65,6 +78,21 @@ class TrainingLaunchRequest(BaseModel):
     seed: int = Field(default=7, ge=0)
     transitions: int | None = Field(default=None, gt=0)
     device: Literal["auto", "cpu", "cuda"] = "auto"
+    confirmed: bool = False
+
+
+class ExperimentMatrixLaunchRequest(BaseModel):
+    profile: ExperimentProfile = "smoke"
+    confirmed: bool = False
+
+
+class ValidationSelectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirmed: bool = False
+
+
+class HeldoutMatrixLaunchRequest(BaseModel):
     confirmed: bool = False
 
 
@@ -125,6 +153,7 @@ def create_app(
     )
     app.state.lab_registry = registry
     app.state.lab_service = service
+    app.state.experiment_protocol = load_experiment_protocol()
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
@@ -236,6 +265,12 @@ def create_app(
     def policies() -> list[dict[str, object]]:
         return registry.list_policies()
 
+    @app.get("/api/lab/evaluations")
+    def evaluations(
+        matrix_id: str | None = Query(default=None),
+    ) -> list[dict[str, object]]:
+        return registry.list_evaluations(matrix_id=matrix_id)
+
     @app.get("/api/lab/runs")
     def runs(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, object]]:
         return registry.list_runs(limit=limit)
@@ -247,14 +282,218 @@ def create_app(
             raise HTTPException(status_code=404, detail="run not found")
         return item
 
-    @app.get("/api/lab/runs/{run_id}/events")
+    @app.get(
+        "/api/lab/runs/{run_id}/events",
+        response_model_exclude_unset=True,
+    )
     def run_events(
         run_id: str,
         after: int = Query(default=0, ge=0),
-    ) -> list[dict[str, object]]:
+    ) -> list[RunEventEnvelope]:
         if registry.get_run(run_id) is None:
             raise HTTPException(status_code=404, detail="run not found")
-        return registry.list_events(run_id, after=after)
+        return registry.list_event_envelopes(run_id, after=after)
+
+    @app.post("/api/lab/experiment-matrices", status_code=202)
+    def launch_experiment_matrix(
+        payload: ExperimentMatrixLaunchRequest,
+    ) -> dict[str, object]:
+        if not payload.confirmed:
+            raise HTTPException(
+                status_code=409,
+                detail="experiment matrix launch requires confirmed=true",
+            )
+        protocol = cast(ExperimentProtocol, app.state.experiment_protocol)
+        digest = protocol_digest(protocol)
+        specs = expand_experiment_matrix(protocol, payload.profile)
+        from embodied_skill_composer.construction.training import TrainingConfig
+
+        runs = [
+            (
+                spec.run_id,
+                TrainingConfig.model_validate(spec.training_config_payload()),
+            )
+            for spec in specs
+        ]
+        matrix_id = f"{protocol.experiment_id}-{payload.profile}-{digest[:12]}"
+        try:
+            run_ids = service.launch_training_matrix(
+                state.design,
+                matrix_id=matrix_id,
+                protocol_digest=digest,
+                protocol=protocol.model_dump(mode="json"),
+                execution_profile=payload.profile,
+                runs=runs,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "matrix_id": matrix_id,
+            "protocol_digest": digest,
+            "profile": payload.profile,
+            "run_count": len(run_ids),
+            "run_ids": run_ids,
+        }
+
+    @app.get("/api/lab/experiment-matrices")
+    def experiment_matrices() -> list[dict[str, object]]:
+        return registry.list_experiment_matrices()
+
+    @app.get("/api/lab/experiment-matrices/{matrix_id}")
+    def experiment_matrix(matrix_id: str) -> dict[str, object]:
+        item = registry.get_experiment_matrix(matrix_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="experiment matrix not found")
+        return item
+
+    @app.get("/api/lab/experiment-matrices/{matrix_id}/selections")
+    def experiment_matrix_selections(matrix_id: str) -> list[dict[str, object]]:
+        if registry.get_experiment_matrix(matrix_id) is None:
+            raise HTTPException(status_code=404, detail="experiment matrix not found")
+        return registry.list_policy_selections(matrix_id)
+
+    @app.put(
+        "/api/lab/experiment-matrices/{matrix_id}/selections/{run_key}",
+        status_code=201,
+    )
+    def register_validation_selection(
+        matrix_id: str,
+        run_key: str,
+        payload: ValidationSelectionRequest,
+    ) -> dict[str, object]:
+        if not payload.confirmed:
+            raise HTTPException(
+                status_code=409,
+                detail="validation selection requires confirmed=true",
+            )
+        matrix = registry.get_experiment_matrix(matrix_id)
+        if matrix is None:
+            raise HTTPException(status_code=404, detail="experiment matrix not found")
+        matrix_protocol = ExperimentProtocol.model_validate(matrix["protocol"])
+        profile = cast(ExperimentProfile, matrix["execution_profile"])
+        expected = {
+            item.run_id: item
+            for item in expand_experiment_matrix(matrix_protocol, profile)
+        }
+        if run_key not in expected:
+            raise HTTPException(status_code=404, detail="matrix run not found")
+        matrix_runs = cast(list[dict[str, object]], matrix["runs"])
+        persisted_run = next(item for item in matrix_runs if item["run_key"] == run_key)
+        persisted_input = cast(dict[str, object], persisted_run["input"])
+        persisted_design = HouseDesign.model_validate(persisted_input["design"])
+        evidence_root = registry.path.parent / "evidence" / "validation_selections"
+        try:
+            evidence = evaluate_and_freeze_run_selection(
+                registry,
+                matrix_id,
+                run_key,
+                persisted_design,
+                matrix_protocol,
+                output_root=evidence_root,
+                device="cpu",
+            )
+            matrix_evidence = materialize_matrix_selection_evidence(
+                registry,
+                matrix_id,
+                matrix_protocol,
+                output_root=evidence_root,
+            )
+        except (
+            EOFError,
+            KeyError,
+            OSError,
+            pickle.UnpicklingError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "matrix_id": matrix_id,
+            "run_key": run_key,
+            "selection": evidence.selected.model_dump(mode="json"),
+            "evidence_path": str(evidence.evidence_path),
+            "matrix_evidence_path": (
+                str(matrix_evidence.evidence_path)
+                if matrix_evidence is not None
+                else None
+            ),
+        }
+
+    @app.post(
+        "/api/lab/experiment-matrices/{matrix_id}/heldout",
+        status_code=202,
+    )
+    def launch_heldout_matrix(
+        matrix_id: str,
+        payload: HeldoutMatrixLaunchRequest,
+    ) -> dict[str, object]:
+        if not payload.confirmed:
+            raise HTTPException(
+                status_code=409,
+                detail="held-out evaluation launch requires confirmed=true",
+            )
+        matrix = registry.get_experiment_matrix(matrix_id)
+        if matrix is None:
+            raise HTTPException(status_code=404, detail="experiment matrix not found")
+        matrix_protocol = ExperimentProtocol.model_validate(matrix["protocol"])
+        profile = cast(ExperimentProfile, matrix["execution_profile"])
+        expected = {
+            item.run_id: item
+            for item in expand_experiment_matrix(matrix_protocol, profile)
+        }
+        selections = registry.list_policy_selections(matrix_id)
+        selected = {
+            cast(str, item["run_key"]): cast(dict[str, object], item["selection"])
+            for item in selections
+        }
+        missing = sorted(set(expected) - set(selected))
+        if len(selected) != 20 or missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "held-out evaluation requires all 20 frozen validation "
+                    f"selections; registered={len(selected)}, missing={missing}"
+                ),
+            )
+        for run_key in expected:
+            checkpoint_path = selected[run_key].get("checkpoint_path")
+            if not isinstance(checkpoint_path, str) or not checkpoint_path:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"selection has no checkpoint path: {run_key}",
+                )
+        matrix_runs = cast(list[dict[str, object]], matrix["runs"])
+        persisted_input = cast(dict[str, object], matrix_runs[0]["input"])
+        persisted_design = HouseDesign.model_validate(persisted_input["design"])
+        evidence_root = registry.path.parent / "evidence"
+        try:
+            matrix_evidence = materialize_matrix_selection_evidence(
+                registry,
+                matrix_id,
+                matrix_protocol,
+                output_root=evidence_root / "validation_selections",
+            )
+            if matrix_evidence is None:
+                raise ValueError(
+                    "held-out evaluation requires canonical matrix selection evidence"
+                )
+            evaluation_run_id = service.launch_matrix_evaluation(
+                persisted_design,
+                matrix_id=matrix_id,
+                protocol=matrix_protocol,
+                output_root=evidence_root / "heldout" / matrix_id,
+                selection_evidence_path=matrix_evidence.evidence_path,
+            )
+        except (OSError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "matrix_id": matrix_id,
+            "selection_count": len(selected),
+            "evaluation_run_count": 1,
+            "run_ids": [evaluation_run_id],
+            "selection_evidence_path": str(matrix_evidence.evidence_path),
+        }
 
     @app.post("/api/lab/training", status_code=202)
     def launch_training(payload: TrainingLaunchRequest) -> dict[str, str]:
@@ -370,13 +609,12 @@ def create_app(
             return
         sequence = 0
         while True:
-            events = registry.list_events(run_id, after=sequence)
+            events = registry.list_event_envelopes(run_id, after=sequence)
             for event in events:
-                sequence_value = event["sequence"]
-                if not isinstance(sequence_value, int):
-                    raise RuntimeError("persisted event sequence is not an integer")
-                sequence = sequence_value
-                await websocket.send_json(event)
+                sequence = event.sequence
+                await websocket.send_json(
+                    event.model_dump(mode="json", exclude_unset=True)
+                )
             current = registry.get_run(run_id)
             if current and current["status"] in QUIESCENT_RUN_STATUSES and not events:
                 await websocket.close(code=1000)

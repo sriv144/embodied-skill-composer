@@ -293,6 +293,20 @@ def load_policy_checkpoint(
     return bundle.to(device)
 
 
+def load_policy_checkpoint_metadata(
+    path: Path,
+    *,
+    device: torch.device | str = "cpu",
+) -> dict[str, object]:
+    payload = torch.load(path, map_location=device, weights_only=True)
+    if not isinstance(payload, dict):
+        raise ValueError("policy checkpoint payload is not a dictionary")
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("policy checkpoint metadata is missing")
+    return cast(dict[str, object], metadata)
+
+
 def export_actor_onnx(
     model: SwarmPointerActor,
     path: Path,

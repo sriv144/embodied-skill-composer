@@ -11,8 +11,12 @@ from pathlib import Path
 from threading import Event
 
 import pytest
+from pydantic import ValidationError
 
 from embodied_skill_composer.construction import lab_service as lab_service_module
+from embodied_skill_composer.construction.experiment_protocol import (
+    load_experiment_protocol,
+)
 from embodied_skill_composer.construction.lab_registry import (
     LabRegistry,
     LostRunClaimError,
@@ -22,6 +26,7 @@ from embodied_skill_composer.construction.lab_registry import (
     _terminate_owned_process,
 )
 from embodied_skill_composer.construction.lab_service import LabService
+from embodied_skill_composer.construction.runtime import load_house_design
 
 
 def test_process_identity_and_owned_termination_are_pid_reuse_safe() -> None:
@@ -63,8 +68,8 @@ def test_worker_mutations_are_fenced_by_claim_token(tmp_path: Path) -> None:
         )
 
     registry.update_run(run_id, heartbeat=True, claim_token=token)
-    registry.append_event(run_id, {"event": "owned_progress"}, claim_token=token)
-    assert registry.list_events(run_id)[-1]["payload"]["event"] == "owned_progress"
+    registry.append_event(run_id, {"event": "evaluation_started"}, claim_token=token)
+    assert registry.list_events(run_id)[-1]["payload"]["event"] == "evaluation_started"
 
 
 def test_atomic_finalization_fences_policy_event_and_terminal_state(
@@ -85,7 +90,7 @@ def test_atomic_finalization_fences_policy_event_and_terminal_state(
         registry.finalize_run(
             run_id,
             status="completed",
-            event={"event": "training_completed"},
+            event={"event": "training_completed", "artifacts": {}},
             claim_token="stale-token",
             progress=1.0,
             artifact_dir=str(tmp_path / "artifacts"),
@@ -100,7 +105,7 @@ def test_atomic_finalization_fences_policy_event_and_terminal_state(
     registry.finalize_run(
         run_id,
         status="completed",
-        event={"event": "training_completed"},
+        event={"event": "training_completed", "artifacts": {}},
         claim_token=token,
         progress=1.0,
         artifact_dir=str(tmp_path / "artifacts"),
@@ -140,7 +145,8 @@ def test_registry_migrates_legacy_runs_schema_in_place(tmp_path: Path) -> None:
             INSERT INTO runs (
                 id, kind, status, config_json, created_at, progress, cancel_requested
             ) VALUES (
-                'legacy-run', 'training', 'queued', '{"seed":7}',
+                'legacy-run', 'training', 'queued',
+                '{"seed":7,"resume_provenance":{"legacy":true}}',
                 '2026-01-01T00:00:00+00:00', 0.25, 0
             );
             """
@@ -150,11 +156,15 @@ def test_registry_migrates_legacy_runs_schema_in_place(tmp_path: Path) -> None:
     migrated = registry.get_run("legacy-run")
 
     assert migrated is not None
-    assert migrated["config"] == {"seed": 7}
+    assert migrated["config"] == {
+        "seed": 7,
+        "resume_provenance": {"legacy": True},
+    }
     assert migrated["input"] == {}
     assert migrated["attempt"] == 0
     assert migrated["claim_token"] is None
     assert migrated["process_identity"] is None
+    assert migrated["resume_provenance_history"] == [{"legacy": True}]
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(runs)")}
         user_version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -168,10 +178,82 @@ def test_registry_migrates_legacy_runs_schema_in_place(tmp_path: Path) -> None:
         "latest_checkpoint",
         "config_digest",
         "source_commit",
+        "resume_provenance_json",
         "claim_token",
         "interrupted_at",
     } <= columns
-    assert user_version == 2
+    assert user_version == 5
+
+
+def test_resume_provenance_is_claim_owned_persistent_and_append_only(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "lab.sqlite"
+    registry = LabRegistry(path)
+    checkpoint = tmp_path / "latest.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    run_id = registry.create_run(
+        "training",
+        {"seed": 7, "resume_provenance": {}},
+        config_digest="immutable-config-digest",
+        run_id="resumable-run",
+    )
+    registry.update_run(run_id, latest_checkpoint=str(checkpoint))
+
+    first_claim = registry.claim_next_training()
+    assert first_claim is not None
+    first_token = str(first_claim["claim_token"])
+    first_provenance = {
+        "run_id": run_id,
+        "attempt": 1,
+        "checkpoint": str(checkpoint),
+    }
+    assert registry.record_resume_provenance(
+        run_id,
+        first_provenance,
+        claim_token=first_token,
+    ) == [first_provenance]
+    assert registry.record_resume_provenance(
+        run_id,
+        first_provenance,
+        claim_token=first_token,
+    ) == [first_provenance]
+    with pytest.raises(LostRunClaimError):
+        registry.record_resume_provenance(
+            run_id,
+            first_provenance,
+            claim_token="stale-token",
+        )
+    registry.finalize_run(
+        run_id,
+        status="interrupted",
+        event={"event": "run_interrupted", "reason": "stale_worker"},
+        claim_token=first_token,
+    )
+
+    assert registry.request_resume(run_id)
+    second_claim = registry.claim_next_training()
+    assert second_claim is not None
+    second_token = str(second_claim["claim_token"])
+    second_provenance = {
+        "run_id": run_id,
+        "attempt": 2,
+        "checkpoint": str(checkpoint),
+    }
+    assert registry.record_resume_provenance(
+        run_id,
+        second_provenance,
+        claim_token=second_token,
+    ) == [first_provenance, second_provenance]
+
+    reopened = LabRegistry(path).get_run(run_id)
+    assert reopened is not None
+    assert reopened["config"] == {"seed": 7, "resume_provenance": {}}
+    assert reopened["config_digest"] == "immutable-config-digest"
+    assert reopened["resume_provenance_history"] == [
+        first_provenance,
+        second_provenance,
+    ]
 
 
 def test_training_claim_is_atomic_fifo_and_single_slot(tmp_path: Path) -> None:
@@ -326,10 +408,13 @@ def test_events_are_persisted_to_database_and_jsonl_across_reopen(tmp_path: Path
     path = tmp_path / "lab.sqlite"
     registry = LabRegistry(path)
     run_id = registry.create_run("training", {"seed": 7}, run_id="jsonl-run")
-    assert registry.append_event(run_id, {"event": "progress", "transitions": 10}) == 2
+    assert registry.append_event(run_id, {"event": "evaluation_started"}) == 2
 
     reopened = LabRegistry(path)
-    assert reopened.append_event(run_id, {"event": "checkpoint", "fraction": 0.25}) == 3
+    assert reopened.append_event(
+        run_id,
+        {"event": "evaluation_completed", "artifacts": {"fraction": 0.25}},
+    ) == 3
     run = reopened.get_run(run_id)
     assert run is not None
     event_path = Path(str(run["event_log_path"]))
@@ -338,12 +423,43 @@ def test_events_are_persisted_to_database_and_jsonl_across_reopen(tmp_path: Path
     assert [record["sequence"] for record in records] == [1, 2, 3]
     assert [record["payload"]["event"] for record in records] == [
         "run_created",
-        "progress",
-        "checkpoint",
+        "evaluation_started",
+        "evaluation_completed",
     ]
     assert [event["payload"] for event in reopened.list_events(run_id)] == [
         record["payload"] for record in records
     ]
+
+
+def test_invalid_run_events_are_rejected_on_append_and_read(tmp_path: Path) -> None:
+    path = tmp_path / "invalid-events.sqlite"
+    registry = LabRegistry(path)
+    run_id = registry.create_run("training", {"seed": 7}, run_id="typed-events")
+
+    with pytest.raises(ValidationError, match="union_tag_invalid"):
+        registry.append_event(run_id, {"event": "invented_progress"})
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        registry.append_event(
+            run_id,
+            {"event": "evaluation_started", "transitions": 10},
+        )
+    assert len(registry.list_events(run_id)) == 1
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            INSERT INTO run_events (
+                run_id, sequence, created_at, payload_json
+            ) VALUES (?, 2, ?, ?)
+            """,
+            (
+                run_id,
+                datetime.now(UTC).isoformat(),
+                json.dumps({"event": "legacy_unknown"}),
+            ),
+        )
+    with pytest.raises(ValidationError, match="union_tag_invalid"):
+        registry.list_event_envelopes(run_id)
 
 
 @pytest.mark.parametrize("status", ["interrupted", "failed", "cancelled"])
@@ -498,3 +614,276 @@ def test_dispatcher_reconciles_heartbeats_while_worker_is_running(
         service.shutdown()
 
     assert reconcile_calls >= 2
+
+
+def test_experiment_matrix_is_atomic_unique_and_tracks_frozen_selections(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "matrix.sqlite")
+    runs = [
+        (
+            f"mappo-full-s{seed}",
+            {"algorithm": "mappo", "seed": seed},
+            f"digest-{seed}",
+            "source-sha",
+        )
+        for seed in (7, 8)
+    ]
+
+    run_ids = registry.create_experiment_matrix(
+        "matrix-fixture",
+        protocol_digest="protocol-digest",
+        protocol={"experiment_id": "construction_intelligence_v1"},
+        execution_profile="unit",
+        design={"design_id": "cottage_v1"},
+        runs=runs,
+    )
+
+    assert run_ids == [
+        "matrix-fixture-mappo-full-s7",
+        "matrix-fixture-mappo-full-s8",
+    ]
+    matrix = registry.get_experiment_matrix("matrix-fixture")
+    assert matrix is not None
+    assert matrix["status"] == "queued"
+    assert matrix["expected_run_count"] == 2
+    assert [item["run_key"] for item in matrix["runs"]] == [
+        "mappo-full-s7",
+        "mappo-full-s8",
+    ]
+    assert all(
+        registry.list_events(run_id)[0]["payload"]["matrix_id"] == "matrix-fixture"
+        for run_id in run_ids
+    )
+    with pytest.raises(ValueError, match="already exists"):
+        registry.create_experiment_matrix(
+            "duplicate",
+            protocol_digest="protocol-digest",
+            protocol={"experiment_id": "construction_intelligence_v1"},
+            execution_profile="unit",
+            design={"design_id": "cottage_v1"},
+            runs=runs,
+        )
+
+    selection = {
+        "checkpoint_sha256": "checkpoint-sha",
+        "validation_seeds": [800, 801, 802, 803, 804],
+    }
+    registry.freeze_policy_selection(
+        "matrix-fixture",
+        "mappo-full-s7",
+        selection,
+    )
+    registry.freeze_policy_selection(
+        "matrix-fixture",
+        "mappo-full-s7",
+        selection,
+    )
+    with pytest.raises(ValueError, match="already frozen"):
+        registry.freeze_policy_selection(
+            "matrix-fixture",
+            "mappo-full-s7",
+            {**selection, "checkpoint_sha256": "different"},
+        )
+    with pytest.raises(KeyError):
+        registry.freeze_policy_selection(
+            "matrix-fixture",
+            "unknown",
+            selection,
+        )
+    frozen = registry.list_policy_selections("matrix-fixture")
+    assert frozen[0]["run_key"] == "mappo-full-s7"
+    assert frozen[0]["selection"] == selection
+
+    registry.upsert_evaluation(
+        "evaluation-fixture",
+        matrix_id="matrix-fixture",
+        split="test",
+        payload={"episode_count": 24},
+        artifact_dir=str(tmp_path / "evaluation"),
+    )
+    evaluations = registry.list_evaluations(matrix_id="matrix-fixture")
+    assert evaluations[0]["id"] == "evaluation-fixture"
+    assert evaluations[0]["payload"] == {"episode_count": 24}
+
+
+def test_matrix_evaluation_launch_is_atomic_deduplicated_and_relaunchable(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "matrix-evaluation.sqlite")
+    matrix_id = "matrix-fixture"
+    config: dict[str, object] = {
+        "matrix_id": matrix_id,
+        "protocol_digest": "protocol-digest",
+        "output_root": str(tmp_path / "evidence"),
+        "device": "cpu",
+        "selection_evidence_path": None,
+    }
+    input_payload = {"design": {"design_id": "cottage_v1"}}
+
+    def create() -> str:
+        try:
+            return registry.create_matrix_evaluation_run(
+                matrix_id,
+                config,
+                input_payload=input_payload,
+            )
+        except ValueError:
+            return "duplicate"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        launched = list(executor.map(lambda _index: create(), range(2)))
+    run_ids = [item for item in launched if item != "duplicate"]
+    assert len(run_ids) == 1
+    assert launched.count("duplicate") == 1
+
+    first_id = run_ids[0]
+    claimed = registry.claim_next_durable_job(kinds=("matrix_evaluation",))
+    assert claimed is not None and claimed["id"] == first_id
+    claim_token = str(claimed["claim_token"])
+    assert registry.request_cancel(first_id) is True
+    cancelling = registry.get_run(first_id)
+    assert cancelling is not None and cancelling["status"] == "cancel_requested"
+    registry.finalize_run(
+        first_id,
+        status="cancelled",
+        event={"event": "cancelled"},
+        claim_token=claim_token,
+    )
+
+    replacement_id = registry.create_matrix_evaluation_run(
+        matrix_id,
+        config,
+        input_payload=input_payload,
+    )
+    replacement = registry.claim_next_durable_job(kinds=("matrix_evaluation",))
+    assert replacement is not None and replacement["id"] == replacement_id
+    registry.finalize_run(
+        replacement_id,
+        status="completed",
+        event={
+            "event": "matrix_evaluation_completed",
+            "matrix_id": matrix_id,
+            "evaluation_id": "fixture-evaluation",
+            "acceptance": {"passed": True},
+            "ablations": [],
+        },
+        progress=1.0,
+        claim_token=str(replacement["claim_token"]),
+    )
+    with pytest.raises(ValueError, match="active or completed"):
+        registry.create_matrix_evaluation_run(
+            matrix_id,
+            config,
+            input_payload=input_payload,
+        )
+
+
+def test_matrix_evaluation_stale_worker_reconciles_and_restarts_from_beginning(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "matrix-restart.sqlite")
+    run_id = registry.create_matrix_evaluation_run(
+        "matrix-fixture",
+        {
+            "matrix_id": "matrix-fixture",
+            "protocol_digest": "protocol-digest",
+            "output_root": str(tmp_path / "evidence"),
+            "device": "cpu",
+        },
+        input_payload={"design": {"design_id": "cottage_v1"}},
+    )
+    claimed = registry.claim_next_durable_job(kinds=("matrix_evaluation",))
+    assert claimed is not None and claimed["id"] == run_id
+
+    interrupted = registry.reconcile_stale_runs(
+        kinds=("matrix_evaluation",),
+        stale_after=timedelta(seconds=1),
+        process_alive=lambda _pid: False,
+        now=datetime.now(UTC) + timedelta(seconds=2),
+    )
+    assert interrupted == [run_id]
+    stale = registry.get_run(run_id)
+    assert stale is not None and stale["status"] == "interrupted"
+    assert registry.request_resume(run_id) is True
+    resuming = registry.get_run(run_id)
+    assert resuming is not None and resuming["status"] == "resuming"
+    assert registry.list_events(run_id)[-1]["payload"] == {
+        "event": "resume_requested",
+        "restart_from_beginning": True,
+    }
+    reclaimed = registry.claim_next_durable_job(kinds=("matrix_evaluation",))
+    assert reclaimed is not None and reclaimed["id"] == run_id
+    assert reclaimed["attempt"] == 2
+
+
+def test_matrix_evaluation_dispatches_through_claim_bound_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = LabRegistry(tmp_path / "matrix-dispatch.sqlite")
+    launched = Event()
+    captured: dict[str, object] = {}
+
+    class FinishedProcess:
+        pid = 6262
+        returncode = 0
+
+        @staticmethod
+        def poll() -> int:
+            return 0
+
+    def fake_popen(command: list[str], **kwargs: object) -> FinishedProcess:
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        launched.set()
+        return FinishedProcess()
+
+    monkeypatch.setattr(lab_service_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        lab_service_module,
+        "_process_identity",
+        lambda _pid: "fixture-matrix-process",
+    )
+    design = load_house_design(
+        Path("configs/construction/cottage_v1.yaml").resolve()
+    )
+    protocol = load_experiment_protocol()
+    service = LabService(registry)
+    try:
+        run_id = service.launch_matrix_evaluation(
+            design,
+            matrix_id="matrix-subprocess",
+            protocol=protocol,
+            output_root=tmp_path / "evaluation",
+            selection_evidence_path=tmp_path / "matrix_selections.json",
+        )
+        assert launched.wait(timeout=2)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            run = registry.get_run(run_id)
+            if run is not None and run["status"] == "interrupted":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("matrix dispatcher did not reconcile the finished worker")
+    finally:
+        service.shutdown()
+
+    run = registry.get_run(run_id)
+    assert run is not None
+    assert run["kind"] == "matrix_evaluation"
+    assert run["status"] == "interrupted"
+    assert run["config"]["selection_evidence_path"] == str(
+        (tmp_path / "matrix_selections.json").resolve()
+    )
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert command[:3] == [
+        sys.executable,
+        "-m",
+        "embodied_skill_composer.construction.lab_worker",
+    ]
+    assert command[command.index("--run-id") + 1] == run_id
+    assert run["attempt"] == 1
+    assert "matrix_evaluation worker exited with code 0" in str(run["error"])
