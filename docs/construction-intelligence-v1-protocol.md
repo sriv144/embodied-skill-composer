@@ -109,8 +109,8 @@ all 100 fractional policies on 1,000 validation episodes, and produces the compl
 held-out report:
 
 ```powershell
-python scripts\verify_construction_phase3_e2e.py `
-  --output-root C:\tmp\construction-phase3-e2e
+.\.venv\Scripts\python.exe scripts\verify_construction_phase3_e2e.py `
+  --output-root "$PWD\logs\construction_intelligence\phase3_e2e\$(git rev-parse --short HEAD)-$(Get-Date -Format yyyyMMddTHHmmss)"
 ```
 
 The command fails fast unless the source worktree is clean and committed, the output path does not
@@ -118,3 +118,6 @@ already exist, and the source fingerprint remains unchanged for the full run. It
 `verification.json` records the source commit, protocol digest, interruption/resume lineage, exact
 episode counts, and SHA-256 hashes for the canonical selection and held-out artifacts. The matching
 pytest gate is opt-in with `RUN_CONSTRUCTION_PHASE3_E2E=1`.
+
+The accepted clean-commit run is recorded in the
+[Phase 3 evidence record](construction-intelligence-v1-phase3-evidence.md).
