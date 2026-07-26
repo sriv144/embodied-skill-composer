@@ -86,9 +86,14 @@ The local gate refresh on 2026-07-26 passed:
 - a clean `npm ci` with zero reported vulnerabilities; and
 - the static TypeScript/Vite production build.
 
-The existing Vite chunk-size warning remains explicitly assigned to Phase 6. The hosted Gitleaks
-action and the rest of the protected remote matrix remain pending until the review branch is
-published; their result will be appended before Phase 3 is checked on the project roadmap.
+PR [#21](https://github.com/sriv144/embodied-skill-composer/pull/21) and its protected
+[CI run #38](https://github.com/sriv144/embodied-skill-composer/actions/runs/30198057607) passed on
+code commit `5166577d9f1d4f1211bfb35727e84b3588c03bcb`. The clean Linux runner reported 278 passed,
+3 skipped, and 82.74% coverage; dependency-lock regeneration, `pip check`, compile, Ruff, mypy,
+the static workbench build, the repository scanner, and Gitleaks also passed. The final
+evidence-only roadmap commit retains that exact runtime and test code.
+
+The existing Vite chunk-size warning remains explicitly assigned to Phase 6.
 
 The clean-checkout rerun also removed a legacy test dependency on an ignored
 `logs/assembly_options.pt` file. That test now trains and loads its own short deterministic policy,
