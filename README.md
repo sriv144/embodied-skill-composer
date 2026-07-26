@@ -50,6 +50,9 @@ pose samples, and zero post-start robot pose writes; full-cottage and live-recov
 Dependency groups, experiment fingerprints, durable job states, checkpoint compatibility, and queue
 management commands are documented in
 [Construction Intelligence v1 reproducibility](docs/construction-intelligence-v1-reproducibility.md).
+The frozen matrix, split isolation, checkpoint selection, hierarchical statistics, and acceptance
+rules are documented in the
+[Construction Intelligence v1 research protocol](docs/construction-intelligence-v1-protocol.md).
 
 See [dependencies-and-assets.md](docs/dependencies-and-assets.md) for licenses and asset provenance.
 

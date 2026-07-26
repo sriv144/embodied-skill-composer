@@ -73,13 +73,20 @@ target-version = "py311"
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "--strict-markers"
+markers = [
+    "construction_phase3_e2e: real 20-run durable Phase-3 protocol verification",
+]
 
 [tool.coverage.run]
 branch = true
 source = ["embodied_skill_composer"]
+# This clean-tree subprocess harness is exercised by its explicit E2E gate, not
+# imported by the default unit-test process.
+omit = ["src/embodied_skill_composer/construction/phase3_verification.py"]
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 82.19
+precision = 2
 show_missing = true
 skip_covered = true
 exclude_also = [

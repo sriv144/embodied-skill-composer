@@ -5,7 +5,7 @@
 - [x] Foundation implementation
 - [x] Phase 1 — publish and protect the checkpoint
 - [x] Phase 2 — quality, reproducibility, and durable jobs
-- [ ] Phase 3 — freeze the research protocol
+- [x] Phase 3 — freeze the research protocol
 - [ ] Phase 4 — run the learned-policy evidence
 - [ ] Phase 5 — complete dynamic Coppelia evidence
 - [ ] Phase 6 — complete the product workbench
@@ -16,8 +16,8 @@ Phase evidence:
 | Phase | Acceptance evidence |
 | --- | --- |
 | 1 | PR #19 merged as `8d88fa8`; protected `main`; Python, workbench, and secrets checks green; native secret scanning and push protection enabled; Pages preview returned HTTP 200. |
-| 2 | PR #20 passed duplicate protected-branch and pull-request matrices: Python, workbench, and secret checks all green. On clean commit `5d30174`, 213 tests passed and 2 live-Coppelia tests skipped with 82.19% combined statement/branch coverage; Ruff, full-source mypy (111 files), `pip check`, compile, secret scan, lock regeneration, and static build passed. Production subprocess run `20260716T080821Z-training-83d0f663` completed with checkpoint, ONNX, manifest, JSONL events, and clean source/environment fingerprints. Research-profile run `20260716T080907Z-training-6717722c` was terminated after its checkpoint, reconciled to `interrupted`, resumed as attempt 2 from the same zero-transition state (`training_resumed`), then cancelled cleanly. See [reproducibility](construction-intelligence-v1-reproducibility.md). |
-| 3 | Pending versioned protocol manifest and split-isolation smoke evidence. |
+| 2 | PR #20 merged as `a23aadb` after duplicate protected-branch and pull-request matrices passed: Python, workbench, and secret checks all green. The current-commit Pages build/deploy passed and the public workbench returned HTTP 200. On clean commit `5d30174`, 213 tests passed and 2 live-Coppelia tests skipped with 82.19% combined statement/branch coverage; Ruff, full-source mypy (111 files), `pip check`, compile, secret scan, lock regeneration, and static build passed. Production subprocess run `20260716T080821Z-training-83d0f663` completed with checkpoint, ONNX, manifest, JSONL events, and clean source/environment fingerprints. Research-profile run `20260716T080907Z-training-6717722c` was terminated after its checkpoint, reconciled to `interrupted`, resumed as attempt 2 from the same zero-transition state (`training_resumed`), then cancelled cleanly. See [reproducibility](construction-intelligence-v1-reproducibility.md). |
+| 3 | PR [#21](https://github.com/sriv144/embodied-skill-composer/pull/21) passed the protected Python, workbench, secret-scan, and Gitleaks gates. Its clean-commit production subprocess smoke completed all 20 runs, a real interruption/reconciliation/resume, 100 checkpoint exports, 1,000 validation episodes, and the complete 240-episode held-out matrix. See the [Phase 3 evidence record](construction-intelligence-v1-phase3-evidence.md) and [research protocol](construction-intelligence-v1-protocol.md). |
 | 4 | Pending 20 research runs and held-out report. |
 | 5 | Pending live full-cottage nominal and unavailable-robot evidence. |
 | 6 | Pending editor, complete lab UX, accessibility, and browser test gates. |

@@ -10,6 +10,7 @@ from threading import Event, Lock, Thread
 from typing import TYPE_CHECKING, Protocol, TypedDict, cast
 
 from embodied_skill_composer.construction.lab_registry import (
+    DURABLE_SUBPROCESS_KINDS,
     QUIESCENT_RUN_STATUSES,
     LabRegistry,
     QuiescentRunStatus,
@@ -19,6 +20,9 @@ from embodied_skill_composer.construction.models import HouseDesign
 
 if TYPE_CHECKING:
     from embodied_skill_composer.construction.evaluation import ControllerName
+    from embodied_skill_composer.construction.experiment_protocol import (
+        ExperimentProtocol,
+    )
     from embodied_skill_composer.construction.training import TrainingArtifacts, TrainingConfig
 
 
@@ -56,7 +60,7 @@ class EvaluationJobConfig(TypedDict):
 
 
 class LabService:
-    """Durable lab facade with a single-slot subprocess queue for training."""
+    """Lab facade with a single-slot durable subprocess queue for long jobs."""
 
     def __init__(
         self,
@@ -78,14 +82,18 @@ class LabService:
         self._stop = Event()
         self._wake = Event()
         self._dispatcher: Thread | None = None
-        if self.training_runner is None:
-            self.registry.reconcile_stale_runs()
-            self._dispatcher = Thread(
-                target=self._dispatch_training,
-                name="construction-training-dispatcher",
-                daemon=True,
-            )
-            self._dispatcher.start()
+        self._durable_kinds = (
+            DURABLE_SUBPROCESS_KINDS
+            if self.training_runner is None
+            else ("matrix_evaluation",)
+        )
+        self._reconcile_durable_runs()
+        self._dispatcher = Thread(
+            target=self._dispatch_durable_jobs,
+            name="construction-job-dispatcher",
+            daemon=True,
+        )
+        self._dispatcher.start()
 
     def launch_training(self, design: HouseDesign, config: TrainingConfig) -> str:
         from embodied_skill_composer.construction.training import (
@@ -125,6 +133,72 @@ class LabService:
             self._wake.set()
         return run_id
 
+    def launch_training_matrix(
+        self,
+        design: HouseDesign,
+        *,
+        matrix_id: str,
+        protocol_digest: str,
+        protocol: dict[str, object],
+        execution_profile: str,
+        runs: list[tuple[str, TrainingConfig]],
+    ) -> list[str]:
+        """Atomically enqueue a reproducibility-fingerprinted training matrix."""
+
+        from embodied_skill_composer.construction.training import (
+            configuration_digest,
+            environment_fingerprint,
+            source_fingerprint,
+        )
+
+        if not runs:
+            raise ValueError("an experiment matrix must contain training runs")
+        source = source_fingerprint()
+        environment = environment_fingerprint()
+        prepared: list[
+            tuple[str, dict[str, object], str | None, str | None]
+        ] = []
+        for run_key, config in runs:
+            config.output_root = config.output_root.resolve()
+            config.source_commit = config.source_commit or str(source["commit"])
+            config.source_dirty = bool(source["dirty"])
+            config.source_tree_digest = str(source["tree_digest"])
+            if config.profile == "research" and config.source_dirty:
+                raise ValueError("research training requires a clean source worktree")
+            config.environment_fingerprint = (
+                config.environment_fingerprint or dict(environment)
+            )
+            config.configuration_digest = configuration_digest(config)
+            prepared.append(
+                (
+                    run_key,
+                    config.model_dump(mode="json"),
+                    config.configuration_digest,
+                    config.source_commit,
+                )
+            )
+        run_ids = self.registry.create_experiment_matrix(
+            matrix_id,
+            protocol_digest=protocol_digest,
+            protocol=protocol,
+            execution_profile=execution_profile,
+            design=design.model_dump(mode="json"),
+            runs=prepared,
+        )
+        if self.training_runner is not None:
+            for run_id, (_, config) in zip(run_ids, runs, strict=True):
+                future = self.executor.submit(
+                    self._run_training_inline,
+                    run_id,
+                    design.model_copy(deep=True),
+                    config,
+                )
+                with self._lock:
+                    self._futures[run_id] = future
+        else:
+            self._wake.set()
+        return run_ids
+
     def launch_evaluation(
         self,
         design: HouseDesign,
@@ -157,6 +231,35 @@ class LabService:
             self._futures[run_id] = future
         return run_id
 
+    def launch_matrix_evaluation(
+        self,
+        design: HouseDesign,
+        *,
+        matrix_id: str,
+        protocol: ExperimentProtocol,
+        output_root: Path,
+        device: str = "cpu",
+        selection_evidence_path: Path | None = None,
+    ) -> str:
+        config: dict[str, object] = {
+            "matrix_id": matrix_id,
+            "protocol_digest": protocol_digest_value(protocol),
+            "output_root": str(output_root.resolve()),
+            "device": device,
+            "selection_evidence_path": (
+                str(selection_evidence_path.resolve())
+                if selection_evidence_path is not None
+                else None
+            ),
+        }
+        run_id = self.registry.create_matrix_evaluation_run(
+            matrix_id,
+            config,
+            input_payload={"design": design.model_dump(mode="json")},
+        )
+        self._wake.set()
+        return run_id
+
     def cancel(self, run_id: str) -> bool:
         accepted = self.registry.request_cancel(run_id)
         self._wake.set()
@@ -175,15 +278,16 @@ class LabService:
             self._dispatcher.join(timeout=2)
         self.executor.shutdown(wait=False, cancel_futures=True)
 
-    def _dispatch_training(self) -> None:
+    def _dispatch_durable_jobs(self) -> None:
         while not self._stop.is_set():
-            claimed = self.registry.claim_next_training()
+            claimed = self.registry.claim_next_durable_job(kinds=self._durable_kinds)
             if claimed is None:
-                self.registry.reconcile_stale_runs()
+                self._reconcile_durable_runs()
                 self._wake.wait(timeout=1.0)
                 self._wake.clear()
                 continue
             run_id = str(claimed["id"])
+            run_kind = str(claimed["kind"])
             claim_token = str(claimed["claim_token"])
             process_log = self.registry.path.parent / "process" / f"{run_id}.log"
             process_log.parent.mkdir(parents=True, exist_ok=True)
@@ -232,7 +336,7 @@ class LabService:
                         claim_token=claim_token,
                     )
                     while process.poll() is None and not self._stop.wait(timeout=0.5):
-                        self.registry.reconcile_stale_runs()
+                        self._reconcile_durable_runs()
                     if process.poll() is None:
                         # Deliberately leave the detached worker alive; it owns its persisted claim.
                         return
@@ -250,14 +354,22 @@ class LabService:
                 and current.get("claim_token") == claim_token
                 and str(current["status"]) not in QUIESCENT_RUN_STATUSES
             ):
-                interrupted = current.get("latest_checkpoint") is not None
+                interrupted = (
+                    run_kind == "matrix_evaluation"
+                    or current.get("latest_checkpoint") is not None
+                )
                 self.registry.finalize_run(
                     run_id,
                     status="interrupted" if interrupted else "failed",
                     event={"event": "worker_exited", "return_code": return_code},
-                    error=f"training worker exited with code {return_code}",
+                    error=f"{run_kind} worker exited with code {return_code}",
                     claim_token=claim_token,
                 )
+
+    def _reconcile_durable_runs(self) -> list[str]:
+        if self.training_runner is None:
+            return self.registry.reconcile_stale_runs()
+        return self.registry.reconcile_stale_runs(kinds=self._durable_kinds)
 
     def _run_training_inline(
         self,
@@ -368,9 +480,16 @@ class LabService:
                 error=str(exc),
             )
 
-
 def _read_manifest(path: Path) -> dict[str, object]:
     parsed = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(parsed, dict):
         raise ValueError(f"policy manifest must contain an object: {path}")
     return cast(dict[str, object], parsed)
+
+
+def protocol_digest_value(protocol: ExperimentProtocol) -> str:
+    from embodied_skill_composer.construction.experiment_protocol import (
+        protocol_digest,
+    )
+
+    return protocol_digest(protocol)

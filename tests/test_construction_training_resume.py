@@ -18,11 +18,14 @@ from embodied_skill_composer.construction.marl_env_v1 import (  # noqa: E402
 from embodied_skill_composer.construction.policy import (  # noqa: E402
     TorchRLPolicyBundle,
     build_torchrl_policy,
+    load_policy_checkpoint,
 )
 from embodied_skill_composer.construction.training import (  # noqa: E402
     TrainingConfig,
     _restore_rng_state,
+    checkpoint_transition_targets,
     configuration_digest,
+    export_training_snapshot_as_policy_checkpoint,
     load_training_checkpoint,
     save_training_checkpoint,
     train_swarm_policy,
@@ -34,6 +37,20 @@ CONFIGURATION_DIGEST = "configuration-v1"
 DESIGN_DIGEST = "design-v1"
 SOURCE_COMMIT = "0123456789abcdef"
 SOURCE_TREE_DIGEST = "source-tree-v1"
+
+
+def test_research_checkpoint_targets_are_exact() -> None:
+    config = TrainingConfig.for_profile("research", algorithm="mappo", seed=7)
+
+    assert config.transitions == 1_500_000
+    assert config.checkpoint_fractions == [0.1, 0.25, 0.5, 0.75, 1.0]
+    assert checkpoint_transition_targets(config) == {
+        150_000: 0.1,
+        375_000: 0.25,
+        750_000: 0.5,
+        1_125_000: 0.75,
+        1_500_000: 1.0,
+    }
 
 
 def test_configuration_digest_is_stable_and_excludes_resume_metadata(
@@ -217,6 +234,88 @@ def test_checkpoint_round_trip_restores_training_and_rng_state(
     torch.testing.assert_close(torch.rand(4), expected_rng_values[2])
 
 
+def test_fractional_snapshot_exports_evaluation_policy_with_full_fidelity(
+    tmp_path: Path,
+) -> None:
+    config = TrainingConfig.for_profile("research", algorithm="mappo", seed=7)
+    config.source_tree_digest = SOURCE_TREE_DIGEST
+    source_bundle = build_torchrl_policy("mappo", hidden_dim=config.hidden_dim)
+    source_ppo = _optimizer_for_bundle(source_bundle)
+    source_bc = torch.optim.Adam(
+        source_bundle.actor_model.parameters(),
+        lr=config.learning_rate,
+    )
+    _prime_optimizer(
+        source_ppo,
+        [
+            *source_bundle.actor_model.parameters(),
+            *source_bundle.critic_model.parameters(),
+        ],
+    )
+    actor_state = _clone_tensor_mapping(source_bundle.actor_model.state_dict())
+    critic_state = _clone_tensor_mapping(source_bundle.critic_model.state_dict())
+    lineage = ["checkpoint_010pct.pt", "checkpoint_025pct.pt"]
+    snapshot = save_training_checkpoint(
+        tmp_path / "checkpoints" / "checkpoint_025pct.pt",
+        bundle=source_bundle,
+        ppo_optimizer=source_ppo,
+        bc_optimizer=source_bc,
+        config=config,
+        configuration_digest_value=CONFIGURATION_DIGEST,
+        design_digest=DESIGN_DIGEST,
+        source_commit_value=SOURCE_COMMIT,
+        transitions=375_000,
+        updates=184,
+        episode_cursor=23,
+        bc_epoch=40,
+        curve_rows=[],
+        checkpoint_lineage=lineage,
+        checkpoint_fraction=0.25,
+        checkpoint_target_transitions=375_000,
+    )
+
+    policy_path = export_training_snapshot_as_policy_checkpoint(snapshot)
+    restored_bundle = load_policy_checkpoint(policy_path)
+    policy_payload = torch.load(
+        policy_path,
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    _assert_tensor_mapping_equal(
+        actor_state,
+        restored_bundle.actor_model.state_dict(),
+    )
+    _assert_tensor_mapping_equal(
+        critic_state,
+        restored_bundle.critic_model.state_dict(),
+    )
+    assert policy_path == snapshot.with_name("checkpoint_025pct.policy.pt")
+    assert policy_payload["metadata"] == {
+        "hidden_dim": config.hidden_dim,
+        "experiment_id": "ad_hoc",
+        "experiment_variant": "default",
+        "training_seed": 7,
+        "seed": 7,
+        "transition_count": 375_000,
+        "transitions": 375_000,
+        "fraction": 0.25,
+        "checkpoint_fraction": 0.25,
+        "checkpoint_target_transitions": 375_000,
+        "configuration_digest": CONFIGURATION_DIGEST,
+        "source_commit": SOURCE_COMMIT,
+        "source_dirty": False,
+        "source_tree_digest": SOURCE_TREE_DIGEST,
+        "design_digest": DESIGN_DIGEST,
+        "environment_fingerprint": {},
+        "checkpoint_lineage": lineage,
+        "resume_provenance": {},
+        "training_snapshot_path": str(snapshot.resolve()),
+        "training_snapshot_schema_version": 2,
+        "environment_schema": TemporalConstructionCoordinationEnv.metadata["name"],
+    }
+
+
 def test_checkpoint_refuses_incompatible_resume_provenance(tmp_path: Path) -> None:
     config = TrainingConfig.for_profile("unit", algorithm="mappo", seed=29)
     config.source_tree_digest = SOURCE_TREE_DIGEST
@@ -349,6 +448,16 @@ def test_training_interrupts_then_resumes_from_exact_checkpoint(
 
     monkeypatch.setattr(training_module, "export_actor_onnx", fake_export)
     monkeypatch.setattr(training_module, "source_commit", lambda: "test-source-commit")
+    monkeypatch.setattr(
+        training_module,
+        "source_fingerprint",
+        lambda: {
+            "commit": "test-source-commit",
+            "dirty": False,
+            "tree_digest": "test-source-tree",
+        },
+    )
+
     def interrupt_after_first_update() -> bool:
         return any(
             config.output_root.glob("*/checkpoints/checkpoint_050pct.pt")
@@ -364,6 +473,14 @@ def test_training_interrupts_then_resumes_from_exact_checkpoint(
     first_payload = torch.load(latest, map_location="cpu", weights_only=False)
     assert first_payload["transitions"] == 16
     assert (run_dir / "checkpoints" / "checkpoint_050pct.pt").is_file()
+    policy_050_path = run_dir / "checkpoints" / "policy_050pct.pt"
+    policy_050 = torch.load(policy_050_path, map_location="cpu", weights_only=True)
+    assert policy_050["metadata"]["transition_count"] == 16
+    assert policy_050["metadata"]["fraction"] == 0.5
+    assert policy_050["metadata"]["configuration_digest"] == configuration_digest(
+        config
+    )
+    assert policy_050["metadata"]["source_commit"] == "test-source-commit"
 
     config.resume_checkpoint = latest
     config.resume_provenance = {"reason": "test-interruption"}
@@ -378,6 +495,7 @@ def test_training_interrupts_then_resumes_from_exact_checkpoint(
     assert final_payload["transitions"] == 32
     assert final_payload["updates"] == 2
     assert (run_dir / "checkpoints" / "checkpoint_100pct.pt").is_file()
+    assert (run_dir / "checkpoints" / "policy_100pct.pt").is_file()
     assert str(latest) in manifest.checkpoint_lineage
     assert manifest.resume_provenance == {"reason": "test-interruption"}
     assert manifest.configuration_digest == configuration_digest(config)

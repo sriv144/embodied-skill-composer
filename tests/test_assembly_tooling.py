@@ -131,10 +131,10 @@ def test_mujoco_backend_factory_and_scripted_episode(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(
-    not (mujoco_available and torch_available and (Path(__file__).resolve().parents[1] / "logs" / "assembly_options.pt").exists()),
-    reason="MuJoCo, torch, and the learned options checkpoint are required",
+    not (mujoco_available and torch_available),
+    reason="MuJoCo and torch are required",
 )
-def test_learned_policy_completes_mujoco_episode() -> None:
+def test_learned_policy_completes_mujoco_episode(tmp_path: Path) -> None:
     import torch
 
     from embodied_skill_composer.assembly.options_trainer import HierarchicalOptionTrainer
@@ -143,30 +143,47 @@ def test_learned_policy_completes_mujoco_episode() -> None:
     workspace = Path(__file__).resolve().parents[1]
     config = load_assembly_scenario(workspace / "configs" / "assembly_env.yaml")
     training = load_training_config(workspace / "configs" / "assembly_training.yaml")
+    smoke_training = training.model_copy(
+        update={
+            "total_iterations": 2,
+            "episodes_per_iteration": 3,
+            "option_behavior_cloning_epochs": 25,
+            "option_update_epochs": 2,
+            "evaluation_episodes": 2,
+        }
+    )
+    training_backend = build_assembly_backend(
+        config=config,
+        runtime_profile=AssemblyRuntimeProfile(
+            name="local_dev",
+            backend="local_sandbox",
+            device="cpu",
+        ),
+        seed=smoke_training.seed,
+    )
+    torch.manual_seed(smoke_training.seed)
+    trainer = HierarchicalOptionTrainer(training_backend, smoke_training, device="cpu")
+    checkpoint = tmp_path / "assembly_options.pt"
+    trainer.train(
+        checkpoint_path=checkpoint,
+        metrics_path=tmp_path / "assembly_option_training_metrics.json",
+    )
+
     backend = build_assembly_backend(
         config=config,
-        runtime_profile=AssemblyRuntimeProfile(name="mujoco_local", backend="mujoco_local", device="cuda"),
-        seed=training.seed,
+        runtime_profile=AssemblyRuntimeProfile(
+            name="mujoco_local",
+            backend="mujoco_local",
+            device="cpu",
+        ),
+        seed=smoke_training.seed,
     )
-    trainer = HierarchicalOptionTrainer(backend, training, device="cuda" if torch.cuda.is_available() else "cpu")
-    trainer.load_checkpoint(workspace / "logs" / "assembly_options.pt")
+    mujoco_trainer = HierarchicalOptionTrainer(backend, smoke_training, device="cpu")
+    mujoco_trainer.load_checkpoint(checkpoint)
 
-    backend.reset(seed=training.seed)
-    done = False
-    while not done:
-        observation = torch.as_tensor(
-            backend.get_team_option_observation(), dtype=torch.float32, device=trainer.device
-        ).unsqueeze(0)
-        mask = torch.as_tensor(trainer._masked_option_array(), dtype=torch.float32, device=trainer.device).unsqueeze(0)
-        with torch.no_grad():
-            logits = trainer._masked_logits(trainer.actor(observation), mask)
-            option = int(torch.argmax(logits, dim=-1).item())
-        result = backend.execute_team_option(option, max_primitive_steps=backend.config.option_max_primitive_steps)
-        done = result.done
-
-    artifact = backend.build_artifact(policy_mode="learned")
-    assert artifact.metrics.success is True
-    assert artifact.metrics.beams_installed == 2
+    metrics = mujoco_trainer.evaluate_policy(episodes=1)
+    assert metrics.success_rate == 1.0
+    assert metrics.mean_beams_installed == 2.0
 
 
 def test_visualizer_renders_playback_frames(tmp_path: Path) -> None:

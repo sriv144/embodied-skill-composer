@@ -6,12 +6,18 @@ import signal
 import sqlite3
 import subprocess
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
+
+from embodied_skill_composer.construction.lab_events import (
+    RunEventEnvelope,
+    dump_run_event_payload,
+    validate_run_event_payload,
+)
 
 
 RunStatus = Literal[
@@ -28,6 +34,16 @@ TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cance
 QUIESCENT_RUN_STATUSES: frozenset[str] = TERMINAL_RUN_STATUSES | {"interrupted"}
 ACTIVE_RUN_STATUSES: tuple[str, ...] = ("running", "cancel_requested")
 RESUMABLE_RUN_STATUSES: tuple[str, ...] = ("interrupted", "failed", "cancelled")
+DURABLE_SUBPROCESS_KINDS: tuple[str, ...] = ("training", "matrix_evaluation")
+MATRIX_EVALUATION_DEDUPLICATED_STATUSES: frozenset[str] = frozenset(
+    {
+        "queued",
+        "running",
+        "cancel_requested",
+        "resuming",
+        "completed",
+    }
+)
 DEFAULT_STALE_WORKER_TIMEOUT = timedelta(seconds=60)
 PROCESS_TERMINATION_TIMEOUT_SECONDS = 5.0
 
@@ -130,6 +146,302 @@ class LabRegistry:
             for row in rows
         ]
 
+    def upsert_evaluation(
+        self,
+        evaluation_id: str,
+        *,
+        matrix_id: str | None,
+        split: str,
+        payload: dict[str, object],
+        artifact_dir: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO evaluations (
+                    id, matrix_id, split, payload_json, artifact_dir, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    matrix_id = excluded.matrix_id,
+                    split = excluded.split,
+                    payload_json = excluded.payload_json,
+                    artifact_dir = excluded.artifact_dir
+                """,
+                (
+                    evaluation_id,
+                    matrix_id,
+                    split,
+                    _json(payload),
+                    artifact_dir,
+                    _now(),
+                ),
+            )
+
+    def list_evaluations(
+        self,
+        *,
+        matrix_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        query = (
+            "SELECT id, matrix_id, split, payload_json, artifact_dir, created_at "
+            "FROM evaluations"
+        )
+        parameters: tuple[object, ...] = ()
+        if matrix_id is not None:
+            query += " WHERE matrix_id = ?"
+            parameters = (matrix_id,)
+        query += " ORDER BY created_at DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [
+            {
+                "id": str(row["id"]),
+                "matrix_id": row["matrix_id"],
+                "split": str(row["split"]),
+                "payload": _object_dict(row["payload_json"]),
+                "artifact_dir": str(row["artifact_dir"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def create_experiment_matrix(
+        self,
+        matrix_id: str,
+        *,
+        protocol_digest: str,
+        protocol: dict[str, object],
+        execution_profile: str,
+        design: dict[str, object],
+        runs: list[
+            tuple[
+                str,
+                dict[str, object],
+                str | None,
+                str | None,
+            ]
+        ],
+    ) -> list[str]:
+        """Atomically persist a frozen experiment matrix and all queued runs."""
+
+        if not runs:
+            raise ValueError("an experiment matrix must contain at least one run")
+        created_at = _now()
+        run_records: list[tuple[str, Path, dict[str, object]]] = []
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            duplicate = connection.execute(
+                """
+                SELECT id FROM experiment_matrices
+                WHERE protocol_digest = ? AND execution_profile = ?
+                """,
+                (protocol_digest, execution_profile),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(
+                    "experiment matrix already exists for this protocol digest "
+                    f"and profile: {duplicate['id']}"
+                )
+            connection.execute(
+                """
+                INSERT INTO experiment_matrices (
+                    id, protocol_digest, protocol_json, execution_profile,
+                    expected_run_count, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    matrix_id,
+                    protocol_digest,
+                    _json(protocol),
+                    execution_profile,
+                    len(runs),
+                    created_at,
+                ),
+            )
+            for ordinal, (run_key, config, config_digest, source_commit) in enumerate(runs):
+                run_id = f"{matrix_id}-{run_key}"
+                event_log_path = self.path.parent / "events" / f"{run_id}.jsonl"
+                connection.execute(
+                    """
+                    INSERT INTO runs (
+                        id, kind, status, config_json, input_json, created_at, progress,
+                        cancel_requested, event_log_path, config_digest, source_commit,
+                        resume_provenance_json
+                    ) VALUES (?, 'training', 'queued', ?, ?, ?, 0, 0, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        _json(config),
+                        _json({"design": design}),
+                        created_at,
+                        str(event_log_path),
+                        config_digest,
+                        source_commit,
+                        _json(_initial_resume_provenance_history(config)),
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO matrix_runs (matrix_id, run_id, run_key, ordinal)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (matrix_id, run_id, run_key, ordinal),
+                )
+                payload: dict[str, object] = {
+                    "event": "run_created",
+                    "status": "queued",
+                    "matrix_id": matrix_id,
+                    "run_key": run_key,
+                }
+                payload = _validated_event_payload(payload)
+                _insert_event(
+                    connection,
+                    run_id,
+                    created_at=created_at,
+                    serialized_payload=_json(payload),
+                )
+                run_records.append((run_id, event_log_path, payload))
+        for _, event_log_path, payload in run_records:
+            _write_event_log_record(
+                event_log_path,
+                sequence=1,
+                created_at=created_at,
+                payload=payload,
+            )
+        return [run_id for run_id, _, _ in run_records]
+
+    def list_experiment_matrices(self) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM experiment_matrices ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._matrix_row(row) for row in rows]
+
+    def get_experiment_matrix(self, matrix_id: str) -> dict[str, object] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM experiment_matrices WHERE id = ?",
+                (matrix_id,),
+            ).fetchone()
+        return self._matrix_row(row) if row is not None else None
+
+    def freeze_policy_selection(
+        self,
+        matrix_id: str,
+        run_key: str,
+        selection: dict[str, object],
+    ) -> None:
+        """Persist one immutable validation-only checkpoint selection."""
+
+        serialized = _json(selection)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            matrix_run = connection.execute(
+                """
+                SELECT 1 FROM matrix_runs
+                WHERE matrix_id = ? AND run_key = ?
+                """,
+                (matrix_id, run_key),
+            ).fetchone()
+            if matrix_run is None:
+                raise KeyError(f"{matrix_id}:{run_key}")
+            existing = connection.execute(
+                """
+                SELECT selection_json FROM policy_selections
+                WHERE matrix_id = ? AND run_key = ?
+                """,
+                (matrix_id, run_key),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["selection_json"]) == serialized:
+                    return
+                raise ValueError(
+                    f"selection is already frozen for {matrix_id}:{run_key}"
+                )
+            connection.execute(
+                """
+                INSERT INTO policy_selections (
+                    matrix_id, run_key, selection_json, frozen_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (matrix_id, run_key, serialized, _now()),
+            )
+
+    def list_policy_selections(self, matrix_id: str) -> list[dict[str, object]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT run_key, selection_json, frozen_at
+                FROM policy_selections
+                WHERE matrix_id = ?
+                ORDER BY run_key
+                """,
+                (matrix_id,),
+            ).fetchall()
+        return [
+            {
+                "run_key": str(row["run_key"]),
+                "selection": _object_dict(row["selection_json"]),
+                "frozen_at": str(row["frozen_at"]),
+            }
+            for row in rows
+        ]
+
+    def _matrix_row(self, row: sqlite3.Row) -> dict[str, object]:
+        matrix_id = str(row["id"])
+        with self._connect() as connection:
+            run_rows = connection.execute(
+                """
+                SELECT mr.run_key, mr.ordinal, r.*
+                FROM matrix_runs mr
+                JOIN runs r ON r.id = mr.run_id
+                WHERE mr.matrix_id = ?
+                ORDER BY mr.ordinal
+                """,
+                (matrix_id,),
+            ).fetchall()
+            selection_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM policy_selections WHERE matrix_id = ?",
+                    (matrix_id,),
+                ).fetchone()[0]
+            )
+        runs = [
+            {
+                **_run_row(run_row),
+                "run_key": str(run_row["run_key"]),
+                "ordinal": int(run_row["ordinal"]),
+            }
+            for run_row in run_rows
+        ]
+        counts: dict[str, int] = {}
+        for run in runs:
+            status = str(run["status"])
+            counts[status] = counts.get(status, 0) + 1
+        expected = int(row["expected_run_count"])
+        if selection_count == expected:
+            status = "selected"
+        elif any(item in counts for item in ("failed", "interrupted", "cancelled")):
+            status = "attention"
+        elif counts.get("completed", 0) == expected:
+            status = "validating"
+        elif counts.get("running", 0) or counts.get("resuming", 0):
+            status = "running"
+        else:
+            status = "queued"
+        return {
+            "id": matrix_id,
+            "protocol_digest": str(row["protocol_digest"]),
+            "protocol": _object_dict(row["protocol_json"]),
+            "execution_profile": str(row["execution_profile"]),
+            "expected_run_count": expected,
+            "selection_count": selection_count,
+            "status": status,
+            "status_counts": counts,
+            "created_at": str(row["created_at"]),
+            "runs": runs,
+        }
+
     def create_run(
         self,
         kind: str,
@@ -150,8 +462,9 @@ class LabRegistry:
                 """
                 INSERT INTO runs (
                     id, kind, status, config_json, input_json, created_at, progress,
-                    cancel_requested, event_log_path, config_digest, source_commit
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                    cancel_requested, event_log_path, config_digest, source_commit,
+                    resume_provenance_json
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)
                 """,
                 (
                     run_id,
@@ -163,9 +476,78 @@ class LabRegistry:
                     str(event_log_path),
                     config_digest,
                     source_commit,
+                    _json(_initial_resume_provenance_history(config)),
                 ),
             )
         self.append_event(run_id, {"event": "run_created", "status": status})
+        return run_id
+
+    def create_matrix_evaluation_run(
+        self,
+        matrix_id: str,
+        config: dict[str, object],
+        *,
+        input_payload: dict[str, object],
+    ) -> str:
+        """Atomically create the only active or completed evaluation for a matrix."""
+
+        if config.get("matrix_id") != matrix_id:
+            raise ValueError("matrix evaluation config does not match its matrix id")
+        run_id = (
+            f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
+            f"matrix_evaluation-{uuid4().hex[:8]}"
+        )
+        event_log_path = self.path.parent / "events" / f"{run_id}.jsonl"
+        created_at = _now()
+        event = _validated_event_payload(
+            {"event": "run_created", "status": "queued"}
+        )
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT id, status, config_json FROM runs
+                WHERE kind = 'matrix_evaluation'
+                """
+            ).fetchall()
+            for row in rows:
+                existing_config = _object_dict(row["config_json"])
+                if (
+                    existing_config.get("matrix_id") == matrix_id
+                    and str(row["status"])
+                    in MATRIX_EVALUATION_DEDUPLICATED_STATUSES
+                ):
+                    raise ValueError(
+                        "matrix evaluation already has an active or completed run: "
+                        f"{row['id']}"
+                    )
+            connection.execute(
+                """
+                INSERT INTO runs (
+                    id, kind, status, config_json, input_json, created_at, progress,
+                    cancel_requested, event_log_path
+                ) VALUES (?, 'matrix_evaluation', 'queued', ?, ?, ?, 0, 0, ?)
+                """,
+                (
+                    run_id,
+                    _json(config),
+                    _json(input_payload),
+                    created_at,
+                    str(event_log_path),
+                ),
+            )
+            sequence = _insert_event(
+                connection,
+                run_id,
+                created_at=created_at,
+                serialized_payload=_json(event),
+            )
+        _write_event_log_record(
+            event_log_path,
+            sequence=sequence,
+            created_at=created_at,
+            payload=event,
+        )
         return run_id
 
     def update_run(
@@ -243,23 +625,36 @@ class LabRegistry:
                     raise LostRunClaimError(run_id)
                 raise KeyError(run_id)
 
-    def claim_next_training(self) -> dict[str, object] | None:
-        """Atomically claim one queued/resuming training job if the GPU slot is free."""
+    def claim_next_durable_job(
+        self,
+        *,
+        kinds: Sequence[str] = DURABLE_SUBPROCESS_KINDS,
+    ) -> dict[str, object] | None:
+        """Atomically claim one queued durable job while its queue slot is free."""
+
+        requested_kinds = tuple(dict.fromkeys(kinds))
+        if not requested_kinds or any(
+            kind not in DURABLE_SUBPROCESS_KINDS for kind in requested_kinds
+        ):
+            raise ValueError(f"unsupported durable subprocess kinds: {requested_kinds}")
+        placeholders = ", ".join("?" for _ in requested_kinds)
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             active = connection.execute(
-                "SELECT id FROM runs WHERE kind = 'training' "
-                "AND status IN ('running', 'cancel_requested') LIMIT 1"
+                f"SELECT id FROM runs WHERE kind IN ({placeholders}) "
+                "AND status IN ('running', 'cancel_requested') LIMIT 1",
+                requested_kinds,
             ).fetchone()
             if active is not None:
                 return None
             row = connection.execute(
-                """
+                f"""
                 SELECT id FROM runs
-                WHERE kind = 'training' AND status IN ('queued', 'resuming')
+                WHERE kind IN ({placeholders}) AND status IN ('queued', 'resuming')
                 ORDER BY created_at, id LIMIT 1
-                """
+                """,
+                requested_kinds,
             ).fetchone()
             if row is None:
                 return None
@@ -283,6 +678,11 @@ class LabRegistry:
         )
         return _run_row(claimed)
 
+    def claim_next_training(self) -> dict[str, object] | None:
+        """Backward-compatible training-only durable claim."""
+
+        return self.claim_next_durable_job(kinds=("training",))
+
     def verify_claim(self, run_id: str, claim_token: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
@@ -293,6 +693,65 @@ class LabRegistry:
             and str(row["claim_token"]) == claim_token
             and str(row["status"]) in ACTIVE_RUN_STATUSES
         )
+
+    def record_resume_provenance(
+        self,
+        run_id: str,
+        provenance: Mapping[str, object],
+        *,
+        claim_token: str,
+    ) -> list[dict[str, object]]:
+        """Append claim-owned resume lineage without mutating the frozen config."""
+
+        normalized = dict(provenance)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT status, claim_token, attempt, latest_checkpoint,
+                    resume_provenance_json
+                FROM runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["claim_token"]) != claim_token
+                or str(row["status"]) not in ACTIVE_RUN_STATUSES
+            ):
+                raise LostRunClaimError(run_id)
+            expected = {
+                "run_id": run_id,
+                "attempt": int(row["attempt"]),
+                "checkpoint": str(row["latest_checkpoint"]),
+            }
+            if normalized != expected or row["latest_checkpoint"] is None:
+                raise ValueError(
+                    "resume provenance must identify the claimed run, attempt, "
+                    "and persisted latest checkpoint"
+                )
+            history = _resume_provenance_history(row["resume_provenance_json"])
+            same_attempt = [
+                item
+                for item in history
+                if item.get("attempt") == normalized["attempt"]
+            ]
+            if same_attempt and same_attempt != [normalized]:
+                raise ValueError(
+                    f"resume provenance is already recorded for attempt "
+                    f"{normalized['attempt']}"
+                )
+            if normalized not in history:
+                history.append(normalized)
+                connection.execute(
+                    """
+                    UPDATE runs SET resume_provenance_json = ?
+                    WHERE id = ? AND claim_token = ?
+                        AND status IN ('running', 'cancel_requested')
+                    """,
+                    (_json(history), run_id, claim_token),
+                )
+        return history
 
     def finalize_run(
         self,
@@ -311,7 +770,6 @@ class LabRegistry:
         if policy is not None and status != "completed":
             raise ValueError("a policy may only be registered for a completed run")
         created_at = _now()
-        serialized_event = _json(dict(event))
         bounded_progress = (
             min(max(progress, 0.0), 1.0) if progress is not None else None
         )
@@ -332,6 +790,8 @@ class LabRegistry:
                 if claim_token is not None:
                     raise LostRunClaimError(run_id)
                 raise KeyError(run_id)
+            normalized_event = _validated_event_payload(event)
+            serialized_event = _json(normalized_event)
             if policy is not None:
                 policy_id, controller, manifest = policy
                 connection.execute(
@@ -379,7 +839,7 @@ class LabRegistry:
             event_log_path,
             sequence=sequence,
             created_at=created_at,
-            payload=event,
+            payload=normalized_event,
         )
         return sequence
 
@@ -409,13 +869,21 @@ class LabRegistry:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status, latest_checkpoint FROM runs WHERE id = ?", (run_id,)
+                "SELECT kind, status, latest_checkpoint FROM runs WHERE id = ?",
+                (run_id,),
             ).fetchone()
+            is_restartable_matrix_evaluation = bool(
+                row and str(row["kind"]) == "matrix_evaluation"
+            )
+            has_training_checkpoint = bool(
+                row
+                and row["latest_checkpoint"]
+                and Path(str(row["latest_checkpoint"])).is_file()
+            )
             if (
                 row is None
                 or str(row["status"]) not in RESUMABLE_RUN_STATUSES
-                or not row["latest_checkpoint"]
-                or not Path(str(row["latest_checkpoint"])).is_file()
+                or not (is_restartable_matrix_evaluation or has_training_checkpoint)
             ):
                 return False
             connection.execute(
@@ -427,10 +895,12 @@ class LabRegistry:
                 """,
                 (run_id,),
             )
-        self.append_event(
-            run_id,
-            {"event": "resume_requested", "checkpoint": str(row["latest_checkpoint"])},
-        )
+        event: dict[str, object] = {"event": "resume_requested"}
+        if row["latest_checkpoint"]:
+            event["checkpoint"] = str(row["latest_checkpoint"])
+        else:
+            event["restart_from_beginning"] = True
+        self.append_event(run_id, event)
         return True
 
     def cancel_requested(self, run_id: str) -> bool:
@@ -443,6 +913,7 @@ class LabRegistry:
     def reconcile_stale_runs(
         self,
         *,
+        kinds: Sequence[str] = DURABLE_SUBPROCESS_KINDS,
         stale_after: timedelta = DEFAULT_STALE_WORKER_TIMEOUT,
         process_alive: Callable[[int], bool] | None = None,
         process_identity: Callable[[int], str | None] | None = None,
@@ -451,15 +922,22 @@ class LabRegistry:
     ) -> list[str]:
         """Fence expired leases and release them only after the old worker is gone."""
 
+        requested_kinds = tuple(dict.fromkeys(kinds))
+        if not requested_kinds or any(
+            kind not in DURABLE_SUBPROCESS_KINDS for kind in requested_kinds
+        ):
+            raise ValueError(f"unsupported durable subprocess kinds: {requested_kinds}")
         process_alive = process_alive or _process_alive
         process_identity = process_identity or _process_identity
         terminate_owned_process = terminate_owned_process or _terminate_owned_process
         now = now or datetime.now(UTC)
         interrupted: list[str] = []
+        placeholders = ", ".join("?" for _ in requested_kinds)
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id FROM runs WHERE kind = 'training' "
-                "AND status IN ('running', 'cancel_requested')"
+                f"SELECT id FROM runs WHERE kind IN ({placeholders}) "
+                "AND status IN ('running', 'cancel_requested')",
+                requested_kinds,
             ).fetchall()
         for candidate in rows:
             run_id = str(candidate["id"])
@@ -559,7 +1037,6 @@ class LabRegistry:
         claim_token: str | None = None,
     ) -> int:
         created_at = _now()
-        serialized = _json(dict(payload))
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if claim_token is not None:
@@ -572,6 +1049,8 @@ class LabRegistry:
                     or str(owner["status"]) not in ACTIVE_RUN_STATUSES
                 ):
                     raise LostRunClaimError(run_id)
+            normalized_payload = _validated_event_payload(payload)
+            serialized = _json(normalized_payload)
             sequence = _insert_event(
                 connection,
                 run_id,
@@ -585,11 +1064,25 @@ class LabRegistry:
             row["event_log_path"] if row else None,
             sequence=sequence,
             created_at=created_at,
-            payload=payload,
+            payload=normalized_payload,
         )
         return sequence
 
     def list_events(self, run_id: str, *, after: int = 0) -> list[dict[str, object]]:
+        return [
+            cast(
+                dict[str, object],
+                item.model_dump(mode="json", exclude_unset=True),
+            )
+            for item in self.list_event_envelopes(run_id, after=after)
+        ]
+
+    def list_event_envelopes(
+        self,
+        run_id: str,
+        *,
+        after: int = 0,
+    ) -> list[RunEventEnvelope]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
@@ -599,11 +1092,14 @@ class LabRegistry:
                 (run_id, after),
             ).fetchall()
         return [
-            {
-                "sequence": int(row["sequence"]),
-                "created_at": str(row["created_at"]),
-                "payload": _object_dict(row["payload_json"]),
-            }
+            RunEventEnvelope.model_validate(
+                {
+                    "sequence": int(row["sequence"]),
+                    "created_at": str(row["created_at"]),
+                    "payload": _object_dict(row["payload_json"]),
+                },
+                strict=True,
+            )
             for row in rows
         ]
 
@@ -660,6 +1156,7 @@ class LabRegistry:
                     latest_checkpoint TEXT,
                     config_digest TEXT,
                     source_commit TEXT,
+                    resume_provenance_json TEXT NOT NULL DEFAULT '[]',
                     claim_token TEXT,
                     interrupted_at TEXT
                 );
@@ -669,6 +1166,40 @@ class LabRegistry:
                     created_at TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     PRIMARY KEY (run_id, sequence)
+                );
+                CREATE TABLE IF NOT EXISTS experiment_matrices (
+                    id TEXT PRIMARY KEY,
+                    protocol_digest TEXT NOT NULL,
+                    protocol_json TEXT NOT NULL,
+                    execution_profile TEXT NOT NULL,
+                    expected_run_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(protocol_digest, execution_profile)
+                );
+                CREATE TABLE IF NOT EXISTS matrix_runs (
+                    matrix_id TEXT NOT NULL REFERENCES experiment_matrices(id) ON DELETE CASCADE,
+                    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+                    run_key TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    PRIMARY KEY (matrix_id, run_key),
+                    UNIQUE(run_id)
+                );
+                CREATE TABLE IF NOT EXISTS policy_selections (
+                    matrix_id TEXT NOT NULL REFERENCES experiment_matrices(id) ON DELETE CASCADE,
+                    run_key TEXT NOT NULL,
+                    selection_json TEXT NOT NULL,
+                    frozen_at TEXT NOT NULL,
+                    PRIMARY KEY (matrix_id, run_key),
+                    FOREIGN KEY (matrix_id, run_key)
+                        REFERENCES matrix_runs(matrix_id, run_key) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS evaluations (
+                    id TEXT PRIMARY KEY,
+                    matrix_id TEXT REFERENCES experiment_matrices(id) ON DELETE SET NULL,
+                    split TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    artifact_dir TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 """
             )
@@ -686,18 +1217,37 @@ class LabRegistry:
                 "latest_checkpoint": "TEXT",
                 "config_digest": "TEXT",
                 "source_commit": "TEXT",
+                "resume_provenance_json": "TEXT NOT NULL DEFAULT '[]'",
                 "claim_token": "TEXT",
                 "interrupted_at": "TEXT",
             }
+            added_resume_provenance = "resume_provenance_json" not in columns
             for column, declaration in migrations.items():
                 if column not in columns:
                     connection.execute(f"ALTER TABLE runs ADD COLUMN {column} {declaration}")
+            if added_resume_provenance:
+                legacy_rows = connection.execute(
+                    "SELECT id, config_json FROM runs"
+                ).fetchall()
+                for row in legacy_rows:
+                    config = _object_dict(row["config_json"])
+                    connection.execute(
+                        "UPDATE runs SET resume_provenance_json = ? WHERE id = ?",
+                        (
+                            _json(_initial_resume_provenance_history(config)),
+                            str(row["id"]),
+                        ),
+                    )
             connection.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_runs_kind_status_created
                     ON runs(kind, status, created_at);
                 CREATE INDEX IF NOT EXISTS idx_runs_heartbeat ON runs(heartbeat_at);
-                PRAGMA user_version = 2;
+                CREATE INDEX IF NOT EXISTS idx_matrix_runs_matrix_ordinal
+                    ON matrix_runs(matrix_id, ordinal);
+                CREATE INDEX IF NOT EXISTS idx_evaluations_matrix_created
+                    ON evaluations(matrix_id, created_at);
+                PRAGMA user_version = 5;
                 """
             )
 
@@ -724,6 +1274,9 @@ def _run_row(row: sqlite3.Row) -> dict[str, object]:
         "latest_checkpoint": row["latest_checkpoint"],
         "config_digest": row["config_digest"],
         "source_commit": row["source_commit"],
+        "resume_provenance_history": _resume_provenance_history(
+            row["resume_provenance_json"]
+        ),
         "claim_token": row["claim_token"],
         "interrupted_at": row["interrupted_at"],
     }
@@ -778,7 +1331,33 @@ def _object_dict(value: object) -> dict[str, object]:
     return cast(dict[str, object], parsed)
 
 
-def _json(value: Mapping[str, object]) -> str:
+def _validated_event_payload(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    return dump_run_event_payload(validate_run_event_payload(payload))
+
+
+def _initial_resume_provenance_history(
+    config: Mapping[str, object],
+) -> list[dict[str, object]]:
+    value = config.get("resume_provenance")
+    if value in (None, {}):
+        return []
+    if not isinstance(value, dict):
+        raise ValueError("resume_provenance must be a JSON object")
+    return [cast(dict[str, object], value)]
+
+
+def _resume_provenance_history(value: object) -> list[dict[str, object]]:
+    parsed = json.loads(str(value))
+    if not isinstance(parsed, list) or not all(
+        isinstance(item, dict) for item in parsed
+    ):
+        raise ValueError("expected resume provenance history to be a list of objects")
+    return [cast(dict[str, object], item) for item in parsed]
+
+
+def _json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
