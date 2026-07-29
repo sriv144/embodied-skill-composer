@@ -126,8 +126,13 @@ class FakeDynamicSim:
     def setObjectAlias(self, handle: int, alias: str) -> None:
         self.aliases[handle] = alias
 
-    def getObjectAlias(self, handle: int, _options: int) -> str:
-        return self.aliases.get(handle, f"object_{handle}")
+    def getObjectAlias(self, handle: int, options: int) -> str:
+        alias = self.aliases.get(handle, f"object_{handle}")
+        if options == -1:
+            return alias.rsplit("/", 1)[-1]
+        if options in {1, 2} and not alias.startswith("/"):
+            return f"/{alias}"
+        return alias
 
     def getObjectsInTree(
         self,

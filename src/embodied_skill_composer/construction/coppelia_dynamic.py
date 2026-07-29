@@ -765,7 +765,7 @@ class DynamicCoppeliaExecutor:
             prior_roots = [
                 handle
                 for handle in scene_objects
-                if str(self.sim.getObjectAlias(handle, 1))
+                if str(self.sim.getObjectAlias(handle, -1))
                 == GENERATED_SCENE_ROOT_ALIAS
             ]
             removal_handles: set[int] = set()
@@ -787,7 +787,7 @@ class DynamicCoppeliaExecutor:
                     handle_all,
                     0,
                 )
-                if str(self.sim.getObjectAlias(handle, 1))
+                if str(self.sim.getObjectAlias(handle, -1))
                 == GENERATED_SCENE_ROOT_ALIAS
             ]
         except Exception as exc:
