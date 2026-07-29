@@ -22,6 +22,7 @@ from embodied_skill_composer.construction.models import BuildPlan, Pose3D, Vec2,
 WHEEL_NAMES = ("fl", "rl", "rr", "fr")
 COPPELIA_SCENE_MAGIC = b"VREP"
 MINIMUM_COPPELIA_SCENE_BYTES = 128
+GENERATED_SCENE_ROOT_ALIAS = "ESCConstructionIntelligenceV1"
 RobotCommandSource = Literal[
     "settling",
     "path_follower",
@@ -144,6 +145,9 @@ class DynamicCoppeliaExecutor:
         self.command_response_anchor: dict[str, tuple[float, Vec3]] = {}
         self.command_response_displacement_m: dict[str, float] = {}
         self.command_response_observed_at_s: dict[str, float] = {}
+        self.prior_generated_scene_root_count = 0
+        self.prior_generated_scene_object_count = 0
+        self.generated_scene_cleanup_verified = False
         self.runtime_events: list[dict[str, object]] = []
         self.started = False
         self.is_ready = False
@@ -156,6 +160,7 @@ class DynamicCoppeliaExecutor:
         self.client = (self.client_factory or _connect_client)(self.config)
         self.sim = self.client.require("sim")
         self._ensure_stopped()
+        self._remove_prior_generated_scenes()
         self._build_scene()
         self._prepare_collision_monitoring()
         self.is_ready = True
@@ -623,6 +628,15 @@ class DynamicCoppeliaExecutor:
             ),
             "script_control_audit": list(self.script_control_audit),
             "scene_robot_count": len(self.robot_handles),
+            "prior_generated_scene_root_count": (
+                self.prior_generated_scene_root_count
+            ),
+            "prior_generated_scene_object_count": (
+                self.prior_generated_scene_object_count
+            ),
+            "generated_scene_cleanup_verified": (
+                self.generated_scene_cleanup_verified
+            ),
             "scene_module_count": len(self.module_handles),
             "scene_obstacle_count": len(self.obstacle_handles),
             "disabled_robots": sorted(self.disabled_robots),
@@ -708,9 +722,99 @@ class DynamicCoppeliaExecutor:
         self._require_started()
         self._execute_assignments(assignments)
 
+    def _remove_prior_generated_scenes(self) -> None:
+        required_api = (
+            "getObjectsInTree",
+            "getObjectAlias",
+            "removeObjects",
+        )
+        missing = [
+            name for name in required_api if not callable(getattr(self.sim, name, None))
+        ]
+        handle_scene = getattr(self.sim, "handle_scene", None)
+        handle_all = getattr(self.sim, "handle_all", None)
+        if missing or handle_scene is None or handle_all is None:
+            detail = ", ".join(
+                [
+                    *missing,
+                    *(
+                        ["handle_scene"]
+                        if handle_scene is None
+                        else []
+                    ),
+                    *(
+                        ["handle_all"]
+                        if handle_all is None
+                        else []
+                    ),
+                ]
+            )
+            raise DynamicCoppeliaError(
+                "project-owned Coppelia scene cleanup is unavailable: "
+                f"{detail}"
+            )
+        try:
+            scene_objects = [
+                int(handle)
+                for handle in self.sim.getObjectsInTree(
+                    handle_scene,
+                    handle_all,
+                    0,
+                )
+            ]
+            prior_roots = [
+                handle
+                for handle in scene_objects
+                if str(self.sim.getObjectAlias(handle, 1))
+                == GENERATED_SCENE_ROOT_ALIAS
+            ]
+            removal_handles: set[int] = set()
+            for root_handle in prior_roots:
+                removal_handles.update(
+                    int(handle)
+                    for handle in self.sim.getObjectsInTree(
+                        root_handle,
+                        handle_all,
+                        0,
+                    )
+                )
+            if removal_handles:
+                self.sim.removeObjects(sorted(removal_handles), False)
+            remaining_roots = [
+                int(handle)
+                for handle in self.sim.getObjectsInTree(
+                    handle_scene,
+                    handle_all,
+                    0,
+                )
+                if str(self.sim.getObjectAlias(handle, 1))
+                == GENERATED_SCENE_ROOT_ALIAS
+            ]
+        except Exception as exc:
+            raise DynamicCoppeliaError(
+                "project-owned Coppelia scene cleanup failed"
+            ) from exc
+        if remaining_roots:
+            raise DynamicCoppeliaError(
+                "project-owned Coppelia scene cleanup could not remove every "
+                "prior generated root"
+            )
+        self.prior_generated_scene_root_count = len(prior_roots)
+        self.prior_generated_scene_object_count = len(removal_handles)
+        self.generated_scene_cleanup_verified = True
+        self.runtime_events.append(
+            {
+                "timestamp_s": 0.0,
+                "event": "prior_generated_scene_cleanup",
+                "removed_root_count": len(prior_roots),
+                "removed_object_count": len(removal_handles),
+                "verified": True,
+            }
+        )
+
     def _build_scene(self) -> None:
         self.root_handle = self.sim.createDummy(0.01)
-        self.sim.setObjectAlias(self.root_handle, "ESCConstructionIntelligenceV1")
+        self.sim.setObjectAlias(self.root_handle, GENERATED_SCENE_ROOT_ALIAS)
         grid = self.plan.site_grid
         grid_min_x = grid.origin.x - grid.resolution_m
         grid_max_x = (
@@ -769,6 +873,7 @@ class DynamicCoppeliaExecutor:
             self.module_handles[module.module_id] = handle
             carrier = self.sim.createDummy(0.03)
             self.sim.setObjectAlias(carrier, f"logical_carrier_{module.module_id}")
+            self.sim.setObjectParent(carrier, self.root_handle, True)
             self.payload_carriers[module.module_id] = carrier
         for robot in self.plan.robots:
             handle = self.sim.loadModel(str(Path(self.config.robot_model_path).resolve()))

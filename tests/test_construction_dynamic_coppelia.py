@@ -44,6 +44,8 @@ class FakeDynamicSim:
     scriptintparam_enabled = 101
     object_script_type = 102
     handle_tree = -1
+    handle_scene = -2
+    handle_all = -3
 
     def __init__(self) -> None:
         self.next_handle = 10
@@ -65,6 +67,8 @@ class FakeDynamicSim:
         self.script_disabled: dict[int, bool] = {}
         self.bool_property_writes: list[tuple[int, str, bool]] = []
         self.collections: dict[int, int] = {}
+        self.parents: dict[int, int] = {}
+        self.removed_object_batches: list[list[int]] = []
 
     def _handle(self) -> int:
         self.next_handle += 1
@@ -131,7 +135,30 @@ class FakeDynamicSim:
         object_type: int | None = None,
         _options: int = 0,
     ):
-        descendants = self.trees.get(handle, [handle])
+        if handle == self.handle_scene:
+            descendants = sorted(
+                set(self.aliases)
+                | set(self.positions)
+                | set(self.orientations)
+                | set(self.parents)
+                | set(self.trees)
+                | {
+                    item
+                    for tree_handles in self.trees.values()
+                    for item in tree_handles
+                }
+            )
+        else:
+            collected = set(self.trees.get(handle, [handle]))
+            changed = True
+            while changed:
+                changed = False
+                for child, parent in self.parents.items():
+                    if parent not in collected or child in collected:
+                        continue
+                    collected.update(self.trees.get(child, [child]))
+                    changed = True
+            descendants = sorted(collected)
         if object_type == self.object_script_type:
             return [item for item in descendants if item in self.script_handles]
         return descendants
@@ -139,8 +166,32 @@ class FakeDynamicSim:
     def scaleObjects(self, _handles, _scale: float, _positions_too: bool) -> None:
         pass
 
-    def setObjectParent(self, _handle: int, _parent: int, _keep: bool) -> None:
-        pass
+    def setObjectParent(self, handle: int, parent: int, _keep: bool) -> None:
+        self.parents[handle] = parent
+
+    def removeObjects(self, handles, _delayed_removal: bool = False) -> None:
+        removed = {int(handle) for handle in handles}
+        self.removed_object_batches.append(sorted(removed))
+        for handle in removed:
+            self.aliases.pop(handle, None)
+            self.positions.pop(handle, None)
+            self.orientations.pop(handle, None)
+            self.parents.pop(handle, None)
+            self.trees.pop(handle, None)
+            self.script_handles.discard(handle)
+            self.script_sources.pop(handle, None)
+            self.script_disabled.pop(handle, None)
+            self.linear_velocities.pop(handle, None)
+        self.parents = {
+            child: parent
+            for child, parent in self.parents.items()
+            if parent not in removed
+        }
+        self.trees = {
+            root: [item for item in tree if item not in removed]
+            for root, tree in self.trees.items()
+            if root not in removed
+        }
 
     def setObjectPosition(self, handle: int, position) -> None:
         values = list(position)
@@ -322,6 +373,41 @@ def test_dynamic_executor_commands_wheels_without_post_start_pose_sync(plan) -> 
     assert not any(
         state != fake.sim.simulation_stopped and handle in robot_handles
         for state, handle, _ in fake.sim.position_writes
+    )
+
+
+def test_dynamic_executor_replaces_only_its_prior_generated_scene(plan) -> None:
+    fake = FakeDynamicClient()
+    first = DynamicCoppeliaExecutor(plan, client_factory=lambda _config: fake)
+    first.connect()
+    first_root = first.root_handle
+    assert first_root is not None
+    unrelated = fake.sim.createDummy(0.01)
+    fake.sim.setObjectAlias(unrelated, "user-owned-scene-object")
+
+    second = DynamicCoppeliaExecutor(plan, client_factory=lambda _config: fake)
+    second.connect()
+
+    assert second.prior_generated_scene_root_count == 1
+    assert second.prior_generated_scene_object_count > 1
+    assert second.generated_scene_cleanup_verified
+    assert first_root not in fake.sim.aliases
+    assert fake.sim.aliases[unrelated] == "user-owned-scene-object"
+    generated_roots = [
+        handle
+        for handle, alias in fake.sim.aliases.items()
+        if alias == "ESCConstructionIntelligenceV1"
+    ]
+    assert generated_roots == [second.root_handle]
+    assert all(
+        fake.sim.parents[carrier] == second.root_handle
+        for carrier in second.payload_carriers.values()
+    )
+    assert any(
+        item["event"] == "prior_generated_scene_cleanup"
+        and item["removed_root_count"] == 1
+        and item["verified"] is True
+        for item in second.runtime_events
     )
 
 

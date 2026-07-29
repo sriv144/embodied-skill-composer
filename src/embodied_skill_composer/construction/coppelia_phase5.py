@@ -1485,6 +1485,9 @@ class Phase5FullCottageRunner:
                     or expected_obstacles > 0
                 )
             ),
+            "prior_generated_scene_cleanup_verified": (
+                self.executor.generated_scene_cleanup_verified
+            ),
             "logical_payload_disclosed": True,
         }
         if scenario == "nominal":
@@ -2097,6 +2100,30 @@ def _verify_passing_phase5_evidence(
         or diagnostics.get("live_gate_passed") is not True
     ):
         raise ValueError("Phase 5 payload boundary is not explicitly logical")
+    cleanup_roots = _integer_metric(
+        diagnostics,
+        "prior_generated_scene_root_count",
+    )
+    cleanup_objects = _integer_metric(
+        diagnostics,
+        "prior_generated_scene_object_count",
+    )
+    cleanup_events = [
+        item
+        for item in trace
+        if isinstance(item, Mapping)
+        and item.get("event") == "prior_generated_scene_cleanup"
+    ]
+    if (
+        diagnostics.get("generated_scene_cleanup_verified") is not True
+        or cleanup_roots < 0
+        or cleanup_objects < cleanup_roots
+        or len(cleanup_events) != 1
+        or cleanup_events[0].get("verified") is not True
+        or cleanup_events[0].get("removed_root_count") != cleanup_roots
+        or cleanup_events[0].get("removed_object_count") != cleanup_objects
+    ):
+        raise ValueError("project-owned Coppelia scene cleanup is not verified")
 
     required_acceptance = {
         "every_module_installed",
@@ -2114,6 +2141,7 @@ def _verify_passing_phase5_evidence(
         "collision_queries_cover_every_physics_step",
         "exclusive_wheel_command_ownership_proven",
         "site_obstacles_instantiated",
+        "prior_generated_scene_cleanup_verified",
         "logical_payload_disclosed",
     }
     if result.scenario == "nominal":
