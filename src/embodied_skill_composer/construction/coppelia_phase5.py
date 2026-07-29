@@ -633,6 +633,7 @@ def _phase5_route_grid(
     plan: BuildPlan,
     *,
     active_module_id: str,
+    active_module_is_logical_payload: bool,
     installed_module_ids: set[str],
     robot_positions: Mapping[str, Vec2],
     active_robot_ids: set[str],
@@ -651,7 +652,10 @@ def _phase5_route_grid(
             )
         )
     for module in plan.modules:
-        if module.module_id == active_module_id:
+        if (
+            module.module_id == active_module_id
+            and active_module_is_logical_payload
+        ):
             continue
         bounds = _module_footprint(
             module,
@@ -845,6 +849,7 @@ def _preflight_phase5_sequential_routes(
         pickup_grid = _phase5_route_grid(
             plan,
             active_module_id=module.module_id,
+            active_module_is_logical_payload=False,
             installed_module_ids=installed,
             robot_positions=positions,
             active_robot_ids=set(team),
@@ -865,6 +870,7 @@ def _preflight_phase5_sequential_routes(
         carry_grid = _phase5_route_grid(
             plan,
             active_module_id=module.module_id,
+            active_module_is_logical_payload=True,
             installed_module_ids=installed,
             robot_positions=positions,
             active_robot_ids=set(team),
@@ -1127,6 +1133,7 @@ class Phase5FullCottageRunner:
         approach_grid = _phase5_route_grid(
             self.plan,
             active_module_id=module.module_id,
+            active_module_is_logical_payload=False,
             installed_module_ids=set(self.executor.installed_modules),
             robot_positions=measured_positions,
             active_robot_ids=set(executed_robot_ids),
@@ -1190,6 +1197,7 @@ class Phase5FullCottageRunner:
         carry_grid = _phase5_route_grid(
             self.plan,
             active_module_id=module.module_id,
+            active_module_is_logical_payload=True,
             installed_module_ids=set(self.executor.installed_modules),
             robot_positions=measured_positions,
             active_robot_ids=set(executed_robot_ids),

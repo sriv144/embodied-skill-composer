@@ -591,6 +591,23 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
         and item.started_at_s <= item.pickup_at_s <= item.installed_at_s
         for item in result.replay
     )
+    modules = {module.module_id: module for module in scenario.plan.modules}
+    robot_radius = physical_yard.configuration.robot_footprint_radius_m
+    for item in result.replay:
+        module = modules[item.module_id]
+        center = module.staging_pose.position
+        minimum_x = center.x - module.dimensions.width / 2 - robot_radius
+        maximum_x = center.x + module.dimensions.width / 2 + robot_radius
+        minimum_y = center.y - module.dimensions.depth / 2 - robot_radius
+        maximum_y = center.y + module.dimensions.depth / 2 + robot_radius
+        for route in item.approach_routes.values():
+            assert all(
+                not (
+                    minimum_x <= waypoint.x <= maximum_x
+                    and minimum_y <= waypoint.y <= maximum_y
+                )
+                for waypoint in route
+            ), item.module_id
 
     bundle_dir = tmp_path / "nominal"
     manifest = write_phase5_artifact_bundle(
@@ -612,8 +629,42 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
     report = (bundle_dir / "report.md").read_text(encoding="utf-8")
     assert "does not claim arm motion" in report
 
+    live_metrics = dict(result.metrics)
+    live_metrics.update(
+        {
+            "payload_transport": "logical_carrier",
+            "live_evidence": True,
+            "live_gate_passed": True,
+        }
+    )
+    live_result = result.model_copy(
+        update={
+            "evidence_kind": "live_coppelia",
+            "live_gate_passed": True,
+            "metrics": live_metrics,
+        }
+    )
+    live_dir = tmp_path / "synthetic-live-nominal"
+    live_manifest = write_phase5_artifact_bundle(
+        live_dir,
+        run_id="synthetic-live-nominal-test",
+        result=live_result,
+        scenario=scenario,
+        executor=executor,
+        source_commit="1" * 40,
+        source_tree_digest="2" * 64,
+        source_dirty=False,
+        approval_gate_confirmed=True,
+        simulator_version="CoppeliaSim coherent test fixture",
+    )
+    assert live_manifest.live_evidence
+    assert live_manifest.live_gate_passed
+    assert verify_phase5_artifact_bundle(live_dir) == live_manifest
 
-def test_phase5_recovery_disables_after_quarter_and_reassigns_remaining_work() -> None:
+
+def test_phase5_recovery_disables_after_quarter_and_reassigns_remaining_work(
+    tmp_path: Path,
+) -> None:
     scenario, physical_yard = _phase5_scenario()
     executor = _phase5_executor(scenario)
     result = Phase5FullCottageRunner(
@@ -646,6 +697,39 @@ def test_phase5_recovery_disables_after_quarter_and_reassigns_remaining_work() -
     executor.started = True
     with pytest.raises(DynamicCoppeliaError, match="wheel commands are forbidden"):
         executor.command_body_velocity(disabled, 0.1, 0.0, 0.0)
+    executor.started = False
+
+    live_metrics = dict(result.metrics)
+    live_metrics.update(
+        {
+            "payload_transport": "logical_carrier",
+            "live_evidence": True,
+            "live_gate_passed": True,
+        }
+    )
+    live_result = result.model_copy(
+        update={
+            "evidence_kind": "live_coppelia",
+            "live_gate_passed": True,
+            "metrics": live_metrics,
+        }
+    )
+    live_dir = tmp_path / "synthetic-live-recovery"
+    live_manifest = write_phase5_artifact_bundle(
+        live_dir,
+        run_id="synthetic-live-recovery-test",
+        result=live_result,
+        scenario=scenario,
+        executor=executor,
+        source_commit="1" * 40,
+        source_tree_digest="2" * 64,
+        source_dirty=False,
+        approval_gate_confirmed=True,
+        simulator_version="CoppeliaSim coherent test fixture",
+    )
+    assert live_manifest.live_evidence
+    assert live_manifest.live_gate_passed
+    assert verify_phase5_artifact_bundle(live_dir) == live_manifest
 
 
 def test_fake_client_cannot_be_labeled_as_live_coppelia_evidence() -> None:
