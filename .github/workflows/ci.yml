@@ -15,6 +15,8 @@ jobs:
       PYOPENGL_PLATFORM: osmesa
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - name: Install headless MuJoCo rendering
         run: |
           sudo apt-get update
@@ -39,12 +41,61 @@ jobs:
         run: python -m pip check
       - name: Compile
         run: python -m compileall -q src scripts
+      - name: Release version consistency
+        run: python scripts/check_release_version.py
+      - name: Public-demo provenance and deterministic regeneration
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/export_construction_public_demo.py \
+            --verify-only \
+            --expected-channel preview \
+            --output workbench/public/demo
+          python scripts/export_construction_public_demo.py \
+            --channel preview \
+            --output "${RUNNER_TEMP}/construction-preview-a"
+          python scripts/export_construction_public_demo.py \
+            --channel preview \
+            --output "${RUNNER_TEMP}/construction-preview-b"
+          python scripts/export_construction_public_demo.py \
+            --verify-only \
+            --expected-channel preview \
+            --output "${RUNNER_TEMP}/construction-preview-a" \
+            --compare-output "${RUNNER_TEMP}/construction-preview-b"
+          diff --recursive \
+            "${RUNNER_TEMP}/construction-preview-a" \
+            "${RUNNER_TEMP}/construction-preview-b"
       - name: Ruff
         run: python -m ruff check src scripts tests
       - name: Mypy
         run: python -m mypy src scripts
       - name: Tests
         run: python -m pytest -q --cov=embodied_skill_composer --cov-report=term-missing --cov-report=xml
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: workbench/package-lock.json
+      - name: Install workbench dependencies for browser acceptance
+        run: npm ci
+        working-directory: workbench
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: workbench
+      - name: Workbench local/static browser and accessibility acceptance
+        run: npm run test:e2e
+        working-directory: workbench
+        env:
+          PLAYWRIGHT_BUNDLED: "true"
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-diagnostics
+          if-no-files-found: ignore
+          path: |
+            output/playwright/report
+            output/playwright/test-results
 
   workbench:
     runs-on: ubuntu-latest
@@ -53,12 +104,18 @@ jobs:
         working-directory: workbench
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: workbench/package-lock.json
       - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test:unit:coverage
+      - run: npm run build
       - run: npm run build:static
 
   secrets:
@@ -67,6 +124,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"

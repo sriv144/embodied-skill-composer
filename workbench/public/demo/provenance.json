@@ -1,0 +1,152 @@
+{
+  "artifact_count": 16,
+  "artifacts": [
+    {
+      "bytes": 324972,
+      "path": "construction_robot.glb",
+      "role": "robot",
+      "sha256": "74cd5a88717c57e8eecf5dcdab31c980bbf9e91763594eb350f2a87b3d5fd25e",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 430,
+      "path": "coppelia-evidence.json",
+      "role": "simulator_absence",
+      "sha256": "5bf98282a460b86f944b0426b5bc04398785c9e0579fad5ba11c1f7af68b72e7",
+      "source_kind": "generated"
+    },
+    {
+      "bytes": 3,
+      "path": "evaluations.json",
+      "role": "research_absence",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "source_kind": "generated"
+    },
+    {
+      "bytes": 3,
+      "path": "experiment-matrices.json",
+      "role": "research_absence",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "source_kind": "generated"
+    },
+    {
+      "bytes": 88468,
+      "path": "house.glb",
+      "role": "house",
+      "sha256": "9e841a45c119726ce6792a5cba68c353dcceb959c91662d8961482320073699d",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 2,
+      "path": "policies.json",
+      "role": "policies",
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 21582,
+      "path": "project.json",
+      "role": "project",
+      "sha256": "1127d4f16d5b563dbac709ea780214aeb3e9c1d4faec4ae1d4bd569296849ab2",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 580,
+      "path": "release-status.json",
+      "role": "release_status",
+      "sha256": "9175cdb90030142e3ca931055b0f845e273aebdbc1e0d554731c0efcc178482d",
+      "source_kind": "generated"
+    },
+    {
+      "bytes": 4212,
+      "path": "report.md",
+      "role": "report",
+      "sha256": "e35c56c63df7fe6a8f9cccc77e770cad2f19ad8b1d2a5adea8bb32b6b0f48de2",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 422,
+      "path": "research-summary.json",
+      "role": "research_absence",
+      "sha256": "24844e0c77ba6d51716559ffa122c46fa0957af876c8c3fc8f521fc6205142a2",
+      "source_kind": "generated"
+    },
+    {
+      "bytes": 333,
+      "path": "runs.json",
+      "role": "runs",
+      "sha256": "f05328c1088c5b88184e682999277efdfe8694d81f33db7de73197df59f5868f",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 155,
+      "path": "scenarios.json",
+      "role": "scenarios",
+      "sha256": "2df1e4060fdaef44558d0b35c77b2a858f7a3aa5e861752a0aa8135a21a2d9de",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 322297,
+      "path": "traces/greedy.json",
+      "role": "trace_greedy",
+      "sha256": "bb96f1207982cab2fba3d677dc37e3b44333a75c2be70aafe0f395c18f2f67df",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 314024,
+      "path": "traces/optimized.json",
+      "role": "trace_optimized",
+      "sha256": "2fc686930a63c5089de63138e07db5a6090406a6d1100f347497d24d70b0e7c7",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 333706,
+      "path": "traces/recovery.json",
+      "role": "trace_recovery",
+      "sha256": "94debff366a5cb89ab83e2923a2d41d563647811d212fd6ca0b9e9c1212745c4",
+      "source_kind": "deterministic"
+    },
+    {
+      "bytes": 815795,
+      "path": "traces/sequential.json",
+      "role": "trace_sequential",
+      "sha256": "9f91e9cafe827f95747bc5fce3d4c98846d11278b40accd543157855b16b155f",
+      "source_kind": "deterministic"
+    }
+  ],
+  "channel": "preview",
+  "coverage": {
+    "complete": true,
+    "excluded_self": "provenance.json",
+    "reason": "A manifest cannot contain the hash of its own final bytes without self-reference. Its canonical payload hash is recorded separately."
+  },
+  "generated_at": "1970-01-01T00:00:00Z",
+  "inputs": [
+    {
+      "configuration_digests": [
+        "5d6ac94076918dd5eb576f8f0f8db5ff4dc923f6af46c47e8da75f94bfcddf0f"
+      ],
+      "evidence_status": "fixture",
+      "kind": "deterministic",
+      "manifest_name": "fixture-bundle.json",
+      "manifest_sha256": "85ae4ed73eba817cbd48b85f9e300f65789aea482bf6d0cfd418545a25775c4b",
+      "matrix_id": null,
+      "profile": null,
+      "protocol_digest": null,
+      "source": {
+        "commit": "11b4eef4eba54e5484ae8657dcefa43e8512f664",
+        "dirty": true,
+        "tree_digest": "6f2b860abb7caf9cf177d51aeba27cb2315e67ebc28f2f27f4938b66ddd33b0f"
+      }
+    }
+  ],
+  "manifest_payload_sha256": "08b8dbb27f6a83ddcaf005a53f2f5c1719cffec306344fe714cbcf018080ba20",
+  "ordering_strategy": "JSON object keys, input descriptors, and artifact paths are lexicographically sorted.",
+  "schema_version": "construction-intelligence-public-demo-provenance-v1",
+  "source": {
+    "commit": "11b4eef4eba54e5484ae8657dcefa43e8512f664",
+    "dirty": true,
+    "tree_digest": "6f2b860abb7caf9cf177d51aeba27cb2315e67ebc28f2f27f4938b66ddd33b0f"
+  },
+  "timestamp_strategy": "No wall-clock time is embedded. generated_at is the fixed Unix epoch; evidence timestamps come only from hash-pinned input bundles."
+}

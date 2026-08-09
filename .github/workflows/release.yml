@@ -1,0 +1,130 @@
+name: Publish verified Construction Intelligence v1 draft
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: construction-intelligence-release-v1.0.0
+  cancel-in-progress: false
+
+env:
+  GH_REPO: ${{ github.repository }}
+  RELEASE_TAG: v1.0.0
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      asset_set_sha256: ${{ steps.fingerprint.outputs.asset_set_sha256 }}
+    steps:
+      - name: Check out the fixed v1 tag
+        uses: actions/checkout@v6
+        with:
+          ref: refs/tags/v1.0.0
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the v1 tag at protected main and an unpublished draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(git rev-parse HEAD)"
+          main_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
+          test "$tag_commit" = "$main_commit"
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = "true"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints/ci-py311-linux.txt
+
+      - name: Install the hash-locked release verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r constraints/ci-py311-linux.txt
+          python -m pip install \
+            --no-build-isolation \
+            --no-deps \
+            -e ".[construction,construction-rl,rl,sim-coppelia]"
+
+      - name: Download the draft assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir release-assets
+          gh release download "$RELEASE_TAG" --dir release-assets
+
+      - name: Verify tag, identity, archives, policies, and hashes
+        run: >-
+          python scripts/package_construction_release.py
+          --verify-only
+          --output release-assets
+          --expected-tag "$RELEASE_TAG"
+          --require-tag-at-head
+
+      - name: Bind the verified asset set
+        id: fingerprint
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset_set_sha256="$(
+            cd release-assets
+            /usr/bin/find . -maxdepth 1 -type f -printf '%f\0' \
+              | /usr/bin/sort -z \
+              | /usr/bin/xargs -0 /usr/bin/sha256sum \
+              | /usr/bin/sha256sum \
+              | /usr/bin/cut -d' ' -f1
+          )"
+          echo "asset_set_sha256=$asset_set_sha256" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    environment: construction-intelligence-v1-release
+    steps:
+      - name: Revalidate protected main, draft state, and verified assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_ASSET_SET_SHA256: ${{ needs.verify.outputs.asset_set_sha256 }}
+        run: |
+          set -euo pipefail
+          tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
+          main_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
+          test "$tag_commit" = "$main_commit"
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = "true"
+          mkdir "$RUNNER_TEMP/release-assets"
+          gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/release-assets"
+          actual_asset_set_sha256="$(
+            cd "$RUNNER_TEMP/release-assets"
+            /usr/bin/find . -maxdepth 1 -type f -printf '%f\0' \
+              | /usr/bin/sort -z \
+              | /usr/bin/xargs -0 /usr/bin/sha256sum \
+              | /usr/bin/sha256sum \
+              | /usr/bin/cut -d' ' -f1
+          )"
+          test "$actual_asset_set_sha256" = "$EXPECTED_ASSET_SET_SHA256"
+
+      - name: Publish the verified draft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release edit "$RELEASE_TAG" --draft=false

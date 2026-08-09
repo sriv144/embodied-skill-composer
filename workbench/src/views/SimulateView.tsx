@@ -20,6 +20,7 @@ export function SimulateView({
   onController: (controller: string) => void;
   onTrace: (trace: Trace) => void;
 }) {
+  const staticPreview = api.runtime().mode === "static";
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
@@ -84,9 +85,18 @@ export function SimulateView({
         <h3>Recovery event</h3>
         <div className="failure-actions">
           <button disabled={recovering} onClick={() => inject("obstacle", "Obstacle inserted; schedule recovered.")}>Obstacle</button>
-          <button disabled={recovering} onClick={() => inject("robot_unavailable", "Robot unavailable; jobs reassigned.")}>Robot offline</button>
-          <button disabled={recovering} onClick={() => inject("dropped_resource", "Payload dropped; transport retried.")}>Drop payload</button>
+          {!staticPreview && (
+            <>
+              <button disabled={recovering} onClick={() => inject("robot_unavailable", "Robot unavailable; jobs reassigned.")}>Robot offline</button>
+              <button disabled={recovering} onClick={() => inject("dropped_resource", "Payload dropped; transport retried.")}>Drop payload</button>
+            </>
+          )}
         </div>
+        {staticPreview && (
+          <p className="static-recovery-note" role="note">
+            This preview ships only the obstacle recovery trace.
+          </p>
+        )}
         {notice && <p className="recovery-note"><RotateCcw size={15} />{notice}</p>}
         <div className="fidelity-note"><strong>{coppelia?.reachable ? "Coppelia online" : "Trace playback"}</strong><span>{coppelia?.detail ?? "Checking simulator health"}</span></div>
       </aside>

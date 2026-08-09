@@ -205,11 +205,16 @@ def _execute(
             blocking = [
                 run
                 for run in persisted_runs
-                if str(run["status"]) in {"failed", "cancelled"}
-                and (
-                    not run.get("latest_checkpoint")
-                    or _integer_field(run, "attempt")
-                    >= args.max_resume_attempts
+                if (
+                    str(run["status"]) == "cancelled"
+                    or (
+                        str(run["status"]) in {"failed", "interrupted"}
+                        and (
+                            _integer_field(run, "attempt")
+                            >= args.max_resume_attempts
+                            or not _has_resume_source(run)
+                        )
+                    )
                 )
             ]
             if blocking:
@@ -344,11 +349,17 @@ def _resume_interrupted_runs(
     for run in runs:
         if (
             str(run["status"]) in {"interrupted", "failed"}
-            and run.get("latest_checkpoint")
             and _integer_field(run, "attempt") < max_attempts
         ):
             resumed = service.resume(str(run["id"])) or resumed
     return resumed
+
+
+def _has_resume_source(run: dict[str, object]) -> bool:
+    checkpoint = run.get("latest_checkpoint")
+    if checkpoint is None:
+        return True
+    return isinstance(checkpoint, str) and bool(checkpoint) and Path(checkpoint).is_file()
 
 
 def _load_selection_evidence(
