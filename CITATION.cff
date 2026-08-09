@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+title: "Embodied Skill Composer: Hierarchical Team-Options Learning for Two-Robot Collaborative Assembly"
+message: "If you use this software in academic work, please cite it as below."
+type: software
+authors:
+  - family-names: Srivathsan
+    given-names: ""
+    affiliation: "sriv144"
+repository-code: "https://github.com/sriv144/embodied-skill-composer"
+url: "https://github.com/sriv144/embodied-skill-composer"
+abstract: >-
+  Embodied Skill Composer is a hybrid robotics research project centred on
+  two-robot collaborative assembly in a local sandbox, with tabletop and
+  warehouse manipulation flows retained as supporting baselines. It pairs
+  hierarchical team-options learning (PPO fine-tuning on top of an imitation
+  warm-start) with deterministic option routing and recovery, and benchmarks the
+  learned hierarchical policy against scripted oracles and a low-level
+  multi-agent RL baseline. The codebase is simulator-agnostic, with a MuJoCo
+  3D backend and a planned Isaac Lab profile.
+keywords:
+  - reinforcement-learning
+  - hierarchical-rl
+  - multi-agent
+  - robotics
+  - collaborative-assembly
+  - mujoco
+  - isaac-lab
+  - ppo
+  - imitation-learning
+license: MIT
+version: "0.1.0"
+date-released: "2026-05-30"
