@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -20,6 +21,7 @@ from embodied_skill_composer.construction.coppelia_phase5 import (
     verify_phase5_artifact_bundle,
     write_phase5_artifact_bundle,
 )
+from embodied_skill_composer.construction.models import Vec2
 from embodied_skill_composer.construction.runtime import load_house_design
 from embodied_skill_composer.construction.scenarios import (
     CottageScenarioConfig,
@@ -381,6 +383,93 @@ def test_dynamic_executor_commands_wheels_without_post_start_pose_sync(plan) -> 
     )
 
 
+def test_synchronized_carry_holds_faster_base_at_shared_waypoint(plan) -> None:
+    fake = FakeDynamicClient()
+    config = DynamicCoppeliaConfig(
+        settle_steps=0,
+        maximum_wheel_speed=10.0,
+        effective_wheel_radius_m=0.2,
+        position_gain=5.0,
+        waypoint_tolerance_m=0.025,
+        formation_tolerance_m=0.3,
+        safety_distance_m=0.05,
+        max_steps_per_waypoint=1_000,
+    )
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        config=config,
+        client_factory=lambda _config: fake,
+    )
+    executor.connect()
+    fast_id, slow_id = "robot_1", "robot_2"
+    slow_handle = executor.robot_handles[slow_id]
+    original_integrate = fake.sim.integrate
+
+    def integrate_with_slow_base(
+        dt: float,
+        wheel_radius_m: float = 0.2,
+    ) -> None:
+        before = list(fake.sim.positions[slow_handle])
+        original_integrate(dt, wheel_radius_m)
+        after = fake.sim.positions[slow_handle]
+        fake.sim.positions[slow_handle] = [
+            before[index] + 0.25 * (after[index] - before[index])
+            for index in range(3)
+        ]
+
+    fake.sim.integrate = integrate_with_slow_base  # type: ignore[method-assign]
+    starts = {
+        robot_id: Vec2(
+            x=fake.sim.positions[executor.robot_handles[robot_id]][0],
+            y=fake.sim.positions[executor.robot_handles[robot_id]][1],
+        )
+        for robot_id in (fast_id, slow_id)
+    }
+    routes = {
+        robot_id: [
+            Vec2(x=start.x + delta, y=start.y)
+            for delta in (0.0, 0.1, 0.2, 0.3)
+        ]
+        for robot_id, start in starts.items()
+    }
+
+    executor.start()
+    executor.follow_synchronized_routes(routes)
+    executor.stop()
+
+    held_targets = [
+        command
+        for command in executor.commands
+        if command.robot_id == fast_id
+        and command.source == "formation_hold"
+        and command.target_position is not None
+    ]
+    assert any(
+        slow.robot_id == slow_id
+        and slow.source == "path_follower"
+        and slow.timestamp_s == held.timestamp_s
+        and slow.target_position is not None
+        and (
+            slow.target_position.x - starts[slow_id].x
+            == pytest.approx(
+                held.target_position.x - starts[fast_id].x
+            )
+        )
+        for held in held_targets
+        for slow in executor.commands
+    )
+    assert max(executor.synchronized_formation_errors_m) <= (
+        config.formation_tolerance_m
+    )
+    for robot_id, route in routes.items():
+        measured = fake.sim.positions[executor.robot_handles[robot_id]]
+        assert math.hypot(
+            measured[0] - route[-1].x,
+            measured[1] - route[-1].y,
+        ) <= config.waypoint_tolerance_m
+    assert executor.post_start_robot_pose_writes == 0
+
+
 def test_dynamic_executor_replaces_only_its_prior_generated_scene(plan) -> None:
     fake = FakeDynamicClient()
     first = DynamicCoppeliaExecutor(plan, client_factory=lambda _config: fake)
@@ -601,18 +690,46 @@ def test_phase5_physical_yard_is_deterministic_clear_and_hash_pinned() -> None:
     assert first_manifest.source_plan_digest != (
         first_manifest.transformed_plan_digest
     )
+    assert first_manifest.maximum_preflight_formation_offset_m > 0
+    maximum_configured_offset = max(
+        math.hypot(
+            module.dimensions.width / 2,
+            module.dimensions.depth / 2,
+        )
+        + first_manifest.configuration.formation_clearance_m
+        + first_manifest.configuration.maximum_formation_expansion_m
+        for module in first.plan.modules
+    )
+    assert (
+        first_manifest.maximum_preflight_formation_offset_m
+        <= maximum_configured_offset
+    )
     assert first.plan.site_grid.obstacle_cells
 
     staging_bounds = []
     for module in first.plan.modules:
         position = module.staging_pose.position
+        assert module.staging_pose.rotation_rpy_degrees.z == pytest.approx(
+            module.target_pose.rotation_rpy_degrees.z
+        )
+        yaw = math.radians(
+            module.staging_pose.rotation_rpy_degrees.z
+        )
+        half_x = (
+            abs(math.cos(yaw)) * module.dimensions.width / 2
+            + abs(math.sin(yaw)) * module.dimensions.depth / 2
+        )
+        half_y = (
+            abs(math.sin(yaw)) * module.dimensions.width / 2
+            + abs(math.cos(yaw)) * module.dimensions.depth / 2
+        )
         staging_bounds.append(
             (
                 module.module_id,
-                position.x - module.dimensions.width / 2,
-                position.x + module.dimensions.width / 2,
-                position.y - module.dimensions.depth / 2,
-                position.y + module.dimensions.depth / 2,
+                position.x - half_x,
+                position.x + half_x,
+                position.y - half_y,
+                position.y + half_y,
             )
         )
     for index, left in enumerate(staging_bounds):
@@ -684,13 +801,27 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
     )
     modules = {module.module_id: module for module in scenario.plan.modules}
     robot_radius = physical_yard.configuration.robot_footprint_radius_m
+    required_payload_clearance = (
+        robot_radius + physical_yard.configuration.route_clearance_m
+    )
     for item in result.replay:
         module = modules[item.module_id]
         center = module.staging_pose.position
-        minimum_x = center.x - module.dimensions.width / 2 - robot_radius
-        maximum_x = center.x + module.dimensions.width / 2 + robot_radius
-        minimum_y = center.y - module.dimensions.depth / 2 - robot_radius
-        maximum_y = center.y + module.dimensions.depth / 2 + robot_radius
+        yaw = math.radians(
+            module.staging_pose.rotation_rpy_degrees.z
+        )
+        half_x = (
+            abs(math.cos(yaw)) * module.dimensions.width / 2
+            + abs(math.sin(yaw)) * module.dimensions.depth / 2
+        )
+        half_y = (
+            abs(math.sin(yaw)) * module.dimensions.width / 2
+            + abs(math.cos(yaw)) * module.dimensions.depth / 2
+        )
+        minimum_x = center.x - half_x - robot_radius
+        maximum_x = center.x + half_x + robot_radius
+        minimum_y = center.y - half_y - robot_radius
+        maximum_y = center.y + half_y + robot_radius
         for route in item.approach_routes.values():
             assert all(
                 not (
@@ -699,6 +830,50 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
                 )
                 for waypoint in route
             ), item.module_id
+        assert {
+            len(route) for route in item.assigned_carry_routes.values()
+        } == {len(item.carry_route)}
+        assert all(
+            math.dist(
+                (left.x, left.y),
+                (right.x, right.y),
+            )
+            <= physical_yard.configuration.carry_sample_spacing_m + 1e-9
+            for left, right in zip(
+                item.carry_route,
+                item.carry_route[1:],
+                strict=False,
+            )
+        )
+        for robot_id, route in item.assigned_carry_routes.items():
+            offset = item.formation_offsets[robot_id]
+            assert all(
+                assigned.x
+                == pytest.approx(
+                    carrier.x
+                    - item.logical_carrier_offset.x
+                    + offset.x
+                )
+                and assigned.y
+                == pytest.approx(
+                    carrier.y
+                    - item.logical_carrier_offset.y
+                    + offset.y
+                )
+                for carrier, assigned in zip(
+                    item.carry_route,
+                    route,
+                    strict=True,
+                )
+            )
+        assert (
+            item.minimum_planned_payload_clearance_m
+            >= required_payload_clearance
+        )
+        assert (
+            item.minimum_measured_payload_clearance_m
+            >= required_payload_clearance
+        )
 
     bundle_dir = tmp_path / "nominal"
     manifest = write_phase5_artifact_bundle(
@@ -736,21 +911,48 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
         }
     )
     live_dir = tmp_path / "synthetic-live-nominal"
-    live_manifest = write_phase5_artifact_bundle(
-        live_dir,
-        run_id="synthetic-live-nominal-test",
-        result=live_result,
-        scenario=scenario,
-        executor=executor,
-        source_commit="1" * 40,
-        source_tree_digest="2" * 64,
-        source_dirty=False,
-        approval_gate_confirmed=True,
-        simulator_version="CoppeliaSim coherent test fixture",
+    with pytest.raises(ValueError, match="runtime-origin attestation"):
+        write_phase5_artifact_bundle(
+            live_dir,
+            run_id="synthetic-live-nominal-test",
+            result=live_result,
+            scenario=scenario,
+            executor=executor,
+            source_commit="1" * 40,
+            source_tree_digest="2" * 64,
+            source_dirty=False,
+            approval_gate_confirmed=True,
+            simulator_version="CoppeliaSim coherent test fixture",
+        )
+    assert not live_dir.exists()
+
+    replay_path = bundle_dir / "planned_vs_measured_replay.json"
+    replay_payload = json.loads(replay_path.read_text(encoding="utf-8"))
+    robot_id = replay_payload[0]["executed_robot_ids"][0]
+    replay_payload[0]["assigned_carry_routes"][robot_id][1]["x"] += 0.05
+    replay_path.write_text(
+        json.dumps(replay_payload, indent=2) + "\n",
+        encoding="utf-8",
     )
-    assert live_manifest.live_evidence
-    assert live_manifest.live_gate_passed
-    assert verify_phase5_artifact_bundle(live_dir) == live_manifest
+    manifest_path = bundle_dir / "manifest.json"
+    manifest_payload = json.loads(
+        manifest_path.read_text(encoding="utf-8")
+    )
+    artifact = next(
+        item
+        for item in manifest_payload["artifacts"]
+        if item["path"] == replay_path.name
+    )
+    artifact["bytes"] = replay_path.stat().st_size
+    artifact["sha256"] = hashlib.sha256(
+        replay_path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest_payload, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="rigidly derived"):
+        verify_phase5_artifact_bundle(bundle_dir)
 
 
 def test_phase5_recovery_disables_after_quarter_and_reassigns_remaining_work(
@@ -784,6 +986,27 @@ def test_phase5_recovery_disables_after_quarter_and_reassigns_remaining_work(
         and disabled not in item.executed_robot_ids
         for item in result.replay
     )
+    settled = executor.disabled_settle_samples[disabled][-1].measured_pose.position
+    disabled_clearance = (
+        2 * physical_yard.configuration.robot_footprint_radius_m
+        + physical_yard.configuration.route_clearance_m
+    )
+    post_disable_replays = [
+        item
+        for item in result.replay
+        if item.pickup_at_s >= result.recovery.disabled_at_s
+    ]
+    assert post_disable_replays
+    assert all(
+        math.hypot(
+            waypoint.x - settled.x,
+            waypoint.y - settled.y,
+        )
+        >= disabled_clearance
+        for item in post_disable_replays
+        for route in item.assigned_carry_routes.values()
+        for waypoint in route
+    )
 
     executor.started = True
     with pytest.raises(DynamicCoppeliaError, match="wheel commands are forbidden"):
@@ -806,21 +1029,20 @@ def test_phase5_recovery_disables_after_quarter_and_reassigns_remaining_work(
         }
     )
     live_dir = tmp_path / "synthetic-live-recovery"
-    live_manifest = write_phase5_artifact_bundle(
-        live_dir,
-        run_id="synthetic-live-recovery-test",
-        result=live_result,
-        scenario=scenario,
-        executor=executor,
-        source_commit="1" * 40,
-        source_tree_digest="2" * 64,
-        source_dirty=False,
-        approval_gate_confirmed=True,
-        simulator_version="CoppeliaSim coherent test fixture",
-    )
-    assert live_manifest.live_evidence
-    assert live_manifest.live_gate_passed
-    assert verify_phase5_artifact_bundle(live_dir) == live_manifest
+    with pytest.raises(ValueError, match="runtime-origin attestation"):
+        write_phase5_artifact_bundle(
+            live_dir,
+            run_id="synthetic-live-recovery-test",
+            result=live_result,
+            scenario=scenario,
+            executor=executor,
+            source_commit="1" * 40,
+            source_tree_digest="2" * 64,
+            source_dirty=False,
+            approval_gate_confirmed=True,
+            simulator_version="CoppeliaSim coherent test fixture",
+        )
+    assert not live_dir.exists()
 
 
 def test_fake_client_cannot_be_labeled_as_live_coppelia_evidence() -> None:
