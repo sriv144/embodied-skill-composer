@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "description": "Deterministic raster floor-plan parsing goldens; shapes use OpenCV pixel coordinates.",
+  "fixtures": [
+    {
+      "name": "clean_landscape_shell",
+      "canvas": [480, 640],
+      "background": 255,
+      "foreground": 0,
+      "rectangle": [80, 90, 560, 390],
+      "wall_thickness": 14,
+      "known_width_m": 9.6,
+      "expect": {"result": "plan", "depth_m": [5.8, 6.2], "openings": 0, "confidence": [0.70, 0.87]}
+    },
+    {
+      "name": "clean_portrait_shell",
+      "canvas": [680, 460],
+      "background": 248,
+      "foreground": 12,
+      "rectangle": [75, 70, 385, 610],
+      "wall_thickness": 12,
+      "known_width_m": 6.2,
+      "expect": {"result": "plan", "depth_m": [10.5, 11.2], "openings": 0, "confidence": [0.70, 0.87]}
+    },
+    {
+      "name": "low_contrast_scan",
+      "canvas": [500, 700],
+      "background": 205,
+      "foreground": 92,
+      "rectangle": [90, 85, 610, 415],
+      "wall_thickness": 16,
+      "known_width_m": 10.0,
+      "expect": {"result": "plan", "depth_m": [6.1, 6.6], "openings": 0, "confidence": [0.68, 0.87]}
+    },
+    {
+      "name": "inverted_blueprint",
+      "canvas": [520, 720],
+      "background": 18,
+      "foreground": 232,
+      "rectangle": [100, 90, 620, 430],
+      "wall_thickness": 13,
+      "known_width_m": 10.4,
+      "expect": {"result": "plan", "depth_m": [6.5, 7.0], "openings": 0, "confidence": [0.70, 0.87]}
+    },
+    {
+      "name": "speckled_scanner_noise",
+      "canvas": [520, 720],
+      "background": 246,
+      "foreground": 8,
+      "rectangle": [95, 95, 625, 425],
+      "wall_thickness": 15,
+      "noise": {"seed": 20260726, "count": 850, "radius": 1},
+      "known_width_m": 10.6,
+      "expect": {"result": "plan", "depth_m": [6.4, 6.9], "openings": 0, "confidence": [0.68, 0.87]}
+    },
+    {
+      "name": "single_south_opening",
+      "canvas": [500, 700],
+      "background": 255,
+      "foreground": 0,
+      "rectangle": [85, 80, 615, 420],
+      "wall_thickness": 16,
+      "gaps": [{"side": "south", "start": 322, "end": 374}],
+      "known_width_m": 9.8,
+      "expect": {"result": "plan", "depth_m": [6.1, 6.5], "openings": 1, "confidence": [0.65, 0.87]}
+    },
+    {
+      "name": "north_and_south_openings",
+      "canvas": [520, 740],
+      "background": 250,
+      "foreground": 5,
+      "rectangle": [90, 90, 650, 430],
+      "wall_thickness": 15,
+      "gaps": [
+        {"side": "north", "start": 180, "end": 245},
+        {"side": "south", "start": 445, "end": 505}
+      ],
+      "known_width_m": 11.2,
+      "expect": {"result": "plan", "depth_m": [6.6, 7.1], "openings": 2, "confidence": [0.65, 0.87]}
+    },
+    {
+      "name": "three_side_openings_noisy",
+      "canvas": [560, 760],
+      "background": 238,
+      "foreground": 20,
+      "rectangle": [95, 95, 665, 465],
+      "wall_thickness": 16,
+      "gaps": [
+        {"side": "north", "start": 245, "end": 305},
+        {"side": "east", "start": 245, "end": 295},
+        {"side": "south", "start": 470, "end": 540}
+      ],
+      "noise": {"seed": 804, "count": 500, "radius": 1},
+      "known_width_m": 11.4,
+      "expect": {"result": "plan", "depth_m": [7.1, 7.7], "openings": 3, "confidence": [0.62, 0.87]}
+    },
+    {
+      "name": "ambiguous_two_cottages",
+      "canvas": [520, 820],
+      "background": 255,
+      "foreground": 0,
+      "rectangles": [[55, 100, 365, 420], [455, 100, 765, 420]],
+      "wall_thickness": 13,
+      "known_width_m": 9.0,
+      "expect": {"result": "error", "message": "multiple plausible exterior footprints"}
+    },
+    {
+      "name": "ambiguous_non_orthogonal_triangle",
+      "canvas": [520, 700],
+      "background": 255,
+      "foreground": 0,
+      "polygon": [[350, 65], [625, 435], [75, 435]],
+      "wall_thickness": 16,
+      "known_width_m": 9.0,
+      "expect": {"result": "error", "message": "supported orthogonal.*rectangle"}
+    },
+    {
+      "name": "too_small_thumbnail",
+      "canvas": [48, 48],
+      "background": 255,
+      "foreground": 0,
+      "rectangle": [5, 5, 42, 42],
+      "wall_thickness": 3,
+      "known_width_m": 4.0,
+      "expect": {"result": "error", "message": "too small to calibrate"}
+    },
+    {
+      "name": "undecodable_upload",
+      "raw_hex": "74686973206973206e6f7420616e20696d616765",
+      "known_width_m": 8.0,
+      "expect": {"result": "error", "message": "not a decodable image"}
+    }
+  ]
+}

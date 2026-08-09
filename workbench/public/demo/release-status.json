@@ -1,0 +1,16 @@
+{
+  "channel": "preview",
+  "claim_status": "fixture_preview",
+  "evidence": {
+    "coppelia": "absent",
+    "deterministic": "fixture",
+    "research": "absent"
+  },
+  "limitations": [
+    "Canonical 20-run research evidence is absent; no learned-policy release claim is made.",
+    "Live nominal and recovery Coppelia evidence is absent; deterministic traces do not substitute for simulator execution.",
+    "Deterministic content is a reviewed fixture intended for preview use."
+  ],
+  "release_ready": false,
+  "schema_version": "construction-intelligence-public-status-v1"
+}

@@ -276,3 +276,46 @@ def test_checkpoint_and_onnx_exports_are_loadable(tmp_path: Path) -> None:
     assert checkpoint.is_file()
     assert exported.is_file()
     assert len(checksum) == 64
+
+
+def test_onnx_export_handles_legacy_windows_console_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+    import sys
+
+    import torch
+
+    from embodied_skill_composer.construction.policy import (
+        SwarmPointerActor,
+        export_actor_onnx,
+    )
+
+    stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    stderr = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+
+    def fake_export(
+        _model: object,
+        _sample_inputs: object,
+        destination: Path,
+        **_kwargs: object,
+    ) -> None:
+        print("\N{CHECK MARK} exported", file=sys.stdout)
+        print("\N{CHECK MARK} checked", file=sys.stderr)
+        destination.write_bytes(b"test-onnx")
+
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    monkeypatch.setattr(torch.onnx, "export", fake_export)
+
+    exported = export_actor_onnx(
+        SwarmPointerActor(hidden_dim=8),
+        tmp_path / "actor.onnx",
+    )
+
+    assert exported.read_bytes() == b"test-onnx"
+    assert stdout.encoding == "utf-8"
+    assert stdout.errors == "backslashreplace"
+    assert stderr.encoding == "utf-8"
+    assert stderr.errors == "backslashreplace"

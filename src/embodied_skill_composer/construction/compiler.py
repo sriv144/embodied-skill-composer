@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from math import atan2, degrees, hypot
 
 from pydantic import BaseModel, Field
 
+from embodied_skill_composer.construction.design_validation import require_valid_house_design
 from embodied_skill_composer.construction.models import (
     BuildModule,
     BuildPlan,
     Dimensions3D,
     HouseDesign,
     ModuleType,
+    Opening,
     Pose3D,
     RobotSpec,
     SiteGrid,
     Vec3,
+    WallSegment,
 )
 
 
@@ -25,11 +29,33 @@ class ConstructionCompileSettings(BaseModel):
     roof_rows: int = Field(default=2, ge=1, le=4)
 
 
+@dataclass(frozen=True)
+class _WallPiece:
+    start_m: float
+    end_m: float
+    opening: Opening | None = None
+
+    @property
+    def center_m(self) -> float:
+        return (self.start_m + self.end_m) / 2
+
+    @property
+    def width_m(self) -> float:
+        return self.end_m - self.start_m
+
+    @property
+    def module_type(self) -> ModuleType:
+        if self.opening is None:
+            return ModuleType.WALL
+        return ModuleType.DOOR if self.opening.kind == "door" else ModuleType.WINDOW
+
+
 def compile_house_design(
     design: HouseDesign,
     settings: ConstructionCompileSettings | None = None,
 ) -> BuildPlan:
     """Compile an approved metric house into independently transportable modules."""
+    require_valid_house_design(design)
     if not design.floor_plan.approved:
         raise ValueError("floor plan must be reviewed and approved before compilation")
     settings = settings or ConstructionCompileSettings()
@@ -38,6 +64,8 @@ def compile_house_design(
     foundation_ids: list[str] = []
     tile_w = design.footprint_width_m / 2
     tile_d = design.footprint_depth_m / 2
+    foundation_gap_w = min(0.04, tile_w * 0.2)
+    foundation_gap_d = min(0.04, tile_d * 0.2)
     for row in range(2):
         for col in range(2):
             module_id = f"foundation_{row}_{col}"
@@ -49,8 +77,8 @@ def compile_house_design(
                     x=-design.footprint_width_m / 2 + tile_w * (col + 0.5),
                     y=-design.footprint_depth_m / 2 + tile_d * (row + 0.5),
                     z=0.1,
-                    width=tile_w - 0.04,
-                    depth=tile_d - 0.04,
+                    width=tile_w - foundation_gap_w,
+                    depth=tile_d - foundation_gap_d,
                     height=0.2,
                     mass=85,
                     team=2,
@@ -62,38 +90,47 @@ def compile_house_design(
             )
 
     exterior_ids: list[str] = []
-    opening_by_wall = {item.wall_id: item for item in design.floor_plan.openings}
+    openings_by_wall: dict[str, list[Opening]] = {}
+    for opening in design.floor_plan.openings:
+        openings_by_wall.setdefault(opening.wall_id, []).append(opening)
     for wall_index, wall in enumerate(design.floor_plan.walls):
         length = hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y)
-        segment_count = max(1, round(length / settings.wall_panel_target_width_m))
         angle = degrees(atan2(wall.end.y - wall.start.y, wall.end.x - wall.start.x))
-        for segment in range(segment_count):
-            ratio = (segment + 0.5) / segment_count
-            x = wall.start.x + (wall.end.x - wall.start.x) * ratio
-            y = wall.start.y + (wall.end.y - wall.start.y) * ratio
-            opening = opening_by_wall.get(wall.wall_id)
-            module_type = ModuleType.WALL
-            if opening and segment == segment_count // 2:
-                module_type = ModuleType.DOOR if opening.kind == "door" else ModuleType.WINDOW
+        unit_x = (wall.end.x - wall.start.x) / length
+        unit_y = (wall.end.y - wall.start.y) / length
+        pieces = _wall_pieces(
+            wall,
+            openings_by_wall.get(wall.wall_id, []),
+            settings.wall_panel_target_width_m,
+        )
+        for segment, piece in enumerate(pieces):
+            x = wall.start.x + unit_x * piece.center_m
+            y = wall.start.y + unit_y * piece.center_m
             module_id = f"{wall.wall_id}_{segment:02d}"
             exterior_ids.append(module_id)
             modules.append(
                 _module(
                     module_id,
-                    module_type,
+                    piece.module_type,
                     x=x,
                     y=y,
                     z=wall.height_m / 2 + 0.2,
-                    width=length / segment_count - 0.04,
+                    width=piece.width_m,
                     depth=wall.thickness_m,
                     height=wall.height_m,
-                    mass=32 if module_type == ModuleType.WALL else 26,
+                    mass=32 if piece.module_type == ModuleType.WALL else 26,
                     team=1,
                     duration=11,
                     dependencies=[foundation_ids[wall_index % len(foundation_ids)]],
-                    material="plaster_white",
+                    material=design.wall_material,
                     staging_index=len(modules),
                     yaw=angle,
+                    architectural_opening=piece.opening,
+                    architectural_opening_local_offset_m=(
+                        None
+                        if piece.opening is None
+                        else piece.opening.offset_m - piece.center_m
+                    ),
                 )
             )
 
@@ -112,7 +149,10 @@ def compile_house_design(
                 x=x,
                 y=0,
                 z=1.6,
-                width=design.footprint_depth_m - 1.0,
+                width=max(
+                    design.footprint_depth_m - 1.0,
+                    design.footprint_depth_m * 0.5,
+                ),
                 depth=0.14,
                 height=2.8,
                 mass=28,
@@ -178,12 +218,82 @@ def compile_house_design(
     )
 
 
+def _wall_pieces(
+    wall: WallSegment,
+    openings: list[Opening],
+    target_width_m: float,
+) -> list[_WallPiece]:
+    """Partition a wall into real opening modules and panels covering the remaining spans."""
+
+    length = hypot(wall.end.x - wall.start.x, wall.end.y - wall.start.y)
+    sorted_openings = sorted(openings, key=lambda item: (item.offset_m, item.opening_id))
+    pieces: list[_WallPiece] = []
+    cursor = 0.0
+    for opening in sorted_openings:
+        span_start = max(0.0, opening.offset_m - opening.width_m / 2)
+        span_end = min(length, opening.offset_m + opening.width_m / 2)
+        if span_start > cursor:
+            pieces.append(_WallPiece(start_m=cursor, end_m=span_start))
+        pieces.append(
+            _WallPiece(
+                start_m=span_start,
+                end_m=span_end,
+                opening=opening.model_copy(deep=True),
+            )
+        )
+        cursor = span_end
+    if cursor < length:
+        pieces.append(_WallPiece(start_m=cursor, end_m=length))
+    if not pieces:
+        pieces.append(_WallPiece(start_m=0.0, end_m=length))
+
+    base_piece_count = max(1, round(length / target_width_m))
+    target_piece_count = max(base_piece_count, len(sorted_openings))
+    while len(pieces) > target_piece_count:
+        merge_candidates = [
+            (
+                pieces[index].width_m + pieces[index + 1].width_m,
+                index,
+            )
+            for index in range(len(pieces) - 1)
+            if pieces[index].opening is None or pieces[index + 1].opening is None
+        ]
+        _, merge_index = min(merge_candidates)
+        left = pieces[merge_index]
+        right = pieces[merge_index + 1]
+        pieces[merge_index : merge_index + 2] = [
+            _WallPiece(
+                start_m=left.start_m,
+                end_m=right.end_m,
+                opening=left.opening or right.opening,
+            )
+        ]
+
+    while len(pieces) < target_piece_count:
+        split_candidates = [
+            (piece.width_m, -index, index)
+            for index, piece in enumerate(pieces)
+            if piece.opening is None
+        ]
+        if not split_candidates:
+            break
+        _, _, split_index = max(split_candidates)
+        piece = pieces[split_index]
+        midpoint = piece.center_m
+        pieces[split_index : split_index + 1] = [
+            _WallPiece(start_m=piece.start_m, end_m=midpoint),
+            _WallPiece(start_m=midpoint, end_m=piece.end_m),
+        ]
+
+    return pieces
+
+
 def _interior_x_positions(width_m: float, count: int) -> list[float]:
     if count == 0:
         return []
     if count == 2 and abs(width_m - 8.0) < 1e-9:
         return [-1.35, 1.35]
-    usable_width = max(width_m - 2.0, 0.5)
+    usable_width = max(width_m - 2.0, width_m * 0.5)
     spacing = usable_width / (count + 1)
     return [-usable_width / 2 + spacing * (index + 1) for index in range(count)]
 
@@ -206,6 +316,8 @@ def _module(
     staging_index: int,
     yaw: float = 0,
     pitch: float = 0,
+    architectural_opening: Opening | None = None,
+    architectural_opening_local_offset_m: float | None = None,
 ) -> BuildModule:
     staging_row, staging_col = divmod(staging_index, 7)
     return BuildModule(
@@ -226,4 +338,6 @@ def _module(
         install_duration_s=duration,
         dependencies=list(dependencies),
         material=material,
+        architectural_opening=architectural_opening,
+        architectural_opening_local_offset_m=architectural_opening_local_offset_m,
     )

@@ -47,12 +47,16 @@ while payload attachment remains a logical carrier constraint rather than arm/gr
 A live one-module gate has passed with `2,274` physics steps, `4,540` wheel commands, `4,536` measured
 pose samples, and zero post-start robot pose writes; full-cottage and live-recovery acceptance remain open.
 
-Dependency groups, experiment fingerprints, durable job states, checkpoint compatibility, and queue
-management commands are documented in
-[Construction Intelligence v1 reproducibility](docs/construction-intelligence-v1-reproducibility.md).
-The frozen matrix, split isolation, checkpoint selection, hierarchical statistics, and acceptance
-rules are documented in the
-[Construction Intelligence v1 research protocol](docs/construction-intelligence-v1-protocol.md).
+Start with the [Construction Intelligence v1 setup and documentation index](docs/construction-intelligence-v1.md).
+The [architecture](docs/construction-intelligence-v1-architecture.md),
+[research protocol](docs/construction-intelligence-v1-protocol.md), and
+[reproducibility guide](docs/construction-intelligence-v1-reproducibility.md) define the system,
+frozen matrix, durable jobs, and quality gates. The
+[public-demo provenance contract](docs/construction-intelligence-public-demo-provenance.md) explains
+how preview and eventual release evidence are packaged. Phase-specific operating and review notes
+live in the [Phase 5 Coppelia runbook](docs/construction-intelligence-v1-phase5-runbook.md) and
+[Phase 6 workbench evidence record](docs/construction-intelligence-v1-phase6-evidence.md).
+See [v1 limitations](docs/construction-intelligence-v1-limitations.md) before interpreting results.
 
 See [dependencies-and-assets.md](docs/dependencies-and-assets.md) for licenses and asset provenance.
 
@@ -86,7 +90,10 @@ cd ..
 powershell -ExecutionPolicy Bypass -File scripts\start_construction_workbench.ps1
 ```
 
-Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The five views cover architectural review, module inspection, dependency planning, trace-driven simulation, failure recovery, and controller results.
+Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The primary workbench journey is
+**Design &rarr; Brain &rarr; Simulate &rarr; Experiments &rarr; Results**: edit and approve the house, inspect
+coordination decisions, replay construction and recovery, manage durable experiment work, and review
+research and simulator evidence.
 
 Generate the standalone experiment artifacts or the Blender geometry package:
 
@@ -182,6 +189,7 @@ live-simulator acceptance gates are complete.
 ## Current Project Modes
 
 ### 1. Tabletop baseline
+
 - `pick_and_place_red_to_tray`
 - `sort_blue_to_zone`
 - `stack_red_on_green`
@@ -193,6 +201,7 @@ python scripts\run_demo.py --task pick_and_place_red_to_tray
 ```
 
 ### 2. Warehouse flagship task
+
 - `warehouse_multi_object_collection`
 
 Run a single perception-driven episode:
@@ -520,7 +529,11 @@ Recommended profiles:
 
 ## Architecture
 
+See the [Construction Intelligence v1 architecture](docs/construction-intelligence-v1-architecture.md)
+for the authoritative design-to-evidence data flow and runtime boundaries.
+
 - `src/embodied_skill_composer/core/`: planner, executor, interfaces, shared models, skills, logging
+- `src/embodied_skill_composer/construction/`: design validation, compilation, coordination, durable experiments, simulator execution, and evidence packaging
 - `src/embodied_skill_composer/assembly/`: collaborative assembly task contract, backend selection, scripted baseline, benchmark helpers, and learners
 - `src/embodied_skill_composer/perception/`: oracle and classical-CV world-state builders
 - `src/embodied_skill_composer/sim/`: tabletop adapters plus warehouse adapters
@@ -531,6 +544,9 @@ Recommended profiles:
 - `tests/`: tabletop regression tests plus warehouse perception/planner/benchmark coverage
 
 ## Setup Notes
+
+For the current flagship, use the [Construction Intelligence v1 setup and documentation index](docs/construction-intelligence-v1.md).
+The commands below retain the smaller legacy research baselines.
 
 Minimal local setup:
 
@@ -567,10 +583,6 @@ This project intentionally does **not** use RL for everything.
 
 ## Roadmap
 
-- stabilize the current research workbench and copilot workflow
-- extend the local assembly sandbox toward resource-based construction scenarios
-- add costs, obstacles, idle-time metrics, and recovery diagnostics
-- improve visual artifacts for college research and portfolio review
-- port the stable task contract into Isaac Lab only after local parity is protected
-
-See [roadmap.md](docs/roadmap.md) for milestone checkpoints and done criteria.
+See the [Construction Intelligence v1 completion roadmap](docs/roadmap.md) for current phase
+checkpoints and open release gates. Older assembly, MuJoCo, and simulator-spike milestones are kept
+there only as a clearly labeled historical appendix.

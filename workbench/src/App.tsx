@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { BarChart3, BrainCircuit, Building2, Check, FlaskConical, Layers3, LoaderCircle, PlaySquare } from "lucide-react";
 import { api } from "./api";
 import type { CoppeliaHealth, LabMode, LabPolicy, LabRun, Project, Trace } from "./types";
@@ -20,6 +20,7 @@ const views: Array<{ id: View; label: string; icon: typeof Building2 }> = [
 ];
 
 export default function App() {
+  const reduceMotion = useReducedMotion();
   const [project, setProject] = useState<Project | null>(null);
   const [trace, setTrace] = useState<Trace | null>(null);
   const [view, setView] = useState<View>(readView());
@@ -43,7 +44,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    Promise.all([api.project(), api.trace(controller)])
+    Promise.all([api.project(), api.trace("optimized")])
       .then(([nextProject, nextTrace]) => {
         setProject(nextProject);
         setTrace(nextTrace);
@@ -51,7 +52,7 @@ export default function App() {
       })
       .then(refreshLab)
       .catch((reason) => setError(String(reason)));
-  }, []);
+  }, [refreshLab]);
 
   useEffect(() => {
     api.trace(controller).then(setTrace).catch((reason) => setError(String(reason)));
@@ -63,6 +64,10 @@ export default function App() {
     return () => window.removeEventListener("hashchange", update);
   }, []);
 
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [view]);
+
   const navigate = (next: View) => {
     window.location.hash = `/${next}`;
     setView(next);
@@ -72,28 +77,53 @@ export default function App() {
   if (!project || !trace) return <StartupState />;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell app-shell-${view}`}>
+      <a className="skip-link" href="#main-content">Skip to workbench content</a>
       <aside className="rail">
-        <div className="brand-mark"><Layers3 size={21} strokeWidth={2.2} /></div>
+        <div className="brand-mark" aria-hidden="true"><Layers3 size={21} strokeWidth={2.2} /></div>
         <nav aria-label="Workbench views">
           {views.map((item) => (
-            <button key={item.id} className={view === item.id ? "rail-button active" : "rail-button"} onClick={() => navigate(item.id)} title={item.label}>
-              <item.icon size={20} /><span>{item.label}</span>
+            <button
+              key={item.id}
+              type="button"
+              className={view === item.id ? "rail-button active" : "rail-button"}
+              onClick={() => navigate(item.id)}
+              title={item.label}
+              aria-current={view === item.id ? "page" : undefined}
+            >
+              <item.icon aria-hidden="true" size={20} /><span>{item.label}</span>
             </button>
           ))}
         </nav>
-        <div className="rail-status" title={mode === "local" ? "Local research lab" : "Read-only public preview"}><span className={mode === "local" ? "status-dot" : "status-dot static"} />{mode === "local" ? "local" : "preview"}</div>
+        <div
+          className="rail-status"
+          title={mode === "local" ? "Local research lab" : "Read-only public preview"}
+          role="status"
+          aria-live="polite"
+        >
+          <span aria-hidden="true" className={mode === "local" ? "status-dot" : "status-dot static"} />
+          {mode === "local" ? "local" : "preview"}
+        </div>
       </aside>
-      <main className="main-shell">
+      <main id="main-content" className="main-shell" tabIndex={-1}>
         <header className="topbar">
           <div><p className="eyebrow">Construction Intelligence v1</p><h1>{project.design.title}</h1></div>
           <div className="topbar-meta">
             <span>{project.plan.modules.length} modules</span><span>{project.plan.robots.length} robots</span>
-            <span className="solver-ready"><Check size={14} /> {mode === "local" ? "Lab connected" : "Preview replay"}</span>
+            <span className="solver-ready" role="status" aria-live="polite">
+              <Check aria-hidden="true" size={14} /> {mode === "local" ? "Lab connected" : "Read-only preview"}
+            </span>
           </div>
         </header>
-        <motion.section key={view} className="view-stage" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
-          <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" size={24} /></div>}>
+        <motion.section
+          key={view}
+          className="view-stage"
+          aria-label={`${views.find((item) => item.id === view)?.label ?? view} workbench`}
+          initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: reduceMotion ? 0 : 0.2 }}
+        >
+          <Suspense fallback={<div className="view-loading" role="status" aria-live="polite"><LoaderCircle aria-hidden="true" className="spin" size={24} /><span className="sr-only">Loading view</span></div>}>
             {view === "design" && <DesignView project={project} mode={mode} onProject={(updated) => { setProject(updated); api.trace(controller).then(setTrace); }} />}
             {view === "brain" && <BrainView project={project} trace={trace} controller={controller} policies={policies} onController={setController} />}
             {view === "simulate" && <SimulateView project={project} trace={trace} controller={controller} coppelia={coppelia} onController={setController} onTrace={setTrace} />}
@@ -112,5 +142,11 @@ function readView(): View {
 }
 
 function StartupState({ error }: { error?: string }) {
-  return <div className="startup-state">{error ? <Layers3 size={32} /> : <LoaderCircle className="spin" size={32} />}<h1>{error ? "Workbench unavailable" : "Loading construction trace"}</h1><p>{error ?? ""}</p></div>;
+  return (
+    <div className="startup-state" role={error ? "alert" : "status"} aria-live="polite">
+      {error ? <Layers3 aria-hidden="true" size={32} /> : <LoaderCircle aria-hidden="true" className="spin" size={32} />}
+      <h1>{error ? "Workbench unavailable" : "Loading construction trace"}</h1>
+      <p>{error ?? "Connecting to the selected workbench runtime."}</p>
+    </div>
+  );
 }

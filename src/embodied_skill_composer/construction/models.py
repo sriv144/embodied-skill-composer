@@ -40,18 +40,18 @@ class WallSegment(BaseModel):
     wall_id: str
     start: Vec2
     end: Vec2
-    thickness_m: float = Field(default=0.2, gt=0)
-    height_m: float = Field(default=2.8, gt=0)
+    thickness_m: float = 0.2
+    height_m: float = 2.8
 
 
 class Opening(BaseModel):
     opening_id: str
     wall_id: str
     kind: Literal["door", "window"]
-    offset_m: float = Field(ge=0)
-    width_m: float = Field(gt=0)
-    height_m: float = Field(gt=0)
-    sill_height_m: float = Field(default=0, ge=0)
+    offset_m: float
+    width_m: float
+    height_m: float
+    sill_height_m: float = 0
 
 
 class Room(BaseModel):
@@ -61,7 +61,7 @@ class Room(BaseModel):
 
 
 class VectorFloorPlan(BaseModel):
-    walls: list[WallSegment] = Field(min_length=4)
+    walls: list[WallSegment]
     openings: list[Opening] = Field(default_factory=list)
     rooms: list[Room] = Field(default_factory=list)
     confidence: float = Field(default=1.0, ge=0, le=1)
@@ -71,28 +71,20 @@ class VectorFloorPlan(BaseModel):
 
 class RoofSpec(BaseModel):
     style: Literal["gable", "hip", "flat"] = "gable"
-    pitch_degrees: float = Field(default=28, ge=0, le=60)
-    overhang_m: float = Field(default=0.35, ge=0)
+    pitch_degrees: float = 28
+    overhang_m: float = 0.35
 
 
 class HouseDesign(BaseModel):
     design_id: str
     title: str
-    footprint_width_m: float = Field(gt=0)
-    footprint_depth_m: float = Field(gt=0)
+    footprint_width_m: float
+    footprint_depth_m: float
     floor_plan: VectorFloorPlan
     roof: RoofSpec = Field(default_factory=RoofSpec)
     wall_material: str = "plaster_white"
     roof_material: str = "standing_seam_charcoal"
     level_count: int = Field(default=1, ge=1, le=1)
-
-    @model_validator(mode="after")
-    def validate_openings(self) -> "HouseDesign":
-        wall_ids = {wall.wall_id for wall in self.floor_plan.walls}
-        missing = sorted({item.wall_id for item in self.floor_plan.openings} - wall_ids)
-        if missing:
-            raise ValueError(f"openings reference unknown walls: {missing}")
-        return self
 
 
 class ModuleType(StrEnum):
@@ -117,6 +109,8 @@ class BuildModule(BaseModel):
     install_duration_s: int = Field(gt=0)
     dependencies: list[str] = Field(default_factory=list)
     material: str
+    architectural_opening: Opening | None = None
+    architectural_opening_local_offset_m: float | None = None
 
 
 class RobotSpec(BaseModel):

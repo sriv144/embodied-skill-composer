@@ -454,6 +454,10 @@ def test_training_claim_is_atomic_fifo_and_single_slot(tmp_path: Path) -> None:
 def test_queued_cancellation_is_terminal_and_never_claimed(tmp_path: Path) -> None:
     registry = LabRegistry(tmp_path / "lab.sqlite")
     run_id = registry.create_run("training", {"seed": 7})
+    queued = registry.get_run(run_id)
+    assert queued is not None
+    assert queued["can_cancel"] is True
+    assert queued["can_resume"] is False
 
     assert registry.request_cancel(run_id)
     run = registry.get_run(run_id)
@@ -461,9 +465,65 @@ def test_queued_cancellation_is_terminal_and_never_claimed(tmp_path: Path) -> No
     assert run["status"] == "cancelled"
     assert run["cancel_requested"] is True
     assert run["ended_at"] is not None
+    assert run["can_cancel"] is False
+    assert run["can_resume"] is True
     assert registry.request_cancel(run_id) is False
     assert registry.claim_next_training() is None
     assert registry.list_events(run_id)[-1]["payload"] == {"event": "cancelled"}
+
+
+def test_running_cancel_request_is_idempotently_rejected_after_first_request(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "running-cancel.sqlite")
+    run_id = registry.create_run(
+        "training",
+        {"seed": 7},
+        status="running",
+    )
+
+    assert registry.request_cancel(run_id) is True
+    requested = registry.get_run(run_id)
+    assert requested is not None
+    assert requested["status"] == "cancel_requested"
+    assert requested["can_cancel"] is False
+    assert registry.request_cancel(run_id) is False
+
+
+def test_resume_capability_is_limited_to_durable_runs_with_compatible_state(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "resume-capability.sqlite")
+    restartable = registry.create_run(
+        "training",
+        {},
+        status="interrupted",
+        run_id="restartable",
+    )
+    nondurable = registry.create_run(
+        "evaluation",
+        {},
+        status="interrupted",
+        run_id="nondurable",
+    )
+    missing = registry.create_run(
+        "training",
+        {},
+        status="interrupted",
+        run_id="missing-checkpoint",
+    )
+    registry.update_run(missing, latest_checkpoint=str(tmp_path / "missing.pt"))
+
+    restartable_record = registry.get_run(restartable)
+    nondurable_record = registry.get_run(nondurable)
+    missing_record = registry.get_run(missing)
+    assert restartable_record is not None
+    assert nondurable_record is not None
+    assert missing_record is not None
+    assert restartable_record["can_resume"] is True
+    assert nondurable_record["can_resume"] is False
+    assert missing_record["can_resume"] is False
+    assert registry.request_resume(nondurable) is False
 
 
 def test_stale_reconciliation_terminates_owned_worker_and_ignores_reused_pid(
@@ -657,6 +717,29 @@ def test_resume_rejects_missing_checkpoint_and_completed_run(tmp_path: Path) -> 
     completed = registry.get_run(completed_id)
     assert missing is not None and missing["status"] == "interrupted"
     assert completed is not None and completed["status"] == "completed"
+
+
+@pytest.mark.parametrize("status", ["interrupted", "failed", "cancelled"])
+def test_resume_restarts_training_before_first_checkpoint(
+    tmp_path: Path,
+    status: RunStatus,
+) -> None:
+    registry = LabRegistry(tmp_path / f"restart-{status}.sqlite")
+    run_id = registry.create_run("training", {}, status=status, run_id=status)
+    registry.update_run(run_id, progress=0.08, artifact_dir=str(tmp_path / "partial"))
+
+    assert registry.request_resume(run_id) is True
+
+    restarted = registry.get_run(run_id)
+    assert restarted is not None
+    assert restarted["status"] == "resuming"
+    assert restarted["progress"] == 0
+    assert restarted["artifact_dir"] is None
+    assert restarted["started_at"] is None
+    assert registry.list_events(run_id)[-1]["payload"] == {
+        "event": "resume_requested",
+        "restart_from_beginning": True,
+    }
 
 
 def test_dispatcher_builds_claim_bound_worker_command_without_running_training(

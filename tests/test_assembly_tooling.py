@@ -277,20 +277,20 @@ def test_project_vision_and_roadmap_docs_are_linked() -> None:
     assert "AI brain" in vision
     assert "mission planner" in vision.lower()
     assert "Isaac Lab" in vision
-    assert "Phase 1: Stabilize The Research Workbench" in roadmap
-    assert "CoppeliaSim" in roadmap
+    assert "Construction Intelligence v1 Completion Roadmap" in roadmap
+    assert "Phase 1" in roadmap
+    assert "publish and protect the checkpoint" in roadmap
+    assert "Coppelia" in roadmap
     assert "MuJoCo" in roadmap
     assert "Isaac Lab" in roadmap
-    assert "Blender is optional" in roadmap
-    assert "Do not require ROS 2 yet" in roadmap
-    assert "python scripts\\run_copilot.py nvidia-check" in roadmap
+    assert "Blender assets" in roadmap
+    assert "Open release gates" in roadmap
+    assert "Historical roadmap appendix - superseded" in roadmap
     assert "python scripts\\run_construction_brain.py --brain heuristic --episodes 1" in readme
     assert "configs\\assembly_profiles\\mujoco_sensing.yaml" in readme
-    assert "Physical Sensing v0" in roadmap
-    assert "Visual Perception v0" in roadmap
-    assert "Tracking and Occlusion Recovery v0" in roadmap
-    assert "Estimated-State Control v0" in roadmap
-    assert "CoppeliaSim Backend Spike v0" in roadmap
+    assert "MuJoCo backend spike" in roadmap
+    assert "Coppelia backend and Modular Room spikes" in roadmap
+    assert "Construction v2 product track" in roadmap
     assert "KUKA YouBot" in readme
     assert "blueprint-to-scene" in readme
     assert "CC0-1.0" in asset_manifest
@@ -302,12 +302,12 @@ def test_project_vision_and_roadmap_docs_are_linked() -> None:
     assert "scripts\\run_coppelia_assembly.py" in readme
     assert "scripts\\run_modular_construction.py" in readme
     assert "scripts\\preview_construction_assets.py" in readme
-    assert "Modular Room v0 is complete" in roadmap
+    assert "Phase 6 - product workbench" in roadmap
     assert "Fabrica" in research
     assert "WorkBenchMark" in research
     assert "Learn2Assemble" in research
     assert "TERMES" in research
-    assert "Status: active" in roadmap
+    assert "controls the v1 gates." in roadmap
 
 
 def test_construction_asset_catalog_references_local_meshes() -> None:

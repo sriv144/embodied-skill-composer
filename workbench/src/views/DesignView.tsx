@@ -1,8 +1,34 @@
-import { Check, CircleAlert, ImageUp, RefreshCw } from "lucide-react";
-import { useState } from "react";
+/* eslint-disable jsx-a11y/no-noninteractive-tabindex -- The independently scrollable inspector must be keyboard reachable. */
+import {
+  Check,
+  CircleAlert,
+  Hammer,
+  ImageUp,
+  RefreshCw,
+  Trash2
+} from "lucide-react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { api } from "../api";
+import { DesignEditor } from "../components/DesignEditor";
 import { Fact } from "../components/WorkbenchControls";
+import {
+  cloneFloorPlan,
+  moveOpening,
+  moveWall,
+  projectValidation,
+  removeSelection,
+  resetApproval,
+  resizeOpening,
+  resizeWall,
+  updateOpeningDimensions,
+  updateWallDimensions,
+  wallAxis,
+  wallLength,
+  type FloorPlan,
+  type Selection
+} from "../editor/designEditor";
 import type { LabMode, Project } from "../types";
+import "./design-editor.css";
 
 export function DesignView({
   project,
@@ -13,49 +39,115 @@ export function DesignView({
   mode: LabMode;
   onProject: (project: Project) => void;
 }) {
-  const [parsed, setParsed] = useState<Project["design"]["floor_plan"] | null>(null);
+  const [draft, setDraft] = useState<FloorPlan>(() =>
+    cloneFloorPlan(project.design.floor_plan)
+  );
   const [width, setWidth] = useState(project.design.footprint_width_m);
   const [depth, setDepth] = useState(project.design.footprint_depth_m);
+  const [selection, setSelection] = useState<Selection | null>(null);
   const [seed, setSeed] = useState(900);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const floorPlan = parsed ?? project.design.floor_plan;
+  const [notice, setNotice] = useState<string>(
+    mode === "static"
+      ? "Read-only public preview. Connect the local lab to edit and compile."
+      : "Select a tool or an existing element to begin."
+  );
+  const validation = useMemo(
+    () => projectValidation(draft, width, depth),
+    [draft, width, depth]
+  );
+  const readOnly = mode === "static";
+
+  useEffect(() => {
+    setDraft(cloneFloorPlan(project.design.floor_plan));
+    setWidth(project.design.footprint_width_m);
+    setDepth(project.design.footprint_depth_m);
+    setSelection(null);
+  }, [
+    project.design.design_id,
+    project.design.floor_plan,
+    project.design.footprint_depth_m,
+    project.design.footprint_width_m
+  ]);
+
+  const updateDraft = (next: FloorPlan, announcement: string) => {
+    if (next !== draft) setDraft(next);
+    setNotice(announcement);
+  };
+
+  const updateFootprint = (
+    axis: "width" | "depth",
+    event: ChangeEvent<HTMLInputElement>
+  ) => {
+    const value = event.target.valueAsNumber;
+    if (!Number.isFinite(value)) return;
+    if (axis === "width") setWidth(value);
+    else setDepth(value);
+    setDraft((current) => resetApproval(current));
+    setNotice("Footprint changed. Review and approve the design again.");
+  };
 
   const parse = async (file?: File) => {
     if (!file) return;
     setBusy(true);
-    setNotice(null);
+    setNotice("Reading floor-plan image.");
     try {
       const inferred = await api.parseFloorPlan(file, width);
       const bounds = floorPlanBounds(inferred);
-      setParsed(inferred);
-      setDepth(Number(((bounds.height * width) / bounds.width).toFixed(2)));
+      const inferredDepth =
+        bounds.width > 0
+          ? Number(((bounds.height * width) / bounds.width).toFixed(2))
+          : depth;
+      setDraft(resetApproval(inferred));
+      setDepth(inferredDepth);
+      setSelection(null);
+      setNotice(
+        "Floor plan parsed. Resolve validation issues, then approve it before compilation."
+      );
     } catch (reason) {
-      setNotice(String(reason));
+      setNotice(`Floor-plan parsing failed: ${errorMessage(reason)}`);
     } finally {
       setBusy(false);
     }
   };
 
-  const approve = async () => {
+  const approve = () => {
+    if (!validation.valid) {
+      setNotice(
+        `Approval blocked: ${validation.issues[0]?.message ?? "the design is invalid."}`
+      );
+      return;
+    }
+    const approved = cloneFloorPlan(draft);
+    approved.approved = true;
+    approved.warnings = [];
+    setDraft(approved);
+    setNotice(
+      "Design approved. Geometry is unchanged; compile when you are ready."
+    );
+  };
+
+  const compile = async () => {
+    if (!draft.approved || !validation.valid) {
+      setNotice("Compile blocked until the valid design is explicitly approved.");
+      return;
+    }
     setBusy(true);
-    setNotice(null);
+    setNotice("Compiling the approved design.");
     try {
-      const scaled = scaleFloorPlan(floorPlan, width, depth);
-      scaled.approved = true;
-      scaled.warnings = [];
       const updated = await api.rebuild({
         ...project.design,
         design_id: `${project.design.design_id.replace(/_reviewed$/, "")}_reviewed`,
         footprint_width_m: width,
         footprint_depth_m: depth,
-        floor_plan: scaled
+        floor_plan: draft
       });
-      setParsed(updated.design.floor_plan);
+      setDraft(cloneFloorPlan(updated.design.floor_plan));
+      setSelection(null);
       onProject(updated);
-      setNotice("Reviewed design compiled into a new build plan.");
+      setNotice("Approved design compiled into a new build plan.");
     } catch (reason) {
-      setNotice(String(reason));
+      setNotice(`Compilation failed: ${errorMessage(reason)}`);
     } finally {
       setBusy(false);
     }
@@ -63,154 +155,480 @@ export function DesignView({
 
   const generate = async () => {
     setBusy(true);
+    setNotice(`Generating scenario from seed ${seed}.`);
     try {
       const scenario = await api.generateScenario(seed);
       setNotice(`Scenario ${String(scenario.scenario_id)} persisted.`);
     } catch (reason) {
-      setNotice(String(reason));
+      setNotice(`Scenario generation failed: ${errorMessage(reason)}`);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="design-layout">
-      <section className="design-canvas">
-        <div className="section-heading">
+    <div className="design-layout design-editor-layout">
+      <section className="design-canvas design-editor-canvas">
+        <div className="section-heading design-editor-heading">
           <div>
             <p className="eyebrow">Architectural intent</p>
-            <h2>Metric floor plan</h2>
+            <h2>Orthogonal floor-plan editor</h2>
+            <p className="design-editor-subtitle">
+              Draw metric walls and place openings on a {width} × {depth} m
+              footprint.
+            </p>
           </div>
-          <span className={floorPlan.approved ? "approval approved" : "approval review"}>
-            {floorPlan.approved ? <Check size={15} /> : <CircleAlert size={15} />}
-            {floorPlan.approved ? "Approved" : "Review required"}
+          <span className={draft.approved ? "approval approved" : "approval review"}>
+            {draft.approved ? (
+              <Check size={15} aria-hidden="true" />
+            ) : (
+              <CircleAlert size={15} aria-hidden="true" />
+            )}
+            {draft.approved ? "Approved" : "Approval required"}
           </span>
         </div>
-        <FloorPlan plan={floorPlan} />
+        <DesignEditor
+          plan={draft}
+          footprintWidthM={width}
+          footprintDepthM={depth}
+          readOnly={readOnly}
+          selection={selection}
+          onSelection={setSelection}
+          onPlan={updateDraft}
+        />
       </section>
-      <aside className="design-inspector">
-        <p className="eyebrow">Design source</p>
-        <label className={mode === "static" ? "upload-zone disabled" : "upload-zone"}>
-          <ImageUp size={24} />
-          <strong>{busy ? "Processing" : "Floor plan image"}</strong>
-          <span>PNG or JPG</span>
-          <input
-            disabled={mode === "static"}
-            type="file"
-            accept="image/png,image/jpeg"
-            onChange={(event) => parse(event.target.files?.[0])}
-          />
-        </label>
-        <div className="dimension-grid">
-          <label>
-            <span>Width</span>
-            <div className="unit-input">
-              <input type="number" min="2" max="40" value={width} onChange={(event) => setWidth(Number(event.target.value))} />
-              <span>m</span>
+
+      <aside
+        className="design-inspector design-editor-inspector"
+        aria-label="Design inspector"
+        tabIndex={0}
+      >
+        {readOnly && (
+          <div className="design-readonly-note" role="note">
+            <CircleAlert size={16} aria-hidden="true" />
+            <div>
+              <strong>Read-only preview</strong>
+              <span>Editing and compilation require the local research lab.</span>
             </div>
+          </div>
+        )}
+
+        <SelectionInspector
+          plan={draft}
+          selection={selection}
+          disabled={busy || readOnly}
+          onPlan={updateDraft}
+          onSelection={setSelection}
+        />
+
+        <section className="design-inspector-section" aria-labelledby="source-heading">
+          <h3 id="source-heading">Design source</h3>
+          <label className={readOnly ? "upload-zone compact disabled" : "upload-zone compact"}>
+            <ImageUp size={20} aria-hidden="true" />
+            <span>
+              <strong>{busy ? "Processing" : "Import plan image"}</strong>
+              PNG or JPG
+            </span>
+            <input
+              disabled={busy || readOnly}
+              type="file"
+              accept="image/png,image/jpeg"
+              aria-label="Import floor-plan PNG or JPG"
+              onChange={(event) => {
+                void parse(event.target.files?.[0]);
+                event.target.value = "";
+              }}
+            />
           </label>
-          <label>
-            <span>Depth</span>
-            <div className="unit-input">
-              <input type="number" min="2" max="40" value={depth} onChange={(event) => setDepth(Number(event.target.value))} />
-              <span>m</span>
-            </div>
-          </label>
+          <div className="dimension-grid">
+            <label>
+              <span>Width</span>
+              <div className="unit-input">
+                <input
+                aria-label="Footprint width in metres"
+                disabled={busy || readOnly}
+                type="number"
+                step="any"
+                  value={width}
+                  onChange={(event) => updateFootprint("width", event)}
+                />
+                <span>m</span>
+              </div>
+            </label>
+            <label>
+              <span>Depth</span>
+              <div className="unit-input">
+                <input
+                aria-label="Footprint depth in metres"
+                disabled={busy || readOnly}
+                type="number"
+                step="any"
+                  value={depth}
+                  onChange={(event) => updateFootprint("depth", event)}
+                />
+                <span>m</span>
+              </div>
+            </label>
+          </div>
+        </section>
+
+        <section className="design-inspector-section" aria-labelledby="validation-heading">
+          <div className="design-validation-heading">
+            <h3 id="validation-heading">Design validation</h3>
+            <span className={validation.valid ? "valid" : "invalid"}>
+              {validation.valid ? "Ready" : `${validation.issues.length} issues`}
+            </span>
+          </div>
+          {validation.valid ? (
+            <p className="design-validation-clear">
+              <Check size={15} aria-hidden="true" />
+              Bounds, intersections, openings, and dimensions pass.
+            </p>
+          ) : (
+            <ul className="design-validation-list" aria-label="Design validation issues">
+              {validation.issues.map((issue, index) => (
+                <li key={`${issue.code}-${issue.path}-${index}`}>
+                  <CircleAlert size={14} aria-hidden="true" />
+                  <span>{issue.message}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        <div className="fact-list design-editor-facts">
+          <Fact label="Walls" value={String(draft.walls.length)} />
+          <Fact label="Openings" value={String(draft.openings.length)} />
+          <Fact label="Rooms" value={String(draft.rooms.length)} />
+          <Fact label="Snap grid" value="0.25 m" />
         </div>
-        <div className="fact-list">
-          <Fact label="Footprint" value={`${width} x ${depth} m`} />
-          <Fact label="Rooms" value={String(floorPlan.rooms.length)} />
-          <Fact label="Openings" value={String(floorPlan.openings.length)} />
-          <Fact label="Confidence" value={`${Math.round(floorPlan.confidence * 100)}%`} />
+
+        <div className="design-approval-actions" aria-label="Approval and compilation">
+          <button
+            className="secondary-button design-approve"
+            type="button"
+            disabled={busy || readOnly || !validation.valid || draft.approved}
+            onClick={approve}
+          >
+            <Check size={16} aria-hidden="true" />
+            {draft.approved ? "Design approved" : "Approve design"}
+          </button>
+          <button
+            className="primary-button design-compile"
+            type="button"
+            disabled={busy || readOnly || !validation.valid || !draft.approved}
+            onClick={() => void compile()}
+          >
+            <Hammer size={16} aria-hidden="true" />
+            {busy ? "Working" : "Compile build plan"}
+          </button>
         </div>
-        <button className="primary-button approve-button" disabled={busy || mode === "static"} onClick={approve}>
-          <Check size={16} /> Approve and compile
-        </button>
-        <div className="scenario-generator">
-          <h3>Procedural scenario</h3>
+
+        <section className="scenario-generator" aria-labelledby="scenario-heading">
+          <h3 id="scenario-heading">Procedural scenario</h3>
           <div className="inline-field">
-            <input type="number" min="0" max="999" value={seed} onChange={(event) => setSeed(Number(event.target.value))} />
-            <button className="icon-button light" disabled={busy || mode === "static"} onClick={generate} title="Generate seeded cottage">
-              <RefreshCw size={16} />
+            <input
+              aria-label="Scenario seed"
+              disabled={busy || readOnly}
+              type="number"
+              min="0"
+              max="999"
+              value={seed}
+              onChange={(event) => setSeed(Number(event.target.value))}
+            />
+            <button
+              className="icon-button light"
+              type="button"
+              disabled={busy || readOnly}
+              onClick={() => void generate()}
+              aria-label="Generate seeded cottage"
+              title="Generate seeded cottage"
+            >
+              <RefreshCw size={16} aria-hidden="true" />
             </button>
           </div>
-        </div>
-        {notice && <p className="notice-line">{notice}</p>}
+        </section>
+        <p className="notice-line design-live-status" role="status" aria-live="polite">
+          {notice}
+        </p>
       </aside>
     </div>
   );
 }
 
-function FloorPlan({ plan }: { plan: Project["design"]["floor_plan"] }) {
-  const points = plan.walls.flatMap((wall) => [wall.start, wall.end]);
-  const minX = Math.min(...points.map((point) => point.x));
-  const maxX = Math.max(...points.map((point) => point.x));
-  const minY = Math.min(...points.map((point) => point.y));
-  const maxY = Math.max(...points.map((point) => point.y));
-  const scale = 70 / Math.max(maxX - minX, maxY - minY);
-  const position = (point: { x: number; y: number }) => ({
-    x: 50 + point.x * scale,
-    y: 50 - point.y * scale
-  });
+function SelectionInspector({
+  plan,
+  selection,
+  disabled,
+  onPlan,
+  onSelection
+}: {
+  plan: FloorPlan;
+  selection: Selection | null;
+  disabled: boolean;
+  onPlan: (plan: FloorPlan, announcement: string) => void;
+  onSelection: (selection: Selection | null) => void;
+}) {
+  const wall =
+    selection?.kind === "wall"
+      ? plan.walls.find((candidate) => candidate.wall_id === selection.id)
+      : undefined;
+  const opening =
+    selection?.kind === "opening"
+      ? plan.openings.find(
+          (candidate) => candidate.opening_id === selection.id
+        )
+      : undefined;
+
+  if (!wall && !opening) {
+    return (
+      <section className="design-inspector-section selection-empty" aria-labelledby="selection-heading">
+        <h3 id="selection-heading">Selection</h3>
+        <p>Select a wall, door, or window to inspect exact dimensions.</p>
+      </section>
+    );
+  }
+
+  const remove = () => {
+    if (!selection) return;
+    onPlan(
+      removeSelection(plan, selection),
+      `${selection.kind === "wall" ? "Wall and its openings" : "Opening"} removed. Approval reset.`
+    );
+    onSelection(null);
+  };
+
+  if (wall) {
+    const axis = wallAxis(wall);
+    const horizontal = axis === "horizontal";
+    const setStart = (value: number) =>
+      onPlan(
+        resizeWall(
+          plan,
+          wall.wall_id,
+          "start",
+          horizontal
+            ? { x: value, y: wall.start.y }
+            : { x: wall.start.x, y: value }
+        ),
+        "Wall start changed. Approval reset."
+      );
+    const setEnd = (value: number) =>
+      onPlan(
+        resizeWall(
+          plan,
+          wall.wall_id,
+          "end",
+          horizontal
+            ? { x: value, y: wall.end.y }
+            : { x: wall.end.x, y: value }
+        ),
+        "Wall end changed. Approval reset."
+      );
+    const setPosition = (value: number) => {
+      const current = horizontal ? wall.start.y : wall.start.x;
+      onPlan(
+        moveWall(
+          plan,
+          wall.wall_id,
+          horizontal ? { x: 0, y: value - current } : { x: value - current, y: 0 }
+        ),
+        "Wall position changed. Approval reset."
+      );
+    };
+    return (
+      <section className="design-inspector-section selection-inspector" aria-labelledby="selection-heading">
+        <div className="selection-heading">
+          <div>
+            <p className="eyebrow">Selected wall</p>
+            <h3 id="selection-heading">{wall.wall_id}</h3>
+          </div>
+          <button
+            type="button"
+            className="selection-delete"
+            disabled={disabled}
+            onClick={remove}
+            aria-label={`Delete wall ${wall.wall_id} and its openings`}
+          >
+            <Trash2 size={15} aria-hidden="true" />
+          </button>
+        </div>
+        <p className="selection-summary">
+          {axis} · {wallLength(wall).toFixed(2)} m
+        </p>
+        <div className="numeric-inspector-grid">
+          <NumericField
+            label={horizontal ? "Start X" : "Start Y"}
+            value={horizontal ? wall.start.x : wall.start.y}
+            disabled={disabled}
+            onValue={setStart}
+          />
+          <NumericField
+            label={horizontal ? "End X" : "End Y"}
+            value={horizontal ? wall.end.x : wall.end.y}
+            disabled={disabled}
+            onValue={setEnd}
+          />
+          <NumericField
+            label={horizontal ? "Y position" : "X position"}
+            value={horizontal ? wall.start.y : wall.start.x}
+            disabled={disabled}
+            onValue={setPosition}
+          />
+          <NumericField
+            label="Thickness"
+            value={wall.thickness_m}
+            min={0.01}
+            disabled={disabled}
+            onValue={(value) =>
+              onPlan(
+                updateWallDimensions(plan, wall.wall_id, {
+                  thickness_m: value
+                }),
+                "Wall thickness changed. Approval reset."
+              )
+            }
+          />
+          <NumericField
+            label="Height"
+            value={wall.height_m}
+            min={0.01}
+            disabled={disabled}
+            onValue={(value) =>
+              onPlan(
+                updateWallDimensions(plan, wall.wall_id, { height_m: value }),
+                "Wall height changed. Approval reset."
+              )
+            }
+          />
+        </div>
+      </section>
+    );
+  }
+
   return (
-    <svg className="floorplan" viewBox="0 0 100 100" role="img" aria-label="Reviewed floor plan">
-      <defs>
-        <pattern id="grid" width="5" height="5" patternUnits="userSpaceOnUse">
-          <path d="M 5 0 L 0 0 0 5" fill="none" stroke="#d7ded9" strokeWidth="0.18" />
-        </pattern>
-      </defs>
-      <rect width="100" height="100" fill="url(#grid)" />
-      {plan.rooms.map((room, index) => (
-        <polygon
-          key={room.room_id}
-          points={room.polygon.map((point) => { const item = position(point); return `${item.x},${item.y}`; }).join(" ")}
-          fill={["#e5efe9", "#f0e7d7", "#dce9ee"][index % 3]}
-          stroke="#79857f"
-          strokeWidth="0.3"
+    <section className="design-inspector-section selection-inspector" aria-labelledby="selection-heading">
+      <div className="selection-heading">
+        <div>
+          <p className="eyebrow">Selected {opening!.kind}</p>
+          <h3 id="selection-heading">{opening!.opening_id}</h3>
+        </div>
+        <button
+          type="button"
+          className="selection-delete"
+          disabled={disabled}
+          onClick={remove}
+          aria-label={`Delete ${opening!.kind} ${opening!.opening_id}`}
+        >
+          <Trash2 size={15} aria-hidden="true" />
+        </button>
+      </div>
+      <p className="selection-summary">Attached to {opening!.wall_id}</p>
+      <div className="numeric-inspector-grid">
+        <NumericField
+          label="Offset"
+          value={opening!.offset_m}
+          min={0}
+          disabled={disabled}
+          onValue={(value) =>
+            onPlan(
+              moveOpening(plan, opening!.opening_id, value),
+              "Opening offset changed. Approval reset."
+            )
+          }
         />
-      ))}
-      {plan.walls.map((wall) => {
-        const start = position(wall.start);
-        const end = position(wall.end);
-        return <line key={wall.wall_id} x1={start.x} y1={start.y} x2={end.x} y2={end.y} stroke="#17201c" strokeWidth="1.4" />;
-      })}
-      {plan.rooms.map((room) => {
-        const center = room.polygon.reduce(
-          (sum, point) => ({ x: sum.x + point.x / room.polygon.length, y: sum.y + point.y / room.polygon.length }),
-          { x: 0, y: 0 }
-        );
-        const item = position(center);
-        return <text key={room.room_id} x={item.x} y={item.y} textAnchor="middle" fontSize="2.4" fill="#48544f">{room.name}</text>;
-      })}
-    </svg>
+        <NumericField
+          label="Width"
+          value={opening!.width_m}
+          min={0.01}
+          disabled={disabled}
+          onValue={(value) =>
+            onPlan(
+              resizeOpening(plan, opening!.opening_id, value),
+              "Opening width changed. Approval reset."
+            )
+          }
+        />
+        <NumericField
+          label="Height"
+          value={opening!.height_m}
+          min={0.01}
+          disabled={disabled}
+          onValue={(value) =>
+            onPlan(
+              updateOpeningDimensions(plan, opening!.opening_id, {
+                height_m: value
+              }),
+              "Opening height changed. Approval reset."
+            )
+          }
+        />
+        <NumericField
+          label="Sill"
+          value={opening!.sill_height_m}
+          min={0}
+          disabled={disabled}
+          onValue={(value) =>
+            onPlan(
+              updateOpeningDimensions(plan, opening!.opening_id, {
+                sill_height_m: value
+              }),
+              "Opening sill changed. Approval reset."
+            )
+          }
+        />
+      </div>
+    </section>
   );
 }
 
-function floorPlanBounds(plan: Project["design"]["floor_plan"]) {
-  const points = plan.walls.flatMap((wall) => [wall.start, wall.end]);
-  const xs = points.map((point) => point.x);
-  const ys = points.map((point) => point.y);
-  return { width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+function NumericField({
+  label,
+  value,
+  min,
+  disabled,
+  onValue
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  disabled: boolean;
+  onValue: (value: number) => void;
+}) {
+  return (
+    <label>
+      <span>{label}</span>
+      <div className="unit-input compact">
+        <input
+          aria-label={`${label} in metres`}
+          type="number"
+          step="0.25"
+          min={min}
+          value={value}
+          disabled={disabled}
+          onChange={(event) => {
+            if (Number.isFinite(event.target.valueAsNumber)) {
+              onValue(event.target.valueAsNumber);
+            }
+          }}
+        />
+        <span>m</span>
+      </div>
+    </label>
+  );
 }
 
-function scaleFloorPlan(plan: Project["design"]["floor_plan"], width: number, depth: number) {
-  const bounds = floorPlanBounds(plan);
-  const sx = width / bounds.width;
-  const sy = depth / bounds.height;
+function floorPlanBounds(plan: FloorPlan) {
+  const points = plan.walls.flatMap((wall) => [wall.start, wall.end]);
+  if (points.length === 0) return { width: 0, height: 0 };
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
   return {
-    ...plan,
-    walls: plan.walls.map((wall) => ({
-      ...wall,
-      start: { x: wall.start.x * sx, y: wall.start.y * sy },
-      end: { x: wall.end.x * sx, y: wall.end.y * sy }
-    })),
-    openings: plan.openings.map((opening) => ({
-      ...opening,
-      offset_m: opening.offset_m * (["north", "south"].includes(opening.wall_id) ? sx : sy)
-    })),
-    rooms: plan.rooms.map((room) => ({
-      ...room,
-      polygon: room.polygon.map((point) => ({ x: point.x * sx, y: point.y * sy }))
-    }))
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys)
   };
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
 }

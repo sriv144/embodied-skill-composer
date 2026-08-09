@@ -13,6 +13,11 @@ __pycache__/
 node_modules/
 .npm-cache/
 workbench/dist/
+workbench/dist-local/
+workbench/dist-static/
+workbench/coverage/
+workbench/playwright-report/
+workbench/test-results/
 output/
 *.tsbuildinfo
 .coverage

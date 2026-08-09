@@ -1,0 +1,13 @@
+{
+  "ablations": [],
+  "acceptance": null,
+  "artifact_references": [],
+  "claim_allowed": false,
+  "confidence_intervals": [],
+  "learning_curves": [],
+  "per_scenario_seed": [],
+  "per_training_seed": [],
+  "reason": "No canonical 20-run research bundle was supplied. Fixture, smoke, and unit evidence are not release claims.",
+  "schema_version": "construction-intelligence-research-summary-v1",
+  "status": "absent"
+}
