@@ -111,6 +111,13 @@ def test_preview_regeneration_is_stable_and_labels_absent_evidence(
 def test_real_default_preview_export_is_byte_reproducible(tmp_path: Path) -> None:
     first = tmp_path / "first"
     second = tmp_path / "second"
+    canonical_house = (
+        Path(__file__).resolve().parents[1]
+        / "workbench"
+        / "public"
+        / "demo"
+        / "house.glb"
+    )
     canonical_robot = (
         Path(__file__).resolve().parents[1]
         / "workbench"
@@ -124,6 +131,7 @@ def test_real_default_preview_export_is_byte_reproducible(tmp_path: Path) -> Non
 
     assert _directory_bytes(first) == _directory_bytes(second)
     assert b"\r\n" not in (first / "report.md").read_bytes()
+    assert (first / "house.glb").read_bytes() == canonical_house.read_bytes()
     assert (first / "construction_robot.glb").read_bytes() == (
         canonical_robot.read_bytes()
     )
