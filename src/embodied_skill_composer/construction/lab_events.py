@@ -83,6 +83,12 @@ class ResumeRequestedEvent(_StrictEvent):
         return self
 
 
+class RestartRequestedEvent(_StrictEvent):
+    event: Literal["restart_requested"]
+    previous_status: Literal["interrupted", "failed", "cancelled"]
+    restart_from_beginning: Literal[True]
+
+
 class WorkerStartedEvent(_StrictEvent):
     event: Literal["worker_started"]
     pid: int = Field(gt=0)
@@ -197,6 +203,7 @@ RunEventPayload = Annotated[
     | RunStateEvent
     | RunFailedEvent
     | ResumeRequestedEvent
+    | RestartRequestedEvent
     | WorkerStartedEvent
     | WorkerLaunchFailedEvent
     | WorkerExitedEvent
