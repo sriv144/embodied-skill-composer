@@ -51,17 +51,17 @@
       "source_kind": "deterministic"
     },
     {
-      "bytes": 580,
+      "bytes": 630,
       "path": "release-status.json",
       "role": "release_status",
-      "sha256": "9175cdb90030142e3ca931055b0f845e273aebdbc1e0d554731c0efcc178482d",
+      "sha256": "2b48e4e876eb7b375df605db0332704a04cf1e4f288e8c1af776d8ab0516de39",
       "source_kind": "generated"
     },
     {
-      "bytes": 4212,
+      "bytes": 4147,
       "path": "report.md",
       "role": "report",
-      "sha256": "e35c56c63df7fe6a8f9cccc77e770cad2f19ad8b1d2a5adea8bb32b6b0f48de2",
+      "sha256": "a120c579034626df164851ad8851c7a1d8c00aa36fe0790983198139c5b4a419",
       "source_kind": "deterministic"
     },
     {
@@ -129,24 +129,26 @@
       "evidence_status": "fixture",
       "kind": "deterministic",
       "manifest_name": "fixture-bundle.json",
-      "manifest_sha256": "85ae4ed73eba817cbd48b85f9e300f65789aea482bf6d0cfd418545a25775c4b",
+      "manifest_sha256": "ca913d21f3a8d17a184d1b0396e25e6ece15e691f2e9c7e622510b49d36c4bef",
       "matrix_id": null,
       "profile": null,
       "protocol_digest": null,
       "source": {
-        "commit": "11b4eef4eba54e5484ae8657dcefa43e8512f664",
+        "commit": "34d435f6354903e6858a51932a7f8f5323b425f2",
         "dirty": true,
-        "tree_digest": "6f2b860abb7caf9cf177d51aeba27cb2315e67ebc28f2f27f4938b66ddd33b0f"
+        "tree_digest": "5ae6d776648f8c57e5f3d5878c43d49a7ff01c03516c003da0fee76d2818dd01"
       }
     }
   ],
-  "manifest_payload_sha256": "08b8dbb27f6a83ddcaf005a53f2f5c1719cffec306344fe714cbcf018080ba20",
+  "manifest_payload_sha256": "702a192a0e9f2156152d39c607b54c9aeefc6714fd11e2e91610ed967cbbb2b3",
   "ordering_strategy": "JSON object keys, input descriptors, and artifact paths are lexicographically sorted.",
+  "release_tag": null,
+  "release_version": null,
   "schema_version": "construction-intelligence-public-demo-provenance-v1",
   "source": {
-    "commit": "11b4eef4eba54e5484ae8657dcefa43e8512f664",
+    "commit": "34d435f6354903e6858a51932a7f8f5323b425f2",
     "dirty": true,
-    "tree_digest": "6f2b860abb7caf9cf177d51aeba27cb2315e67ebc28f2f27f4938b66ddd33b0f"
+    "tree_digest": "5ae6d776648f8c57e5f3d5878c43d49a7ff01c03516c003da0fee76d2818dd01"
   },
   "timestamp_strategy": "No wall-clock time is embedded. generated_at is the fixed Unix epoch; evidence timestamps come only from hash-pinned input bundles."
 }

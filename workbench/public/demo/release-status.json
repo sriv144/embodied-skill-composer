@@ -12,5 +12,7 @@
     "Deterministic content is a reviewed fixture intended for preview use."
   ],
   "release_ready": false,
+  "release_tag": null,
+  "release_version": null,
   "schema_version": "construction-intelligence-public-status-v1"
 }

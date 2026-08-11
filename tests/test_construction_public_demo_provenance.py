@@ -123,6 +123,7 @@ def test_real_default_preview_export_is_byte_reproducible(tmp_path: Path) -> Non
     export_public_demo(second, source=SOURCE)
 
     assert _directory_bytes(first) == _directory_bytes(second)
+    assert b"\r\n" not in (first / "report.md").read_bytes()
     assert (first / "construction_robot.glb").read_bytes() == (
         canonical_robot.read_bytes()
     )

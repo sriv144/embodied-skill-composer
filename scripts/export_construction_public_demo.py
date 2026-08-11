@@ -208,7 +208,11 @@ def _build_fixture_bundle(
         "The generated `release-status.json` and `provenance.json` make those "
         "boundaries machine-readable.\n"
     )
-    (root / "report.md").write_text(report, encoding="utf-8")
+    (root / "report.md").write_text(
+        report,
+        encoding="utf-8",
+        newline="\n",
+    )
 
     role_targets = {
         "project": "project.json",
