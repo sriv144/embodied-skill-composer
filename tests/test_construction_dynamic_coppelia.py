@@ -9,6 +9,8 @@ import pytest
 
 from embodied_skill_composer.construction.compiler import compile_house_design
 from embodied_skill_composer.construction.coppelia_dynamic import (
+    CONSTRUCTION_FLOOR_THICKNESS_M,
+    CONSTRUCTION_FLOOR_TOP_Z_M,
     DynamicCoppeliaConfig,
     DynamicCoppeliaError,
     DynamicCoppeliaExecutor,
@@ -202,8 +204,25 @@ class FakeDynamicSim:
 
     def setObjectPosition(self, handle: int, position) -> None:
         values = list(position)
+        previous = self.positions.get(handle)
         self.positions[handle] = values
         self.position_writes.append((self.state, handle, values))
+        if previous is None:
+            return
+        delta = [values[index] - previous[index] for index in range(3)]
+        pending_parents = [handle]
+        while pending_parents:
+            parent = pending_parents.pop()
+            for child, child_parent in tuple(self.parents.items()):
+                if child_parent != parent:
+                    continue
+                child_position = self.positions.get(child)
+                if child_position is not None:
+                    self.positions[child] = [
+                        child_position[index] + delta[index]
+                        for index in range(3)
+                    ]
+                pending_parents.append(child)
 
     def getObjectPosition(self, handle: int):
         return self.positions.get(handle, [0.0, 0.0, 0.05])
@@ -362,6 +381,16 @@ def test_dynamic_executor_commands_wheels_without_post_start_pose_sync(plan) -> 
         }
         for item in executor.script_control_audit
     )
+    floor_handle = next(
+        handle
+        for handle, alias in fake.sim.aliases.items()
+        if alias == "construction_intelligence_floor"
+    )
+    floor_center_z = fake.sim.positions[floor_handle][2]
+    assert floor_center_z == pytest.approx(
+        CONSTRUCTION_FLOOR_TOP_Z_M - CONSTRUCTION_FLOOR_THICKNESS_M / 2
+    )
+    assert floor_center_z + CONSTRUCTION_FLOOR_THICKNESS_M / 2 == pytest.approx(0.0)
     assert any(item[1:] == (fake.sim.shapeintparam_respondable, 1) for item in fake.sim.int_params)
     assert all(set(wheels) == {"fl", "rl", "rr", "fr"} for wheels in executor.wheel_handles.values())
 
@@ -909,6 +938,18 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
             "live_gate_passed": True,
             "metrics": live_metrics,
         }
+    )
+    import embodied_skill_composer.construction.coppelia_phase5 as phase5
+
+    phase5._verify_passing_phase5_evidence(
+        scenario=scenario,
+        result=live_result,
+        replay=live_result.replay,
+        commands=executor.commands,
+        telemetry=executor.telemetry,
+        trace=live_result.trace,
+        config=executor.config,
+        physical_yard=physical_yard,
     )
     live_dir = tmp_path / "synthetic-live-nominal"
     with pytest.raises(ValueError, match="runtime-origin attestation"):

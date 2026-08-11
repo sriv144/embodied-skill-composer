@@ -3976,6 +3976,7 @@ class Phase5FullCottageRunner:
             },
             contact_module_ids=contact_module_ids,
         )
+        carry_telemetry_end = len(self.executor.telemetry)
         installed_at_s = self.executor.simulation_time_s
         if not self.executor.logical_installation_snap_records:
             raise DynamicCoppeliaError(
@@ -4029,7 +4030,9 @@ class Phase5FullCottageRunner:
             for robot_id, point in return_robot_positions_xy.items()
         }
         measured = self.executor.telemetry[telemetry_start:]
-        carry_measurements = self.executor.telemetry[carry_telemetry_start:]
+        carry_measurements = self.executor.telemetry[
+            carry_telemetry_start:carry_telemetry_end
+        ]
         measured_carry_samples = {
             robot_id: [
                 item

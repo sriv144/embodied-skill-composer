@@ -23,6 +23,10 @@ WHEEL_NAMES = ("fl", "rl", "rr", "fr")
 COPPELIA_SCENE_MAGIC = b"VREP"
 MINIMUM_COPPELIA_SCENE_BYTES = 128
 GENERATED_SCENE_ROOT_ALIAS = "ESCConstructionIntelligenceV1"
+# Match Coppelia's default ground plane and module-bottom convention so the
+# generated site cannot create an unmonitored step at the default-floor seam.
+CONSTRUCTION_FLOOR_TOP_Z_M = 0.0
+CONSTRUCTION_FLOOR_THICKNESS_M = 0.12
 RobotCommandSource = Literal[
     "settling",
     "path_follower",
@@ -1709,12 +1713,12 @@ class DynamicCoppeliaExecutor:
             (
                 (grid_min_x + grid_max_x) / 2,
                 (grid_min_y + grid_max_y) / 2,
-                -0.08,
+                CONSTRUCTION_FLOOR_TOP_Z_M - CONSTRUCTION_FLOOR_THICKNESS_M / 2,
             ),
             (
                 grid_max_x - grid_min_x,
                 grid_max_y - grid_min_y,
-                0.12,
+                CONSTRUCTION_FLOOR_THICKNESS_M,
             ),
             (0.12, 0.15, 0.14),
         )
