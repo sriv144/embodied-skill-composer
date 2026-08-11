@@ -913,6 +913,77 @@ class LabRegistry:
         self.append_event(run_id, event)
         return True
 
+    def request_restart(self, run_id: str) -> bool:
+        """Requeue a never-started training attempt after an operational failure.
+
+        This deliberately does not broaden checkpoint resume semantics. A restart is
+        only safe when the durable record proves that no training progress or
+        resumable checkpoint exists and no worker still owns the run.
+        """
+
+        created_at = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT kind, status, progress, latest_checkpoint, pid,
+                    process_identity, claim_token, event_log_path
+                FROM runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["kind"]) != "training"
+                or str(row["status"]) not in RESUMABLE_RUN_STATUSES
+                or row["latest_checkpoint"] is not None
+                or float(row["progress"]) != 0.0
+                or row["pid"] is not None
+                or row["process_identity"] is not None
+                or row["claim_token"] is not None
+            ):
+                return False
+
+            previous_status = str(row["status"])
+            event = _validated_event_payload(
+                {
+                    "event": "restart_requested",
+                    "previous_status": previous_status,
+                    "restart_from_beginning": True,
+                }
+            )
+            cursor = connection.execute(
+                """
+                UPDATE runs SET status = 'resuming', cancel_requested = 0,
+                    error = NULL, started_at = NULL, ended_at = NULL,
+                    interrupted_at = NULL, progress = 0, artifact_dir = NULL,
+                    heartbeat_at = NULL, pid = NULL, process_identity = NULL,
+                    claim_token = NULL
+                WHERE id = ? AND kind = 'training'
+                    AND status IN ('interrupted', 'failed', 'cancelled')
+                    AND latest_checkpoint IS NULL AND progress = 0
+                    AND pid IS NULL AND process_identity IS NULL
+                    AND claim_token IS NULL
+                """,
+                (run_id,),
+            )
+            if cursor.rowcount != 1:
+                return False
+            sequence = _insert_event(
+                connection,
+                run_id,
+                created_at=created_at,
+                serialized_payload=_json(event),
+            )
+            event_log_path = row["event_log_path"]
+        _write_event_log_record(
+            event_log_path,
+            sequence=sequence,
+            created_at=created_at,
+            payload=event,
+        )
+        return True
+
     def cancel_requested(self, run_id: str) -> bool:
         with self._connect() as connection:
             row = connection.execute(
