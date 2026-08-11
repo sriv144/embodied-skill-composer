@@ -116,12 +116,15 @@ def _build_fixture_bundle(
     }
     trace_dir = root / "traces"
     trace_dir.mkdir(parents=True, exist_ok=True)
-    house_source = (
+    canonical_house = WORKSPACE / "workbench" / "public" / "demo" / "house.glb"
+    generated_house = (
         WORKSPACE / "artifacts" / "construction_v2" / "cottage_v1" / "house.glb"
     )
+    house_source = canonical_house if canonical_house.is_file() else generated_house
     if not house_source.is_file():
         raise FileNotFoundError(
-            "Generate the cottage first with scripts/generate_construction_assets.py"
+            "The reviewed canonical cottage asset is missing and no generated "
+            "fallback exists. Run scripts/generate_construction_assets.py."
         )
     shutil.copyfile(house_source, root / "house.glb")
     robot_path = root / "construction_robot.glb"
