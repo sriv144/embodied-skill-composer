@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 from typing import cast
@@ -16,7 +17,9 @@ from embodied_skill_composer.construction.api import (
     create_app,
 )
 from embodied_skill_composer.construction.coppelia_phase5 import (
+    Phase5ArtifactRecord,
     Phase5ProvenanceManifest,
+    Phase5RuntimeAttestation,
 )
 from embodied_skill_composer.construction import workbench_evidence
 from embodied_skill_composer.construction.lab_registry import LabRegistry
@@ -869,6 +872,35 @@ def _phase5_manifest(
     *,
     scenario_seed: int = 900,
 ) -> Phase5ProvenanceManifest:
+    scenario_id = f"cottage-v1-seed-{scenario_seed}"
+    attestation = _phase5_runtime_attestation(
+        run_id=run_id,
+        scenario_id=scenario_id,
+        scenario_seed=scenario_seed,
+    )
+    attestation_bytes = (
+        json.dumps(
+            attestation.model_dump(mode="json"),
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+    artifacts = [
+        Phase5ArtifactRecord(
+            path=path,
+            sha256=digest,
+            bytes=1,
+        )
+        for path, digest in sorted(attestation.artifact_sha256.items())
+    ]
+    artifacts.append(
+        Phase5ArtifactRecord(
+            path="runtime_attestation.json",
+            sha256=hashlib.sha256(attestation_bytes).hexdigest(),
+            bytes=len(attestation_bytes),
+        )
+    )
     return Phase5ProvenanceManifest.model_validate(
         {
             "run_id": run_id,
@@ -879,7 +911,7 @@ def _phase5_manifest(
             "live_gate_passed": True,
             "approval_gate_confirmed": True,
             "scenario": scenario,
-            "scenario_id": "cottage-v1-seed-900",
+            "scenario_id": scenario_id,
             "scenario_seed": scenario_seed,
             "source_commit": "1" * 40,
             "source_dirty": False,
@@ -887,11 +919,113 @@ def _phase5_manifest(
             "plan_digest": "3" * 64,
             "configuration_digest": "4" * 64,
             "simulator_version": "CoppeliaSim fixture",
+            "runtime_attestation_digest": hashlib.sha256(attestation_bytes).hexdigest(),
             "payload_transport_model": "logical_carrier",
             "limitations": ["Payload transport is logical."],
-            "artifacts": [],
+            "artifacts": artifacts,
         }
     )
+
+
+def _phase5_runtime_attestation(
+    *,
+    run_id: str,
+    scenario_id: str,
+    scenario_seed: int,
+) -> Phase5RuntimeAttestation:
+    client_uuid = "00000000-0000-4000-8000-000000000001"
+    configuration_origin_digest = "5" * 64
+    session_nonce = "6" * 64
+    remote_api_info_sha256 = "7" * 64
+    simulator_version = "CoppeliaSim fixture"
+    challenge = {
+        "schema_version": ("construction_intelligence.coppelia_runtime_challenge.v1"),
+        "session_nonce": session_nonce,
+        "client_uuid": client_uuid,
+        "endpoint": {"host": "127.0.0.1", "port": 23000},
+        "plan_digest": "3" * 64,
+        "configuration_origin_digest": configuration_origin_digest,
+        "scene_root_uid": 1,
+        "remote_api_info_sha256": remote_api_info_sha256,
+        "simulator_version": simulator_version,
+    }
+    challenge_digest = _sha256_json(challenge)
+    artifact_sha256 = {
+        name: hashlib.sha256(name.encode()).hexdigest()
+        for name in (
+            "construction_intelligence.ttt",
+            "measured_telemetry.jsonl",
+            "metrics.json",
+            "planned_jobs.json",
+            "planned_vs_measured_replay.json",
+            "report.md",
+            "scenario.json",
+            "trace.json",
+            "wheel_commands.jsonl",
+        )
+    }
+    payload: dict[str, object] = {
+        "schema_version": ("construction_intelligence.coppelia_runtime_attestation.v1"),
+        "run_id": run_id,
+        "scenario_id": scenario_id,
+        "scenario_seed": scenario_seed,
+        "source_commit": "1" * 40,
+        "source_tree_digest": "2" * 64,
+        "plan_digest": "3" * 64,
+        "configuration_digest": "4" * 64,
+        "configuration_origin_digest": configuration_origin_digest,
+        "transport": "coppeliasim_zmq_remote_api",
+        "client_implementation": ("coppeliasim_zmqremoteapi_client.RemoteAPIClient"),
+        "remote_api_client_version": "fixture-client-1.0",
+        "remote_api_protocol_version": 1,
+        "client_uuid": client_uuid,
+        "client_send_count_before": 10,
+        "client_send_count_after": 20,
+        "endpoint_host": "127.0.0.1",
+        "endpoint_port": 23000,
+        "remote_api_capabilities": [
+            "getObjectUid",
+            "getSimulationState",
+            "getSimulationTime",
+            "readCustomDataBlock",
+            "saveScene",
+            "writeCustomDataBlock",
+        ],
+        "remote_api_info_sha256": remote_api_info_sha256,
+        "simulator_version": simulator_version,
+        "simulator_identity_source": "string_parameter",
+        "simulator_program_version": None,
+        "simulator_program_revision": None,
+        "scene_root_handle": -1,
+        "scene_root_uid": 1,
+        "simulation_stopped_state": 0,
+        "simulation_state_before": 0,
+        "simulation_state_after": 0,
+        "simulation_time_before_s": 0.0,
+        "simulation_time_after_s": 10.0,
+        "session_nonce": session_nonce,
+        "challenge_tag": "construction_intelligence.phase5.fixture",
+        "challenge_payload_sha256": challenge_digest,
+        "challenge_response_sha256": challenge_digest,
+        "physics_steps": 100,
+        "command_count": 40,
+        "telemetry_count": 80,
+        "command_stream_sha256": "8" * 64,
+        "telemetry_stream_sha256": "9" * 64,
+        "installed_module_ids": ["foundation_0_0"],
+        "artifact_sha256": artifact_sha256,
+    }
+    payload["binding_digest"] = _sha256_json(payload)
+    return Phase5RuntimeAttestation.model_validate(payload)
+
+
+def _sha256_json(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_passing_metrics(root: Path, scenario: str) -> None:

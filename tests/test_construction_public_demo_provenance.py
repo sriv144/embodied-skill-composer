@@ -3,11 +3,13 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
+import embodied_skill_composer.construction.coppelia_phase5 as phase5
 from embodied_skill_composer.construction.coppelia_dynamic import (
     DynamicCoppeliaConfig,
     DynamicCoppeliaExecutor,
@@ -48,7 +50,10 @@ from embodied_skill_composer.construction.scenarios import (
     CottageScenarioConfig,
     generate_cottage_scenario,
 )
-from tests.test_construction_dynamic_coppelia import FakeDynamicClient
+from tests.test_construction_dynamic_coppelia import (
+    FakeDynamicClient,
+    FakeDynamicSim,
+)
 
 from scripts.export_construction_public_demo import export_public_demo
 
@@ -69,6 +74,101 @@ VARIANTS = (
     ("mappo_no_bc", "mappo"),
     ("mappo_no_failure_curriculum", "mappo"),
 )
+SIMULATOR_VERSION = "CoppeliaSim coherent test fixture"
+
+
+class _AttestedDynamicSim(FakeDynamicSim):
+    stringparam_application_version = 10
+
+    def __init__(self, client: _AttestedDynamicClient) -> None:
+        super().__init__()
+        self.client = client
+        self.custom_data: dict[tuple[int, str], bytes] = {}
+
+    def _bump_remote_call(self) -> None:
+        self.client.sendCnt += 1
+
+    def getStringParam(self, parameter: int) -> str:
+        self._bump_remote_call()
+        assert parameter == self.stringparam_application_version
+        return SIMULATOR_VERSION
+
+    def getObjectUid(self, handle: int) -> int:
+        self._bump_remote_call()
+        return 9_000 + handle
+
+    def getSimulationTime(self) -> float:
+        self._bump_remote_call()
+        return self.client.steps * (self.time_step or 0.05)
+
+    def writeCustomDataBlock(
+        self,
+        handle: int,
+        tag: str,
+        payload: bytes,
+    ) -> None:
+        self._bump_remote_call()
+        self.custom_data[(handle, tag)] = bytes(payload)
+
+    def readCustomDataBlock(self, handle: int, tag: str) -> bytes:
+        self._bump_remote_call()
+        return self.custom_data[(handle, tag)]
+
+
+class _AttestedDynamicClient(FakeDynamicClient):
+    uuid = "12345678-1234-4234-9234-123456789abc"
+    VERSION = 2
+
+    def __init__(self) -> None:
+        self.sendCnt = 0
+        super().__init__()
+        self.sim = _AttestedDynamicSim(self)
+
+    def call(self, function: str, arguments: list[str]) -> dict[str, object]:
+        self.sendCnt += 1
+        assert function == "zmqRemoteApi.info"
+        assert arguments == ["sim"]
+        return {
+            capability: {"func": []}
+            for capability in phase5._LIVE_REQUIRED_REMOTE_API_CAPABILITIES
+        }
+
+
+def _patch_official_client_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def identity(
+        executor: DynamicCoppeliaExecutor,
+    ) -> phase5._OfficialRemoteClientIdentity:
+        client = executor.client
+        assert isinstance(client, _AttestedDynamicClient)
+        return phase5._OfficialRemoteClientIdentity(
+            client_uuid=client.uuid,
+            protocol_version=client.VERSION,
+            package_version="2.0.4",
+            send_count=client.sendCnt,
+        )
+
+    monkeypatch.setattr(phase5, "_official_remote_client_identity", identity)
+
+
+@pytest.fixture(scope="module")
+def attested_simulator_bundle_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        return _simulator_bundle(
+            tmp_path_factory.mktemp("attested-simulator") / "simulator",
+            monkeypatch,
+        )
+    finally:
+        monkeypatch.undo()
+
+
+def _copy_simulator_bundle(template: Path, root: Path) -> Path:
+    shutil.copytree(template.parent, root)
+    return root / template.name
 
 
 def test_preview_regeneration_is_stable_and_labels_absent_evidence(
@@ -389,6 +489,7 @@ def test_release_ties_heldout_episodes_to_selected_checkpoint_lineage(
 
 def test_release_export_covers_every_emitted_artifact_and_round_trips(
     tmp_path: Path,
+    attested_simulator_bundle_template: Path,
 ) -> None:
     deterministic = _deterministic_bundle(
         tmp_path / "deterministic",
@@ -396,7 +497,10 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
         complete=True,
     )
     research = _research_bundle(tmp_path / "research")
-    simulator = _simulator_bundle(tmp_path / "simulator")
+    simulator = _copy_simulator_bundle(
+        attested_simulator_bundle_template,
+        tmp_path / "simulator",
+    )
     output = tmp_path / "public"
 
     manifest = export_public_demo_bundle(
@@ -760,42 +864,29 @@ def test_release_refuses_internal_source_commit_mismatch(tmp_path: Path) -> None
         )
 
 
-def test_release_refuses_a_declared_simulator_gate_failure(tmp_path: Path) -> None:
+def test_release_refuses_a_declared_simulator_gate_failure(
+    tmp_path: Path,
+    attested_simulator_bundle_template: Path,
+) -> None:
     deterministic = _deterministic_bundle(
         tmp_path / "deterministic",
         status="canonical",
         complete=True,
     )
     research = _research_bundle(tmp_path / "research")
-    simulator = _simulator_bundle(tmp_path / "simulator")
+    simulator = _copy_simulator_bundle(
+        attested_simulator_bundle_template,
+        tmp_path / "simulator",
+    )
     nominal_path = tmp_path / "simulator" / "nominal" / "metrics.json"
     nominal = _read_json(nominal_path)
     nominal["metrics"]["collision_stops"] = 1
     _write_json(nominal_path, nominal)
-    phase5_manifest_path = tmp_path / "simulator" / "nominal" / "manifest.json"
-    phase5_manifest = _read_json(phase5_manifest_path)
-    metrics_record = next(
-        item
-        for item in phase5_manifest["artifacts"]
-        if item["path"] == "metrics.json"
+    _rehash_native_phase5_file(
+        simulator,
+        prefix="nominal",
+        file_name="metrics.json",
     )
-    metrics_record["sha256"] = _sha256(nominal_path)
-    metrics_record["bytes"] = nominal_path.stat().st_size
-    _write_json(phase5_manifest_path, phase5_manifest)
-    descriptor = _read_json(simulator)
-    metrics_artifact = next(
-        item
-        for item in descriptor["artifacts"]
-        if item["role"] == "nominal_metrics"
-    )
-    metrics_artifact["sha256"] = _sha256(nominal_path)
-    manifest_artifact = next(
-        item
-        for item in descriptor["artifacts"]
-        if item["role"] == "nominal_manifest"
-    )
-    manifest_artifact["sha256"] = _sha256(phase5_manifest_path)
-    _write_json(simulator, descriptor)
 
     with pytest.raises(
         PublicDemoExportError,
@@ -813,14 +904,20 @@ def test_release_refuses_a_declared_simulator_gate_failure(tmp_path: Path) -> No
         )
 
 
-def test_release_rejects_rehashed_non_coppelia_scene_bytes(tmp_path: Path) -> None:
+def test_release_rejects_rehashed_non_coppelia_scene_bytes(
+    tmp_path: Path,
+    attested_simulator_bundle_template: Path,
+) -> None:
     deterministic = _deterministic_bundle(
         tmp_path / "deterministic",
         status="canonical",
         complete=True,
     )
     research = _research_bundle(tmp_path / "research")
-    simulator = _simulator_bundle(tmp_path / "simulator")
+    simulator = _copy_simulator_bundle(
+        attested_simulator_bundle_template,
+        tmp_path / "simulator",
+    )
     scene_path = (
         tmp_path
         / "simulator"
@@ -852,6 +949,7 @@ def test_release_rejects_rehashed_non_coppelia_scene_bytes(tmp_path: Path) -> No
 
 def test_release_rejects_rehashed_collision_booleans_without_raw_rounds(
     tmp_path: Path,
+    attested_simulator_bundle_template: Path,
 ) -> None:
     deterministic = _deterministic_bundle(
         tmp_path / "deterministic",
@@ -859,7 +957,10 @@ def test_release_rejects_rehashed_collision_booleans_without_raw_rounds(
         complete=True,
     )
     research = _research_bundle(tmp_path / "research")
-    simulator = _simulator_bundle(tmp_path / "simulator")
+    simulator = _copy_simulator_bundle(
+        attested_simulator_bundle_template,
+        tmp_path / "simulator",
+    )
     trace_path = tmp_path / "simulator" / "nominal" / "trace.json"
     trace = _read_json(trace_path)
     assert isinstance(trace, list)
@@ -1363,8 +1464,12 @@ def _checkpoint_identity(
     }
 
 
-def _simulator_bundle(root: Path) -> Path:
+def _simulator_bundle(
+    root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path:
     root.mkdir(parents=True)
+    _patch_official_client_identity(monkeypatch)
     role_targets: dict[str, str] = {}
     source_paths: dict[str, str] = {}
     configuration_digests: list[str] = []
@@ -1402,7 +1507,7 @@ def _simulator_bundle(root: Path) -> Path:
         ("recovery", "unavailable_robot_recovery"),
     ):
         run_dir = root / prefix
-        fake = FakeDynamicClient()
+        fake = _AttestedDynamicClient()
         executor = DynamicCoppeliaExecutor(
             cottage.plan,
             config=DynamicCoppeliaConfig(
@@ -1420,27 +1525,15 @@ def _simulator_bundle(root: Path) -> Path:
             client_factory=lambda _config, fake=fake: fake,
         )
         executor.connect()
-        offline = Phase5FullCottageRunner(
+        executor.client_factory = None
+        live = Phase5FullCottageRunner(
             executor,
             cottage,
+            evidence_kind="live_coppelia",
             physical_yard=physical_yard,
         ).run(scenario)
-        assert offline.status == "completed"
-        live_metrics = dict(offline.metrics)
-        live_metrics.update(
-            {
-                "payload_transport": "logical_carrier",
-                "live_evidence": True,
-                "live_gate_passed": True,
-            }
-        )
-        live = offline.model_copy(
-            update={
-                "evidence_kind": "live_coppelia",
-                "live_gate_passed": True,
-                "metrics": live_metrics,
-            }
-        )
+        assert live.status == "completed"
+        assert live.live_gate_passed
         phase5_manifest = write_phase5_artifact_bundle(
             run_dir,
             run_id=f"synthetic-live-{prefix}",
@@ -1449,8 +1542,9 @@ def _simulator_bundle(root: Path) -> Path:
             executor=executor,
             source_commit=SOURCE.commit,
             source_tree_digest=SOURCE.tree_digest,
+            source_dirty=False,
             approval_gate_confirmed=True,
-            simulator_version="CoppeliaSim coherent test fixture",
+            simulator_version=SIMULATOR_VERSION,
         )
         configuration_digests.append(phase5_manifest.configuration_digest)
         for artifact, file_name in role_files.items():
@@ -1577,6 +1671,22 @@ def _rehash_native_phase5_file(
     manifest_path = run_dir / "manifest.json"
     phase5_manifest = _read_json(manifest_path)
     assert isinstance(phase5_manifest, dict)
+
+    attestation_path = run_dir / "runtime_attestation.json"
+    attestation = _read_json(attestation_path)
+    assert isinstance(attestation, dict)
+    artifact_sha256 = attestation["artifact_sha256"]
+    assert isinstance(artifact_sha256, dict)
+    artifact_sha256[file_name] = _sha256(changed_path)
+    attestation["binding_digest"] = phase5._sha256_json(
+        {
+            key: value
+            for key, value in attestation.items()
+            if key != "binding_digest"
+        }
+    )
+    _write_json(attestation_path, attestation)
+
     artifact = next(
         item
         for item in phase5_manifest["artifacts"]
@@ -1584,6 +1694,15 @@ def _rehash_native_phase5_file(
     )
     artifact["sha256"] = _sha256(changed_path)
     artifact["bytes"] = changed_path.stat().st_size
+    attestation_digest = _sha256(attestation_path)
+    phase5_manifest["runtime_attestation_digest"] = attestation_digest
+    attestation_artifact = next(
+        item
+        for item in phase5_manifest["artifacts"]
+        if item["path"] == attestation_path.name
+    )
+    attestation_artifact["sha256"] = attestation_digest
+    attestation_artifact["bytes"] = attestation_path.stat().st_size
     _write_json(manifest_path, phase5_manifest)
 
     descriptor = _read_json(descriptor_path)
