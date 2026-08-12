@@ -27,6 +27,8 @@ The [completion roadmap](roadmap.md) is the authoritative source for gate status
 - Deterministic simulator and training environments retain privileged task state. V1 does not claim
   complete perception-only autonomy.
 - CoppeliaSim must be started for live gates and its ZeroMQ API must be reachable on loopback.
+- Release MP4s are deterministic top-down visualizations reconstructed from attested measured base
+  telemetry. They are not simulator-camera footage and do not add physical payload/contact claims.
 
 ## Design and construction scope
 

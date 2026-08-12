@@ -100,6 +100,7 @@ _SIMULATOR_FILENAMES = {
     "metrics": ("metrics.json", "application/json"),
     "report": ("report.md", "text/markdown"),
     "scene": ("construction_intelligence.ttt", "application/octet-stream"),
+    "video": ("evidence_replay.mp4", "video/mp4"),
 }
 _SIMULATOR_ROLES = {
     f"{scenario}_{artifact}"
@@ -108,7 +109,11 @@ _SIMULATOR_ROLES = {
 }
 _SIMULATOR_ARTIFACT_CONTRACTS = {
     f"{scenario}_{artifact}": (
-        f"evidence/coppelia/{scenario}/{file_name}",
+        (
+            f"evidence/coppelia/visualizations/{scenario}.mp4"
+            if artifact == "video"
+            else f"evidence/coppelia/{scenario}/{file_name}"
+        ),
         media_type,
     )
     for scenario in ("nominal", "recovery")
@@ -1419,6 +1424,8 @@ def _validate_simulator(bundle: _LoadedBundle) -> _ValidatedSimulator:
         raise PublicDemoExportError(
             f"Coppelia evidence does not pass all declared gates: {exc}"
         ) from exc
+    _verify_simulator_video(bundle.files["nominal_video"], "nominal")
+    _verify_simulator_video(bundle.files["recovery_video"], "recovery")
     return _ValidatedSimulator(
         nominal_manifest=nominal_manifest,
         recovery_manifest=recovery_manifest,
@@ -1476,6 +1483,29 @@ def _verify_native_phase5_bundle(
             f"{descriptor_prefix} Phase 5 manifest does not attest a passing live run"
         )
     return phase5
+
+
+def _verify_simulator_video(path: Path, scenario: str) -> None:
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(32)
+        size = path.stat().st_size
+        if (
+            size < 1_024
+            or size > 512 * 1024 * 1024
+            or len(header) < 12
+            or header[4:8] != b"ftyp"
+        ):
+            raise ValueError("invalid MP4 container")
+        import imageio.v3 as imageio
+
+        frame = imageio.imread(path, index=0)
+        if frame.ndim != 3 or frame.shape[0] < 240 or frame.shape[1] < 320:
+            raise ValueError("invalid first frame")
+    except (OSError, ValueError) as exc:
+        raise PublicDemoExportError(
+            f"{scenario} Coppelia evidence replay video is invalid: {exc}"
+        ) from exc
 
 
 def _validate_phase5_metrics(
@@ -1784,6 +1814,7 @@ def _artifact_references_for_prefix(
         "wheel_commands": "Wheel commands",
         "trace": "Execution trace",
         "scene": "Reusable Coppelia scene",
+        "video": "Measured evidence replay",
     }
     return _artifact_references_for_roles(
         bundle,

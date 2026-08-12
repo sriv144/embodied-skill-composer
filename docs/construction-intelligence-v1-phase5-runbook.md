@@ -178,6 +178,12 @@ failure record is stored in a sibling `<run-id>-diagnostics` directory so the ex
 native artifact inventory remains verifiable; earlier failures without a native
 manifest store the record directly in the run directory.
 
+After both native directories pass verification, run
+`scripts/package_construction_coppelia_evidence.py` to create the canonical simulator descriptor
+and `evidence_replay.mp4` for each scenario. The renderer uses only measured robot-base telemetry,
+the generated scenario, and the typed planned-versus-measured replay. Its overlay states that
+payload motion is logical and makes no arm, gripper, grasp-contact, or payload-dynamics claim.
+
 The manifest schema is
 `construction_intelligence.coppelia_bundle.v1`. Every artifact except the manifest
 itself has a SHA-256 digest and byte count. The run result schema is

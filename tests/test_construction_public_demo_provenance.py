@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+import numpy as np
 
 import embodied_skill_composer.construction.coppelia_phase5 as phase5
 from embodied_skill_composer.construction.coppelia_dynamic import (
@@ -18,6 +19,10 @@ from embodied_skill_composer.construction.coppelia_phase5 import (
     Phase5FullCottageRunner,
     prepare_phase5_physical_yard,
     write_phase5_artifact_bundle,
+)
+from embodied_skill_composer.construction.coppelia_replay_video import (
+    package_coppelia_release_evidence,
+    verify_coppelia_replay_video,
 )
 from embodied_skill_composer.construction.evaluation import (
     ControllerEvaluation,
@@ -558,12 +563,44 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
         references = coppelia_summary[scenario]["artifact_references"]
         assert references
         assert all(
-            item["path"].startswith(f"evidence/coppelia/{scenario}/")
+            (
+                item["path"].startswith(f"evidence/coppelia/{scenario}/")
+                or item["path"]
+                == f"evidence/coppelia/visualizations/{scenario}.mp4"
+            )
             and Path(item["path"]).suffix
             for item in references
         )
     assert len(_read_json(output / "experiment-matrices.json")) == 1
     assert len(_read_json(output / "policies.json")) == 20
+
+
+def test_coppelia_release_packager_renders_deterministic_measured_videos(
+    tmp_path: Path,
+    attested_simulator_bundle_template: Path,
+) -> None:
+    native_root = attested_simulator_bundle_template.parent
+    first = package_coppelia_release_evidence(
+        tmp_path / "first",
+        nominal_bundle=native_root / "nominal",
+        recovery_bundle=native_root / "recovery",
+        fps=2,
+        duration_s=1,
+    )
+    second = package_coppelia_release_evidence(
+        tmp_path / "second",
+        nominal_bundle=native_root / "nominal",
+        recovery_bundle=native_root / "recovery",
+        fps=2,
+        duration_s=1,
+    )
+
+    assert _read_json(first) == _read_json(second)
+    for scenario in ("nominal", "recovery"):
+        first_video = first.parent / "videos" / f"{scenario}.mp4"
+        second_video = second.parent / "videos" / f"{scenario}.mp4"
+        verify_coppelia_replay_video(first_video)
+        assert first_video.read_bytes() == second_video.read_bytes()
 
 
 def test_input_and_output_tampering_are_rejected(tmp_path: Path) -> None:
@@ -935,6 +972,37 @@ def test_release_rejects_rehashed_non_coppelia_scene_bytes(
         PublicDemoExportError,
         match="bundle verification failed.*scene",
     ):
+        export_public_demo_bundle(
+            tmp_path / "release",
+            deterministic_bundle=deterministic,
+            research_bundle=research,
+            simulator_bundle=simulator,
+            source=SOURCE,
+            channel="release",
+            release_version=RELEASE_VERSION,
+            release_tag=RELEASE_TAG,
+        )
+
+
+def test_release_rejects_rehashed_invalid_coppelia_video(
+    tmp_path: Path,
+    attested_simulator_bundle_template: Path,
+) -> None:
+    deterministic = _deterministic_bundle(
+        tmp_path / "deterministic",
+        status="canonical",
+        complete=True,
+    )
+    research = _research_bundle(tmp_path / "research")
+    simulator = _copy_simulator_bundle(
+        attested_simulator_bundle_template,
+        tmp_path / "simulator",
+    )
+    video_path = tmp_path / "simulator" / "videos" / "nominal.mp4"
+    video_path.write_bytes(b"not an MP4, despite a freshly updated descriptor hash")
+    _rehash_research_files(simulator, "nominal_video")
+
+    with pytest.raises(PublicDemoExportError, match="replay video is invalid"):
         export_public_demo_bundle(
             tmp_path / "release",
             deterministic_bundle=deterministic,
@@ -1484,6 +1552,7 @@ def _simulator_bundle(
         "metrics": "metrics.json",
         "report": "report.md",
         "scene": "construction_intelligence.ttt",
+        "video": "evidence_replay.mp4",
     }
     workspace = Path(__file__).resolve().parents[1]
     design = load_house_design(
@@ -1546,11 +1615,22 @@ def _simulator_bundle(
             approval_gate_confirmed=True,
             simulator_version=SIMULATOR_VERSION,
         )
+        video_path = root / "videos" / f"{prefix}.mp4"
+        video_path.parent.mkdir(exist_ok=True)
+        _write_test_video(video_path)
         configuration_digests.append(phase5_manifest.configuration_digest)
         for artifact, file_name in role_files.items():
             role = f"{prefix}_{artifact}"
-            source_paths[role] = f"{prefix}/{file_name}"
-            role_targets[role] = f"evidence/coppelia/{prefix}/{file_name}"
+            source_paths[role] = (
+                f"videos/{prefix}.mp4"
+                if artifact == "video"
+                else f"{prefix}/{file_name}"
+            )
+            role_targets[role] = (
+                f"evidence/coppelia/visualizations/{prefix}.mp4"
+                if artifact == "video"
+                else f"evidence/coppelia/{prefix}/{file_name}"
+            )
     return _write_bundle(
         root,
         kind="simulator",
@@ -1656,8 +1736,26 @@ def _fixture_media_type(target: str) -> str:
         ".json": "application/json",
         ".jsonl": "application/x-ndjson",
         ".md": "text/markdown",
+        ".mp4": "video/mp4",
         ".ttt": "application/octet-stream",
     }.get(Path(target).suffix.lower(), "application/octet-stream")
+
+
+def _write_test_video(path: Path) -> None:
+    import imageio.v2 as imageio
+
+    first = np.zeros((240, 320, 3), dtype=np.uint8)
+    first[24:216, 24:296] = (32, 92, 148)
+    second = first.copy()
+    second[96:144, 136:184] = (245, 184, 68)
+    imageio.mimsave(
+        path,
+        [first, second],
+        fps=2,
+        codec="libx264",
+        macro_block_size=16,
+        ffmpeg_params=["-threads", "1"],
+    )
 
 
 def _rehash_native_phase5_file(

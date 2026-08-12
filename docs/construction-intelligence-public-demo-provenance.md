@@ -135,13 +135,16 @@ A canonical research summary contains the held-out hierarchical confidence inter
 per-training-seed and per-scenario-seed tables, checkpoint-validation learning curves, primary
 acceptance decisions, both pre-registered ablation interpretations, and concrete links to
 individual hash-pinned files. A canonical simulator summary contains independently verified
-nominal and unavailable-robot recovery manifests, metrics, and individual file links. It sets
-`ready: true` only when both native live gates pass.
+nominal and unavailable-robot recovery manifests, metrics, measured-telemetry replay videos, and
+individual file links. It sets `ready: true` only when both native live gates pass and both MP4
+files decode successfully.
 
 Every public link is a safe path below the exported bundle. Research and simulator descriptors
-must match the exact v1 role-to-target and media-type contracts: JSON, JSONL, CSV, Markdown, and
-the binary Coppelia scene are allowed, while HTML, SVG, XML, JavaScript, CSS, and other same-origin
-active content cannot be published under an evidence link. The local API uses an equivalent
+must match the exact v1 role-to-target and media-type contracts: JSON, JSONL, CSV, Markdown, MP4,
+and the binary Coppelia scene are allowed, while HTML, SVG, XML, JavaScript, CSS, and other
+same-origin active content cannot be published under an evidence link. MP4 files are generated
+from attested base telemetry and explicitly label payload transport as logical; they are not
+simulator-camera recordings or evidence of arm, gripper, or contact physics. The local API uses an equivalent
 file-level contract under `/api/lab/.../artifacts/<file>` and rejects traversal, executable web
 content, unregistered directories, and raw host paths.
 

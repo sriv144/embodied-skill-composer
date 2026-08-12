@@ -599,6 +599,10 @@ function CoppeliaRunEvidence({
   run: CoppeliaEvidenceRun | null;
 }) {
   if (!run) return null;
+  const video = run.artifact_references?.find(
+    (reference) => reference.media_type === "video/mp4"
+  );
+  const videoHref = video ? api.artifactHref(video.href) : null;
   const installed = Array.isArray(run.metrics.installed_module_ids)
     ? run.metrics.installed_module_ids.length
     : 0;
@@ -609,6 +613,18 @@ function CoppeliaRunEvidence({
         {installed}/{run.metrics.expected_module_count ?? "?"} modules · seed{" "}
         {run.manifest.scenario_seed}
       </span>
+      {videoHref ? (
+        <video
+          aria-label={`${label} measured Coppelia replay`}
+          className="coppelia-evidence-video"
+          controls
+          muted
+          playsInline
+          preload="metadata"
+        >
+          <source src={videoHref} type="video/mp4" />
+        </video>
+      ) : null}
       <EvidenceReferences references={run.artifact_references ?? []} />
     </div>
   );

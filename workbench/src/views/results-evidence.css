@@ -107,6 +107,14 @@
   font-size: 0.78rem;
 }
 
+.coppelia-evidence-video {
+  width: 100%;
+  max-height: 22rem;
+  border: 1px solid var(--line, #dce3df);
+  border-radius: 0.45rem;
+  background: #10151d;
+}
+
 @media (min-width: 70rem) {
   .seed-table-grid {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
