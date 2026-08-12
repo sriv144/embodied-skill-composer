@@ -67,6 +67,7 @@ class FakeDynamicSim:
         self.linear_velocities: dict[int, list[float]] = {}
         self.position_writes: list[tuple[int, int, list[float]]] = []
         self.time_step: float | None = None
+        self.simulation_time = 0.0
         self.int_params: list[tuple[int, int, int]] = []
         self.int_param_values: dict[tuple[int, int], int] = {}
         self.script_handles: set[int] = set()
@@ -333,6 +334,9 @@ class FakeDynamicSim:
         assert _what == self.handle_single
         self.collections[collection].append(object_handle)
 
+    def getCollectionObjects(self, collection: int) -> list[int]:
+        return list(self.collections[collection])
+
     def getShapeBB(self, handle: int):
         return self.shape_dimensions[handle], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
 
@@ -377,6 +381,7 @@ class FakeDynamicSim:
         self.state = self.simulation_stopped
 
     def integrate(self, dt: float, wheel_radius_m: float = 0.2) -> None:
+        self.simulation_time += dt
         roots = {owner for owner, _ in self.wheel_owner.values()}
         for root in roots:
             wheels = {
@@ -397,6 +402,9 @@ class FakeDynamicSim:
             position[0] += velocity_x * dt
             position[1] += velocity_y * dt
             self.linear_velocities[root] = [velocity_x, velocity_y, 0.0]
+
+    def getSimulationTime(self) -> float:
+        return self.simulation_time
 
     def saveScene(self) -> bytes:
         return b"VREP" + b"\0" * 124
@@ -703,12 +711,15 @@ def test_dynamic_executor_rejects_collision_from_excluded_youbot_shape(plan) -> 
     )
     executor.connect()
     robot_id = plan.robots[0].robot_id
-    collection = executor.robot_collision_entities[robot_id]
+    collection = executor.robot_world_collision_entity
+    world = executor.world_collision_entity
+    assert collection is not None
+    assert world is not None
     module_handle = executor.module_handles[plan.modules[0].module_id]
     excluded_handle = min(executor.robot_excluded_shape_handles[robot_id])
 
     def excluded_collision(first: int, second: int):
-        if first == collection and second == module_handle:
+        if first == collection and second == world:
             return 1, [excluded_handle, module_handle]
         return 0
 
@@ -765,11 +776,14 @@ def test_logically_attached_module_collision_is_never_exempted(plan) -> None:
     executor.start()
     module_id = plan.modules[0].module_id
     robot_id = plan.robots[0].robot_id
-    robot_collection = executor.robot_collision_entities[robot_id]
+    robot_collection = executor.robot_world_collision_entity
+    world_collection = executor.world_collision_entity
+    assert robot_collection is not None
+    assert world_collection is not None
     module_handle = executor.module_handles[module_id]
 
     def attached_module_collision(first: int, second: int):
-        if first == robot_collection and second == module_handle:
+        if first == robot_collection and second == world_collection:
             return 1, [
                 min(executor.robot_base_shape_handles[robot_id]),
                 module_handle,
@@ -792,6 +806,137 @@ def test_logically_attached_module_collision_is_never_exempted(plan) -> None:
         ]
         is False
     )
+
+
+def test_collision_monitor_uses_bounded_collection_query_groups(plan) -> None:
+    fake = FakeDynamicClient()
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        config=DynamicCoppeliaConfig(settle_steps=0),
+        client_factory=lambda _config: fake,
+    )
+    executor.connect()
+
+    expected_group_count = math.comb(len(plan.robots), 2) + 1
+    expected_logical_pairs = (
+        math.comb(len(plan.robots), 2)
+        + len(plan.robots) * len(plan.modules)
+        + len(plan.robots) * len(plan.site_grid.obstacle_cells)
+    )
+    ready = next(
+        item
+        for item in executor.runtime_events
+        if item["event"] == "collision_monitor_ready"
+    )
+    assert len(executor.collision_pairs) == expected_group_count
+    assert ready["expected_queries_per_step"] == expected_group_count
+    assert len(ready["query_group_inventory"]) == expected_group_count
+    assert sum(executor.collision_pair_category_counts.values()) == (
+        expected_logical_pairs
+    )
+
+    executor.start()
+    executor._step_physics()
+    executor.stop()
+
+    assert executor.collision_query_count == expected_group_count
+    assert executor.collision_query_rounds == 1
+    assert executor.diagnostics()[
+        "collision_queries_cover_every_physics_step"
+    ] is True
+
+
+def test_remote_step_handshake_reconciles_only_a_measured_completed_step(plan) -> None:
+    class CompletedStepHandshakeClient(FakeDynamicClient):
+        def step(self) -> None:
+            super().step()
+            raise RuntimeError("No such function: _*executed*_")
+
+    fake = CompletedStepHandshakeClient()
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        config=DynamicCoppeliaConfig(settle_steps=0),
+        client_factory=lambda _config: fake,
+    )
+    executor.connect()
+    executor.start()
+    executor._step_physics()
+    executor.stop()
+
+    assert executor.physics_steps == 1
+    assert executor.remote_step_handshake_reconciliations == 1
+    assert executor.collision_query_rounds == 1
+    event = next(
+        item
+        for item in executor.runtime_events
+        if item["event"] == "remote_step_handshake_reconciled"
+    )
+    assert event["physics_step"] == 1
+    assert event["observed_simulation_time_s"] == pytest.approx(0.05)
+    assert event["expected_simulation_time_s"] == pytest.approx(0.05)
+    assert executor.diagnostics()["remote_step_handshake_reconciliations"] == 1
+
+
+def test_remote_step_handshake_fails_closed_without_measured_advance(plan) -> None:
+    class UnadvancedStepHandshakeClient(FakeDynamicClient):
+        def step(self) -> None:
+            raise RuntimeError("No such function: _*executed*_")
+
+    fake = UnadvancedStepHandshakeClient()
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        config=DynamicCoppeliaConfig(settle_steps=0),
+        client_factory=lambda _config: fake,
+    )
+    executor.connect()
+    executor.start()
+    with pytest.raises(
+        DynamicCoppeliaError,
+        match="without exactly one measured simulator step",
+    ):
+        executor._step_physics()
+    executor.stop()
+
+    assert executor.physics_steps == 0
+    assert executor.remote_step_handshake_reconciliations == 0
+    assert executor.collision_query_rounds == 0
+
+
+def test_remote_step_handshake_evidence_is_bound_to_measured_time() -> None:
+    from embodied_skill_composer.construction import coppelia_phase5 as phase5
+
+    diagnostics = {
+        "remote_step_handshake_reconciliations": 1,
+        "executor_config": DynamicCoppeliaConfig().model_dump(mode="json"),
+    }
+    trace: list[object] = [
+        {
+            "timestamp_s": 0.05,
+            "event": "remote_step_handshake_reconciled",
+            "physics_step": 1,
+            "observed_simulation_time_s": 0.05,
+            "expected_simulation_time_s": 0.05,
+            "error": "No such function: _*executed*_",
+        }
+    ]
+    phase5._verify_remote_step_handshake_reconciliations(
+        trace=trace,
+        diagnostics=diagnostics,
+        physics_steps=2,
+    )
+
+    tampered = deepcopy(trace)
+    assert isinstance(tampered[0], dict)
+    tampered[0]["observed_simulation_time_s"] = 0.1
+    with pytest.raises(
+        ValueError,
+        match="reconciliation trace is invalid",
+    ):
+        phase5._verify_remote_step_handshake_reconciliations(
+            trace=tampered,
+            diagnostics=diagnostics,
+            physics_steps=2,
+        )
 
 
 def test_phase5_simulator_version_uses_definitive_current_integer_api() -> None:

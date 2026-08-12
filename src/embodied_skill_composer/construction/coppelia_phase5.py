@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from itertools import combinations
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
@@ -5619,6 +5619,11 @@ def _verify_passing_phase5_evidence(
         is not True
     ):
         raise ValueError("physical collision queries do not cover every physics step")
+    _verify_remote_step_handshake_reconciliations(
+        trace=trace,
+        diagnostics=diagnostics,
+        physics_steps=physics_steps,
+    )
     base_handles_by_robot, excluded_robot_shape_handles = (
         _verify_robot_base_physics_audit(
             diagnostics=diagnostics,
@@ -7043,6 +7048,68 @@ def _verify_robot_base_physics_audit(
     return allowed_by_robot, excluded_handles
 
 
+def _verify_remote_step_handshake_reconciliations(
+    *,
+    trace: list[object],
+    diagnostics: Mapping[str, object],
+    physics_steps: int,
+) -> None:
+    recorded_count = _integer_value(
+        diagnostics.get("remote_step_handshake_reconciliations", 0)
+    )
+    config = DynamicCoppeliaConfig.model_validate(
+        _mapping_field(diagnostics, "executor_config")
+    )
+    records = [
+        item
+        for item in trace
+        if isinstance(item, Mapping)
+        and item.get("event") == "remote_step_handshake_reconciled"
+    ]
+    if (
+        recorded_count != len(records)
+        or recorded_count > config.maximum_remote_step_handshake_reconciliations
+    ):
+        raise ValueError("remote step handshake reconciliation count is invalid")
+    seen_steps: set[int] = set()
+    for record in records:
+        step = _integer_value(record.get("physics_step"))
+        observed_time = _number_value(
+            record.get("observed_simulation_time_s")
+        )
+        expected_time = _number_value(
+            record.get("expected_simulation_time_s")
+        )
+        timestamp_s = _number_value(record.get("timestamp_s"))
+        derived_expected_time = step / config.control_hz
+        if (
+            step < 1
+            or step > physics_steps
+            or step in seen_steps
+            or record.get("error") != "No such function: _*executed*_"
+            or not math.isclose(
+                expected_time,
+                derived_expected_time,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                observed_time,
+                derived_expected_time,
+                rel_tol=0.0,
+                abs_tol=max(1e-9, (1.0 / config.control_hz) * 1e-6),
+            )
+            or not math.isclose(
+                timestamp_s,
+                observed_time,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError("remote step handshake reconciliation trace is invalid")
+        seen_steps.add(step)
+
+
 def _verify_collision_trace(
     *,
     scenario: ScenarioManifest,
@@ -7054,13 +7121,14 @@ def _verify_collision_trace(
     excluded_robot_shape_handles: set[int],
 ) -> None:
     inventory = _expected_collision_inventory(scenario.plan)
+    query_groups = _expected_collision_query_groups(scenario.plan)
     category_counts = Counter(
         str(item["category"]) for item in inventory
     )
     expected_categories = dict(sorted(category_counts.items()))
-    if expected_queries != len(inventory):
+    if expected_queries != len(query_groups):
         raise ValueError(
-            "collision-query count does not match the scenario inventory"
+            "collision-query count does not match the query-group inventory"
         )
     metric_categories = _mapping_field(
         diagnostics,
@@ -7081,15 +7149,55 @@ def _verify_collision_trace(
     )
     if (
         len(ready) != 1
-        or ready[0].get("expected_queries_per_step") != len(inventory)
+        or ready[0].get("expected_queries_per_step") != len(query_groups)
         or ready[0].get("pair_category_counts") != expected_categories
         or ready[0].get("pair_inventory_sha256")
         != _sha256_json(inventory)
+        or ready[0].get("query_group_inventory") != query_groups
+        or ready[0].get("query_group_inventory_sha256")
+        != _sha256_json(query_groups)
         or ready[0].get("robot_ids") != robot_ids
         or ready[0].get("module_ids") != module_ids
         or ready[0].get("obstacle_ids") != obstacle_ids
     ):
         raise ValueError("collision-monitor inventory trace is incomplete")
+    aggregate_robot_membership = ready[0].get(
+        "aggregate_robot_base_membership"
+    )
+    aggregate_world_membership = ready[0].get("aggregate_world_membership")
+    expected_robot_membership = {
+        robot_id: sorted(base_handles_by_robot[robot_id])
+        for robot_id in robot_ids
+    }
+    if (
+        aggregate_robot_membership != expected_robot_membership
+        or not isinstance(aggregate_world_membership, list)
+        or any(not isinstance(item, Mapping) for item in aggregate_world_membership)
+    ):
+        raise ValueError("aggregate collision collection membership is incomplete")
+    world_records = cast(list[Mapping[str, object]], aggregate_world_membership)
+    expected_world_entities = {
+        *(f"module:{module_id}" for module_id in module_ids),
+        *(f"obstacle:{obstacle_id}" for obstacle_id in obstacle_ids),
+    }
+    world_entities = {str(item.get("entity")) for item in world_records}
+    world_handles = [_integer_value(item.get("object_handle")) for item in world_records]
+    all_base_handles = set().union(*base_handles_by_robot.values())
+    if (
+        world_entities != expected_world_entities
+        or len(world_records) != len(expected_world_entities)
+        or len(world_handles) != len(set(world_handles))
+        or set(world_handles).intersection(all_base_handles)
+        or set(world_handles).intersection(excluded_robot_shape_handles)
+        or ready[0].get("aggregate_collection_membership_sha256")
+        != _sha256_json(
+            {
+                "robot_base_shape_handles": sorted(all_base_handles),
+                "world_object_handles": sorted(world_handles),
+            }
+        )
+    ):
+        raise ValueError("aggregate collision collection membership is invalid")
     rounds = [
         item for item in records if item.get("event") == "collision_query_round"
     ]
@@ -7106,7 +7214,7 @@ def _verify_collision_trace(
             raise ValueError("collision trace repeats a physics step")
         by_step[step] = record
         if (
-            record.get("query_count") != len(inventory)
+            record.get("query_count") != len(query_groups)
             or record.get("pair_category_counts") != expected_categories
         ):
             raise ValueError(
@@ -7266,6 +7374,31 @@ def _expected_collision_inventory(plan: BuildPlan) -> list[dict[str, object]]:
                 }
             )
     return inventory
+
+
+def _expected_collision_query_groups(
+    plan: BuildPlan,
+) -> list[dict[str, object]]:
+    robot_ids = sorted(robot.robot_id for robot in plan.robots)
+    groups: list[dict[str, object]] = [
+        {
+            "entity_1": f"robot:{robot_id}",
+            "entity_2": f"robot:{other_id}",
+            "category": "robot_robot",
+            "robot_ids": [robot_id, other_id],
+        }
+        for index, robot_id in enumerate(robot_ids)
+        for other_id in robot_ids[index + 1 :]
+    ]
+    groups.append(
+        {
+            "entity_1": "all_robot_bases",
+            "entity_2": "modules_and_obstacles",
+            "category": "robot_world",
+            "robot_ids": [],
+        }
+    )
+    return groups
 
 
 def _distance(left: Vec2, right: Vec2) -> float:

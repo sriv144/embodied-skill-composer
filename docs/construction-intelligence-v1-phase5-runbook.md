@@ -93,8 +93,14 @@ Both runs must show:
   overlapping-probe collision self-test for every base collection before start;
 - non-zero wheel commands, measured telemetry, and measured command response for
   every active robot;
-- physical collision/contact queries for every required robot/robot,
-  robot/module, and robot/obstacle pair on every physics step;
+- bounded collection-level physical collision/contact queries on every physics
+  step: one query per robot/robot base pair and one attested all-bases-versus-world
+  query. The manifest still binds the exhaustive robot/module and robot/obstacle
+  pair inventory, exact collection membership, and exact detected object handles;
+- any ZeroMQ `_*executed*_` step-handshake fault is reconciled only when the
+  simulator clock independently proves exactly one expected deterministic step;
+  each reconciliation is recorded and verified, capped at eight, and every other
+  transport error or clock mismatch fails the run without retrying the step;
 - every planned site obstacle instantiated as a respondable simulator object;
 - per-robot pickup formation, team-spacing, and install errors inside configured
   tolerances;

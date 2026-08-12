@@ -27,6 +27,7 @@ GENERATED_SCENE_ROOT_ALIAS = "ESCConstructionIntelligenceV1"
 # generated site cannot create an unmonitored step at the default-floor seam.
 CONSTRUCTION_FLOOR_TOP_Z_M = 0.0
 CONSTRUCTION_FLOOR_THICKNESS_M = 0.12
+_REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR = "No such function: _*executed*_"
 RobotCommandSource = Literal[
     "settling",
     "path_follower",
@@ -82,6 +83,11 @@ class DynamicCoppeliaConfig(BaseModel):
         le=20,
     )
     command_response_min_displacement_m: float = Field(default=0.002, gt=0, le=0.1)
+    maximum_remote_step_handshake_reconciliations: int = Field(
+        default=8,
+        ge=0,
+        le=100,
+    )
 
 
 class DynamicCoppeliaError(RuntimeError):
@@ -111,6 +117,8 @@ class DynamicCoppeliaExecutor:
         self.module_handles: dict[str, int] = {}
         self.obstacle_handles: dict[str, int] = {}
         self.robot_collision_entities: dict[str, int] = {}
+        self.robot_world_collision_entity: int | None = None
+        self.world_collision_entity: int | None = None
         self.robot_base_shape_handles: dict[str, set[int]] = {}
         self.robot_excluded_shape_handles: dict[str, set[int]] = {}
         self.robot_base_physics_audit: list[dict[str, object]] = []
@@ -138,6 +146,7 @@ class DynamicCoppeliaExecutor:
         self.synchronized_route_separations_m: list[float] = []
         self.install_errors_m: list[float] = []
         self.physics_steps = 0
+        self.remote_step_handshake_reconciliations = 0
         self.collision_stops = 0
         self.proximity_safety_stops = 0
         self.physical_collision_stops = 0
@@ -1498,6 +1507,9 @@ class DynamicCoppeliaExecutor:
             "connected": self.is_ready,
             "control_hz": self.config.control_hz,
             "physics_steps": self.physics_steps,
+            "remote_step_handshake_reconciliations": (
+                self.remote_step_handshake_reconciliations
+            ),
             "measured_duration_s": self.simulation_time_s,
             "wheel_command_count": len(self.commands),
             "telemetry_sample_count": len(self.telemetry),
@@ -2303,6 +2315,7 @@ class DynamicCoppeliaExecutor:
         required_api = (
             "createCollection",
             "addItemToCollection",
+            "getCollectionObjects",
             "checkCollision",
         )
         missing = [name for name in required_api if not callable(getattr(self.sim, name, None))]
@@ -2332,11 +2345,50 @@ class DynamicCoppeliaExecutor:
 
         self._self_test_collision_monitoring()
 
-        pairs: list[tuple[str, int, str, int, str, tuple[str, ...]]] = []
+        robot_world = int(self.sim.createCollection(0))
+        for robot_id in sorted(self.robot_base_shape_handles):
+            for shape_handle in sorted(self.robot_base_shape_handles[robot_id]):
+                self.sim.addItemToCollection(
+                    robot_world,
+                    handle_single,
+                    shape_handle,
+                    0,
+                )
+        world = int(self.sim.createCollection(0))
+        for object_handle in sorted(
+            [*self.module_handles.values(), *self.obstacle_handles.values()]
+        ):
+            self.sim.addItemToCollection(
+                world,
+                handle_single,
+                object_handle,
+                0,
+            )
+        expected_robot_world_handles = set().union(
+            *self.robot_base_shape_handles.values()
+        )
+        expected_world_handles = {
+            *self.module_handles.values(),
+            *self.obstacle_handles.values(),
+        }
+        if (
+            set(self.sim.getCollectionObjects(robot_world))
+            != expected_robot_world_handles
+            or set(self.sim.getCollectionObjects(world)) != expected_world_handles
+        ):
+            raise DynamicCoppeliaError(
+                "aggregate collision collection membership readback failed"
+            )
+        self.robot_world_collision_entity = robot_world
+        self.world_collision_entity = world
+
+        query_groups: list[
+            tuple[str, int, str, int, str, tuple[str, ...]]
+        ] = []
         robot_ids = sorted(self.robot_collision_entities)
         for index, robot_id in enumerate(robot_ids):
             for other_id in robot_ids[index + 1 :]:
-                pairs.append(
+                query_groups.append(
                     (
                         f"robot:{robot_id}",
                         self.robot_collision_entities[robot_id],
@@ -2346,51 +2398,105 @@ class DynamicCoppeliaExecutor:
                         (robot_id, other_id),
                     )
                 )
+        query_groups.append(
+            (
+                "all_robot_bases",
+                robot_world,
+                "modules_and_obstacles",
+                world,
+                "robot_world",
+                (),
+            )
+        )
+        inventory: list[dict[str, object]] = []
+        for index, robot_id in enumerate(robot_ids):
+            for other_id in robot_ids[index + 1 :]:
+                inventory.append(
+                    {
+                        "entity_1": f"robot:{robot_id}",
+                        "entity_2": f"robot:{other_id}",
+                        "category": "robot_robot",
+                        "robot_ids": [robot_id, other_id],
+                    }
+                )
             for module_id, module_handle in sorted(self.module_handles.items()):
-                pairs.append(
-                    (
-                        f"robot:{robot_id}",
-                        self.robot_collision_entities[robot_id],
-                        f"module:{module_id}",
-                        module_handle,
-                        "robot_module",
-                        (robot_id,),
-                    )
+                inventory.append(
+                    {
+                        "entity_1": f"robot:{robot_id}",
+                        "entity_2": f"module:{module_id}",
+                        "category": "robot_module",
+                        "robot_ids": [robot_id],
+                    }
                 )
             for obstacle_id, obstacle_handle in sorted(self.obstacle_handles.items()):
-                pairs.append(
-                    (
-                        f"robot:{robot_id}",
-                        self.robot_collision_entities[robot_id],
-                        f"obstacle:{obstacle_id}",
-                        obstacle_handle,
-                        "robot_obstacle",
-                        (robot_id,),
-                    )
+                inventory.append(
+                    {
+                        "entity_1": f"robot:{robot_id}",
+                        "entity_2": f"obstacle:{obstacle_id}",
+                        "category": "robot_obstacle",
+                        "robot_ids": [robot_id],
+                    }
                 )
-        if not pairs:
-            raise DynamicCoppeliaError("collision monitoring has no robot/entity pairs to query")
-        self.collision_pairs = pairs
+        if not query_groups or not inventory:
+            raise DynamicCoppeliaError(
+                "collision monitoring has no query groups or entity pairs"
+            )
+        self.collision_pairs = query_groups
         category_counts: dict[str, int] = {}
-        for pair in pairs:
-            category_counts[pair[4]] = category_counts.get(pair[4], 0) + 1
+        for pair in inventory:
+            category = str(pair["category"])
+            category_counts[category] = category_counts.get(category, 0) + 1
         self.collision_pair_category_counts = category_counts
-        inventory = [
+        query_group_inventory = [
             {
                 "entity_1": pair[0],
                 "entity_2": pair[2],
                 "category": pair[4],
                 "robot_ids": list(pair[5]),
             }
-            for pair in pairs
+            for pair in query_groups
         ]
         self.runtime_events.append(
             {
                 "timestamp_s": 0.0,
                 "event": "collision_monitor_ready",
-                "expected_queries_per_step": len(pairs),
+                "expected_queries_per_step": len(query_groups),
                 "pair_category_counts": dict(category_counts),
                 "pair_inventory_sha256": _sha256_json(inventory),
+                "query_group_inventory": query_group_inventory,
+                "query_group_inventory_sha256": _sha256_json(
+                    query_group_inventory
+                ),
+                "aggregate_collection_membership_sha256": _sha256_json(
+                    {
+                        "robot_base_shape_handles": sorted(
+                            expected_robot_world_handles
+                        ),
+                        "world_object_handles": sorted(expected_world_handles),
+                    }
+                ),
+                "aggregate_robot_base_membership": {
+                    robot_id: sorted(handles)
+                    for robot_id, handles in sorted(
+                        self.robot_base_shape_handles.items()
+                    )
+                },
+                "aggregate_world_membership": [
+                    {
+                        "entity": f"module:{module_id}",
+                        "object_handle": handle,
+                    }
+                    for module_id, handle in sorted(self.module_handles.items())
+                ]
+                + [
+                    {
+                        "entity": f"obstacle:{obstacle_id}",
+                        "object_handle": handle,
+                    }
+                    for obstacle_id, handle in sorted(
+                        self.obstacle_handles.items()
+                    )
+                ],
                 "robot_ids": robot_ids,
                 "module_ids": sorted(self.module_handles),
                 "obstacle_ids": sorted(self.obstacle_handles),
@@ -2463,10 +2569,61 @@ class DynamicCoppeliaExecutor:
             )
 
     def _step_physics(self) -> None:
-        self.client.step()
+        try:
+            self.client.step()
+        except Exception as exc:
+            if str(exc).strip() != _REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR:
+                raise
+            observed_time = self._reconcile_remote_step_handshake(exc)
+            self.runtime_events.append(
+                {
+                    "timestamp_s": observed_time,
+                    "event": "remote_step_handshake_reconciled",
+                    "physics_step": self.physics_steps + 1,
+                    "observed_simulation_time_s": observed_time,
+                    "expected_simulation_time_s": (
+                        (self.physics_steps + 1) / self.config.control_hz
+                    ),
+                    "error": _REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR,
+                }
+            )
+            self.remote_step_handshake_reconciliations += 1
         self.physics_steps += 1
         self._query_physical_collisions()
         self._update_command_responses()
+
+    def _reconcile_remote_step_handshake(self, exc: Exception) -> float:
+        if (
+            self.remote_step_handshake_reconciliations
+            >= self.config.maximum_remote_step_handshake_reconciliations
+        ):
+            raise DynamicCoppeliaError(
+                "remote step handshake reconciliation limit was exceeded"
+            ) from exc
+        get_simulation_time = getattr(self.sim, "getSimulationTime", None)
+        if not callable(get_simulation_time):
+            raise DynamicCoppeliaError(
+                "remote step handshake failed without measurable simulator time"
+            ) from exc
+        try:
+            observed_time = float(get_simulation_time())
+        except Exception as time_exc:
+            raise DynamicCoppeliaError(
+                "remote step handshake failed without measurable simulator time"
+            ) from time_exc
+        expected_time = (self.physics_steps + 1) / self.config.control_hz
+        tolerance = max(1e-9, (1.0 / self.config.control_hz) * 1e-6)
+        if not math.isfinite(observed_time) or not math.isclose(
+            observed_time,
+            expected_time,
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        ):
+            raise DynamicCoppeliaError(
+                "remote step handshake failed without exactly one measured "
+                "simulator step"
+            ) from exc
+        return observed_time
 
     def _query_physical_collisions(self) -> None:
         detected: list[dict[str, object]] = []
@@ -2495,6 +2652,13 @@ class DynamicCoppeliaExecutor:
                 )
             if result == 0:
                 continue
+            if category == "robot_world":
+                (
+                    first_label,
+                    second_label,
+                    category,
+                    robot_ids,
+                ) = self._resolve_robot_world_collision(object_handles)
             self._validate_collision_object_handles(
                 first_label=first_label,
                 second_label=second_label,
@@ -2538,6 +2702,61 @@ class DynamicCoppeliaExecutor:
                     0.0,
                     source="collision_stop",
                 )
+
+    def _resolve_robot_world_collision(
+        self,
+        object_handles: list[int],
+    ) -> tuple[str, str, str, tuple[str, ...]]:
+        if len(object_handles) != 2:
+            raise DynamicCoppeliaError(
+                "aggregate collision query did not identify one exact pair"
+            )
+        excluded = set().union(*self.robot_excluded_shape_handles.values())
+        if set(object_handles).intersection(excluded):
+            raise DynamicCoppeliaError(
+                "Coppelia collision evidence referenced excluded YouBot geometry"
+            )
+        base_owner = {
+            handle: robot_id
+            for robot_id, handles in self.robot_base_shape_handles.items()
+            for handle in handles
+        }
+        robot_matches = [
+            (handle, base_owner[handle])
+            for handle in object_handles
+            if handle in base_owner
+        ]
+        if len(robot_matches) != 1:
+            raise DynamicCoppeliaError(
+                "aggregate world collision is not bound to exactly one mobile base"
+            )
+        robot_handle, robot_id = robot_matches[0]
+        other_handle = next(
+            handle for handle in object_handles if handle != robot_handle
+        )
+        module_by_handle = {
+            handle: module_id for module_id, handle in self.module_handles.items()
+        }
+        obstacle_by_handle = {
+            handle: obstacle_id for obstacle_id, handle in self.obstacle_handles.items()
+        }
+        if other_handle in module_by_handle:
+            return (
+                f"robot:{robot_id}",
+                f"module:{module_by_handle[other_handle]}",
+                "robot_module",
+                (robot_id,),
+            )
+        if other_handle in obstacle_by_handle:
+            return (
+                f"robot:{robot_id}",
+                f"obstacle:{obstacle_by_handle[other_handle]}",
+                "robot_obstacle",
+                (robot_id,),
+            )
+        raise DynamicCoppeliaError(
+            "aggregate world collision referenced an unattested object"
+        )
 
     def _validate_collision_object_handles(
         self,
