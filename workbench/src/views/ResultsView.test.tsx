@@ -48,6 +48,12 @@ describe("ResultsView evidence", () => {
       "href",
       "/api/lab/evaluations/eval-1/artifacts/report.md"
     );
+    expect(
+      screen.getByLabelText("Nominal evidence measured Coppelia replay")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Unavailable-robot recovery measured Coppelia replay")
+    ).toBeInTheDocument();
     await waitFor(() => expect(api.researchSummary).toHaveBeenCalledTimes(1));
   });
 });
@@ -205,6 +211,12 @@ function coppeliaRun(
         href: `/api/lab/coppelia/evidence/${runId}/artifacts/report.md`,
         path: "report.md",
         media_type: "text/markdown"
+      },
+      {
+        label: `${scenario} measured replay`,
+        href: `/api/lab/coppelia/evidence/${runId}/artifacts/evidence_replay.mp4`,
+        path: "evidence_replay.mp4",
+        media_type: "video/mp4"
       }
     ]
   };

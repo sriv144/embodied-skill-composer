@@ -19,12 +19,25 @@ semantically rather than attempting an impossible self-hash.
 Run staging only from the clean commit that will receive `v1.0.0`. All repository version
 declarations must already agree; the packager never changes versions.
 
+First package the two independently verified native Phase 5 directories. This renders the public
+nominal and recovery MP4 files deterministically from measured base telemetry and the typed replay;
+it does not alter either native bundle or present logical payload motion as contact dynamics.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\package_construction_coppelia_evidence.py `
+  --nominal-bundle release-inputs\phase5-nominal `
+  --recovery-bundle release-inputs\phase5-recovery `
+  --output release-inputs\coppelia
+```
+
+Use the emitted `release-inputs\coppelia\simulator-bundle.json` as the simulator descriptor below.
+
 ```powershell
 .\.venv\Scripts\python.exe scripts\package_construction_release.py `
   --output output\construction-intelligence-v1-release `
   --deterministic-bundle release-inputs\deterministic-bundle.json `
   --research-bundle release-inputs\research-bundle.json `
-  --simulator-bundle release-inputs\simulator-bundle.json `
+  --simulator-bundle release-inputs\coppelia\simulator-bundle.json `
   --release-version 1.0.0 `
   --release-tag v1.0.0
 ```
@@ -33,7 +46,8 @@ Staging first invokes the canonical public-demo release exporter and verifier wi
 descriptor files. It then:
 
 1. creates the complete release-channel public demo;
-2. copies the exact research and Coppelia subtrees into separate evidence archives;
+2. copies the exact research and Coppelia subtrees, including both measured replay videos, into
+   separate evidence archives;
 3. resolves all 20 validation-selected checkpoints from the canonical selection evidence;
 4. verifies each checkpoint's SHA-256, checkpoint fraction, transition count, lineage,
    configuration digest, source commit, experiment identity, training seed, and resume provenance;
