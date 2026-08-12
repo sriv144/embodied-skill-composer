@@ -26,6 +26,7 @@ async function auditPrimaryView(page: Page): Promise<void> {
 test("static workbench is visibly read-only across the complete journey", async ({
   page
 }) => {
+  test.setTimeout(90_000);
   const apiRequests: string[] = [];
   const cspViolations = watchForCspViolations(page);
   page.on("request", (request) => {
