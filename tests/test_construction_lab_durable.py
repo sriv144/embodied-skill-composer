@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -941,6 +942,18 @@ def test_dispatcher_builds_claim_bound_worker_command_without_running_training(
     assert command[command.index("--run-id") + 1] == run_id
     assert isinstance(command[command.index("--claim-token") + 1], str)
     assert command[command.index("--claim-token") + 1]
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    environment = kwargs["env"]
+    assert isinstance(environment, dict)
+    expected_source_root = Path(lab_service_module.__file__).resolve().parents[2]
+    expected_workspace_root = Path(lab_service_module.__file__).resolve().parents[3]
+    assert str(environment["PYTHONPATH"]).split(os.pathsep)[0] == str(
+        expected_source_root
+    )
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert environment["PYTHONUTF8"] == "1"
+    assert kwargs["cwd"] == expected_workspace_root
     assert run["attempt"] == 1
     assert run["pid"] is None
     assert run["process_identity"] is None

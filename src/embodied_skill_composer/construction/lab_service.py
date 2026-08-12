@@ -308,6 +308,19 @@ class LabService:
             worker_environment = os.environ.copy()
             worker_environment["PYTHONIOENCODING"] = "utf-8"
             worker_environment["PYTHONUTF8"] = "1"
+            source_root = Path(__file__).resolve().parents[2]
+            workspace_root = Path(__file__).resolve().parents[3]
+            inherited_pythonpath = worker_environment.get("PYTHONPATH")
+            worker_environment["PYTHONPATH"] = os.pathsep.join(
+                [
+                    str(source_root),
+                    *(
+                        [inherited_pythonpath]
+                        if inherited_pythonpath
+                        else []
+                    ),
+                ]
+            )
             try:
                 with process_log.open("a", encoding="utf-8") as handle:
                     process = subprocess.Popen(
@@ -317,6 +330,7 @@ class LabService:
                         stderr=subprocess.STDOUT,
                         creationflags=creationflags,
                         env=worker_environment,
+                        cwd=workspace_root,
                     )
                     process_identity = _process_identity(process.pid)
                     self.registry.update_run(
