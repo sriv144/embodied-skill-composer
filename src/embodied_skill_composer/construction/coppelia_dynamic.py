@@ -65,6 +65,7 @@ class DynamicCoppeliaConfig(BaseModel):
     formation_tolerance_m: float = Field(default=0.45, gt=0)
     install_tolerance_m: float = Field(default=0.3, gt=0)
     safety_distance_m: float = Field(default=0.34, gt=0)
+    planned_robot_footprint_radius_m: float = Field(default=0.12, gt=0, le=1.0)
     max_steps_per_waypoint: int = Field(default=500, ge=10)
     disabled_settle_max_steps: int = Field(default=100, ge=3, le=2_000)
     disabled_settle_consecutive_samples: int = Field(default=3, ge=2, le=20)
@@ -110,6 +111,11 @@ class DynamicCoppeliaExecutor:
         self.module_handles: dict[str, int] = {}
         self.obstacle_handles: dict[str, int] = {}
         self.robot_collision_entities: dict[str, int] = {}
+        self.robot_base_shape_handles: dict[str, set[int]] = {}
+        self.robot_excluded_shape_handles: dict[str, set[int]] = {}
+        self.robot_base_physics_audit: list[dict[str, object]] = []
+        self.robot_collision_self_tests: list[dict[str, object]] = []
+        self.robot_base_contact_gate_passed = False
         self.collision_pairs: list[tuple[str, int, str, int, str, tuple[str, ...]]] = []
         self.collision_pair_category_counts: dict[str, int] = {}
         self.payload_carriers: dict[str, int] = {}
@@ -1504,6 +1510,16 @@ class DynamicCoppeliaExecutor:
             "collision_query_rounds": self.collision_query_rounds,
             "expected_collision_queries_per_step": len(self.collision_pairs),
             "collision_pair_category_counts": dict(self.collision_pair_category_counts),
+            "robot_base_contact_gate_passed": self.robot_base_contact_gate_passed,
+            "robot_base_physics_audit": list(self.robot_base_physics_audit),
+            "robot_base_physics_audit_sha256": _sha256_json(
+                self.robot_base_physics_audit
+            ),
+            "robot_collision_self_tests": list(self.robot_collision_self_tests),
+            "measured_base_footprint_radius_m_by_robot": {
+                str(item["robot_id"]): item["measured_footprint_radius_m"]
+                for item in self.robot_base_physics_audit
+            },
             "collision_queries_cover_every_physics_step": (
                 self.physics_steps > 0
                 and self.collision_query_rounds == self.physics_steps
@@ -1772,6 +1788,7 @@ class DynamicCoppeliaExecutor:
             )
             self.robot_handles[robot.robot_id] = handle
             self.wheel_handles[robot.robot_id] = self._resolve_wheels(handle)
+            self._configure_youbot_base_physics(robot.robot_id, handle)
         for x, y in sorted(grid.obstacle_cells):
             alias = f"construction_intelligence_obstacle_{x}_{y}"
             handle = self._create_box(
@@ -1810,6 +1827,178 @@ class DynamicCoppeliaExecutor:
                 "obstacle_count": len(self.obstacle_handles),
             }
         )
+
+    def _configure_youbot_base_physics(
+        self,
+        robot_id: str,
+        robot_handle: int,
+    ) -> None:
+        """Constrain the imported YouBot to the v1 mobile-base physics contract."""
+        required_api = (
+            "getObjectsInTree",
+            "getObjectAlias",
+            "getObjectInt32Param",
+            "setObjectInt32Param",
+            "getBoolProperty",
+            "setBoolProperty",
+            "getShapeBB",
+            "getObjectMatrix",
+        )
+        missing = [
+            name
+            for name in required_api
+            if not callable(getattr(self.sim, name, None))
+        ]
+        shape_type = getattr(self.sim, "object_shape_type", None)
+        if missing or shape_type is None:
+            detail = ", ".join(
+                [*missing, *(["object_shape_type"] if shape_type is None else [])]
+            )
+            raise DynamicCoppeliaError(
+                f"YouBot base-physics attestation is unavailable: {detail}"
+            )
+        shape_handles = {
+            int(handle)
+            for handle in self.sim.getObjectsInTree(
+                robot_handle,
+                shape_type,
+                0,
+            )
+        }
+        if robot_handle not in shape_handles:
+            raise DynamicCoppeliaError(
+                f"{robot_id} model root is not an auditable shape"
+            )
+        aliases = {
+            handle: str(self.sim.getObjectAlias(handle, 1))
+            for handle in shape_handles
+        }
+        required_wheel_aliases = {
+            f"wheel_respondable_{wheel_name}" for wheel_name in WHEEL_NAMES
+        }
+        allowed_handles = {robot_handle}
+        for required_alias in sorted(required_wheel_aliases):
+            matches = {
+                handle
+                for handle, alias in aliases.items()
+                if alias.strip("/").rsplit("/", 1)[-1].casefold()
+                == required_alias
+            }
+            if len(matches) != 1:
+                raise DynamicCoppeliaError(
+                    f"{robot_id} must contain exactly one {required_alias} base shape"
+                )
+            allowed_handles.update(matches)
+        if len(allowed_handles) != 5:
+            raise DynamicCoppeliaError(
+                f"{robot_id} mobile-base physics must contain five unique shapes"
+            )
+        excluded_handles = shape_handles - allowed_handles
+        if not excluded_handles:
+            raise DynamicCoppeliaError(
+                f"{robot_id} has no excluded arm, gripper, or visual shapes to attest"
+            )
+
+        records: list[dict[str, object]] = []
+        for handle in sorted(shape_handles):
+            allowed = handle in allowed_handles
+            before = {
+                "respondable": int(
+                    self.sim.getObjectInt32Param(
+                        handle,
+                        self.sim.shapeintparam_respondable,
+                    )
+                ),
+                "static": int(
+                    self.sim.getObjectInt32Param(
+                        handle,
+                        self.sim.shapeintparam_static,
+                    )
+                ),
+                "collidable": self.sim.getBoolProperty(handle, "collidable"),
+            }
+            requested = {
+                "respondable": int(allowed),
+                "static": 0 if allowed else before["static"],
+                "collidable": allowed,
+            }
+            self.sim.setObjectInt32Param(
+                handle,
+                self.sim.shapeintparam_respondable,
+                requested["respondable"],
+            )
+            self.sim.setObjectInt32Param(
+                handle,
+                self.sim.shapeintparam_static,
+                requested["static"],
+            )
+            self.sim.setBoolProperty(
+                handle,
+                "collidable",
+                requested["collidable"],
+            )
+            after = {
+                "respondable": int(
+                    self.sim.getObjectInt32Param(
+                        handle,
+                        self.sim.shapeintparam_respondable,
+                    )
+                ),
+                "static": int(
+                    self.sim.getObjectInt32Param(
+                        handle,
+                        self.sim.shapeintparam_static,
+                    )
+                ),
+                "collidable": self.sim.getBoolProperty(handle, "collidable"),
+            }
+            if (
+                not isinstance(before["collidable"], bool)
+                or after != requested
+            ):
+                raise DynamicCoppeliaError(
+                    f"{robot_id} shape {aliases[handle]} did not read back the "
+                    "requested base-only physics policy"
+                )
+            records.append(
+                {
+                    "handle": handle,
+                    "alias": aliases[handle],
+                    "role": "mobile_base" if allowed else "excluded_v1_geometry",
+                    "before": before,
+                    "after": after,
+                }
+            )
+
+        measured_radius = max(
+            _shape_xy_footprint_radius_m(
+                self.sim,
+                shape_handle=handle,
+                robot_handle=robot_handle,
+            )
+            for handle in allowed_handles
+        )
+        planned_radius = self.config.planned_robot_footprint_radius_m
+        footprint_gate_passed = measured_radius <= planned_radius + 1e-9
+        if not footprint_gate_passed:
+            raise DynamicCoppeliaError(
+                f"{robot_id} measured base footprint radius {measured_radius:.6f} m "
+                f"exceeds planned radius {planned_radius:.6f} m"
+            )
+        audit = {
+            "robot_id": robot_id,
+            "robot_handle": robot_handle,
+            "allowed_shape_handles": sorted(allowed_handles),
+            "excluded_shape_handles": sorted(excluded_handles),
+            "shape_records": records,
+            "measured_footprint_radius_m": measured_radius,
+            "planned_footprint_radius_m": planned_radius,
+            "footprint_gate_passed": footprint_gate_passed,
+            "base_only_policy_verified": True,
+        }
+        self.robot_base_shape_handles[robot_id] = allowed_handles
+        self.robot_excluded_shape_handles[robot_id] = excluded_handles
+        self.robot_base_physics_audit.append(audit)
 
     def _disable_bundled_motion_script(
         self,
@@ -2117,16 +2306,31 @@ class DynamicCoppeliaExecutor:
             "checkCollision",
         )
         missing = [name for name in required_api if not callable(getattr(self.sim, name, None))]
-        handle_tree = getattr(self.sim, "handle_tree", None)
-        if missing or handle_tree is None:
-            detail = ", ".join([*missing, *(["handle_tree"] if handle_tree is None else [])])
+        handle_single = getattr(self.sim, "handle_single", None)
+        if missing or handle_single is None:
+            detail = ", ".join(
+                [*missing, *(["handle_single"] if handle_single is None else [])]
+            )
             raise DynamicCoppeliaError(
                 f"Coppelia physical collision monitoring is unavailable: {detail}"
             )
-        for robot_id, robot_handle in sorted(self.robot_handles.items()):
+        for robot_id in sorted(self.robot_handles):
+            base_handles = self.robot_base_shape_handles.get(robot_id)
+            if not base_handles:
+                raise DynamicCoppeliaError(
+                    f"{robot_id} has no attested mobile-base collision shapes"
+                )
             collection = int(self.sim.createCollection(0))
-            self.sim.addItemToCollection(collection, handle_tree, robot_handle, 0)
+            for shape_handle in sorted(base_handles):
+                self.sim.addItemToCollection(
+                    collection,
+                    handle_single,
+                    shape_handle,
+                    0,
+                )
             self.robot_collision_entities[robot_id] = collection
+
+        self._self_test_collision_monitoring()
 
         pairs: list[tuple[str, int, str, int, str, tuple[str, ...]]] = []
         robot_ids = sorted(self.robot_collision_entities)
@@ -2190,8 +2394,73 @@ class DynamicCoppeliaExecutor:
                 "robot_ids": robot_ids,
                 "module_ids": sorted(self.module_handles),
                 "obstacle_ids": sorted(self.obstacle_handles),
+                "base_physics_audit_sha256": _sha256_json(
+                    self.robot_base_physics_audit
+                ),
+                "collision_self_tests": list(self.robot_collision_self_tests),
             }
         )
+        self.robot_base_contact_gate_passed = True
+
+    def _self_test_collision_monitoring(self) -> None:
+        remove_objects = getattr(self.sim, "removeObjects", None)
+        if not callable(remove_objects):
+            raise DynamicCoppeliaError(
+                "Coppelia collision-monitor self-test cleanup is unavailable"
+            )
+        for robot_id in sorted(self.robot_handles):
+            base_handles = self.robot_base_shape_handles[robot_id]
+            robot_position = self.sim.getObjectPosition(
+                self.robot_handles[robot_id]
+            )
+            probe = self._create_box(
+                f"collision_monitor_self_test_{robot_id}",
+                (
+                    float(robot_position[0]),
+                    float(robot_position[1]),
+                    float(robot_position[2]),
+                ),
+                (0.02, 0.02, 0.02),
+                (1.0, 0.0, 1.0),
+            )
+            self.sim.setObjectInt32Param(
+                probe,
+                self.sim.shapeintparam_respondable,
+                0,
+            )
+            self.sim.setBoolProperty(probe, "collidable", True)
+            try:
+                raw = self.sim.checkCollision(
+                    self.robot_collision_entities[robot_id],
+                    probe,
+                )
+                result, handles = _parse_collision_result(raw)
+            finally:
+                remove_objects([probe], False)
+            verified = (
+                result == 1
+                and probe in handles
+                and bool(base_handles.intersection(handles))
+                and not bool(
+                    self.robot_excluded_shape_handles[robot_id].intersection(
+                        handles
+                    )
+                )
+            )
+            if not verified:
+                raise DynamicCoppeliaError(
+                    f"{robot_id} mobile-base collision collection failed its "
+                    "positive self-test"
+                )
+            self.robot_collision_self_tests.append(
+                {
+                    "robot_id": robot_id,
+                    "collection_handle": self.robot_collision_entities[robot_id],
+                    "probe_handle": probe,
+                    "colliding_object_handles": handles,
+                    "verified": True,
+                }
+            )
 
     def _step_physics(self) -> None:
         self.client.step()
@@ -2226,6 +2495,12 @@ class DynamicCoppeliaExecutor:
                 )
             if result == 0:
                 continue
+            self._validate_collision_object_handles(
+                first_label=first_label,
+                second_label=second_label,
+                robot_ids=robot_ids,
+                object_handles=object_handles,
+            )
             event = {
                 "timestamp_s": self.simulation_time_s,
                 "physics_step": self.physics_steps,
@@ -2263,6 +2538,34 @@ class DynamicCoppeliaExecutor:
                     0.0,
                     source="collision_stop",
                 )
+
+    def _validate_collision_object_handles(
+        self,
+        *,
+        first_label: str,
+        second_label: str,
+        robot_ids: tuple[str, ...],
+        object_handles: list[int],
+    ) -> None:
+        if len(object_handles) != 2:
+            raise DynamicCoppeliaError(
+                "Coppelia did not identify the exact colliding object pair for "
+                f"{first_label} versus {second_label}"
+            )
+        reported = set(object_handles)
+        excluded = set().union(*self.robot_excluded_shape_handles.values())
+        if reported.intersection(excluded):
+            raise DynamicCoppeliaError(
+                "Coppelia collision evidence referenced excluded YouBot geometry"
+            )
+        if any(
+            not reported.intersection(self.robot_base_shape_handles[robot_id])
+            for robot_id in robot_ids
+        ):
+            raise DynamicCoppeliaError(
+                "Coppelia collision evidence is not bound to every implicated "
+                "mobile base"
+            )
 
     def _update_command_responses(self) -> None:
         for robot_id, (commanded_at_s, anchor) in sorted(self.command_response_anchor.items()):
@@ -2440,6 +2743,92 @@ def _parse_collision_result(raw: object) -> tuple[int, list[int]]:
             handles = [int(item) for item in raw[1]]
         return result, handles
     raise DynamicCoppeliaError(f"Coppelia returned a malformed collision-query result: {raw!r}")
+
+
+def _shape_xy_footprint_radius_m(
+    sim: Any,
+    *,
+    shape_handle: int,
+    robot_handle: int,
+) -> float:
+    raw_bounds = sim.getShapeBB(shape_handle)
+    if (
+        not isinstance(raw_bounds, (list, tuple))
+        or len(raw_bounds) != 2
+        or not isinstance(raw_bounds[0], (list, tuple))
+        or len(raw_bounds[0]) != 3
+        or not isinstance(raw_bounds[1], (list, tuple))
+        or len(raw_bounds[1]) != 7
+    ):
+        raise DynamicCoppeliaError(
+            f"shape {shape_handle} returned malformed bounding-box evidence"
+        )
+    dimensions = [float(value) for value in raw_bounds[0]]
+    bounding_pose = [float(value) for value in raw_bounds[1]]
+    object_matrix = [
+        float(value)
+        for value in sim.getObjectMatrix(shape_handle, robot_handle)
+    ]
+    if (
+        len(object_matrix) != 12
+        or any(not math.isfinite(value) for value in [*dimensions, *bounding_pose, *object_matrix])
+        or any(value <= 0 for value in dimensions)
+    ):
+        raise DynamicCoppeliaError(
+            f"shape {shape_handle} returned invalid footprint geometry"
+        )
+    quaternion = bounding_pose[3:]
+    quaternion_norm = math.sqrt(sum(value * value for value in quaternion))
+    if quaternion_norm <= 1e-12:
+        raise DynamicCoppeliaError(
+            f"shape {shape_handle} returned a zero bounding-box quaternion"
+        )
+    qx, qy, qz, qw = (value / quaternion_norm for value in quaternion)
+    rotation = (
+        (
+            1 - 2 * (qy * qy + qz * qz),
+            2 * (qx * qy - qz * qw),
+            2 * (qx * qz + qy * qw),
+        ),
+        (
+            2 * (qx * qy + qz * qw),
+            1 - 2 * (qx * qx + qz * qz),
+            2 * (qy * qz - qx * qw),
+        ),
+        (
+            2 * (qx * qz - qy * qw),
+            2 * (qy * qz + qx * qw),
+            1 - 2 * (qx * qx + qy * qy),
+        ),
+    )
+    maximum_radius = 0.0
+    for x_sign in (-1.0, 1.0):
+        for y_sign in (-1.0, 1.0):
+            for z_sign in (-1.0, 1.0):
+                local_corner = (
+                    x_sign * dimensions[0] / 2,
+                    y_sign * dimensions[1] / 2,
+                    z_sign * dimensions[2] / 2,
+                )
+
+                shape_corner = [
+                    bounding_pose[axis]
+                    + sum(rotation[axis][item] * local_corner[item] for item in range(3))
+                    for axis in range(3)
+                ]
+                robot_corner = [
+                    object_matrix[axis * 4 + 3]
+                    + sum(
+                        object_matrix[axis * 4 + item] * shape_corner[item]
+                        for item in range(3)
+                    )
+                    for axis in range(3)
+                ]
+                maximum_radius = max(
+                    maximum_radius,
+                    math.hypot(robot_corner[0], robot_corner[1]),
+                )
+    return maximum_radius
 
 
 def _minimum_point_separation(

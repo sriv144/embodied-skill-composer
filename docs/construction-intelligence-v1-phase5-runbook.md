@@ -85,6 +85,12 @@ Both runs must show:
   the wheel-command and arm/gripper writers are disabled with read-back
   verification, while allowlisted passive omni-wheel geometry-maintenance scripts
   remain enabled, leaving Python as the exclusive wheel-command owner;
+- an exact contact/collision subset per YouBot containing the chassis and four
+  `wheel_respondable_*` shapes; every other imported arm, gripper, platform, and
+  visual shape has respondable/collidable contact disabled with read-back while
+  preserving its imported static/dynamic classification;
+- a measured chassis-plus-wheel footprint inside the planner radius and a positive
+  overlapping-probe collision self-test for every base collection before start;
 - non-zero wheel commands, measured telemetry, and measured command response for
   every active robot;
 - physical collision/contact queries for every required robot/robot,

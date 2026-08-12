@@ -3478,6 +3478,19 @@ class Phase5FullCottageRunner:
             raise ValueError(
                 "Phase 5 physical-yard manifest does not match the scenario plan"
             )
+        if not math.isclose(
+            executor.config.planned_robot_footprint_radius_m,
+            physical_yard.configuration.robot_footprint_radius_m,
+            rel_tol=1e-9,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                "Phase 5 executor footprint does not match the physical-yard plan"
+            )
+        if not executor.robot_base_contact_gate_passed:
+            raise ValueError(
+                "Phase 5 requires a verified base-only contact collision monitor"
+            )
         self.executor = executor
         self.scenario = scenario.model_copy(deep=True)
         self.plan = executor.plan
@@ -4552,6 +4565,19 @@ class Phase5FullCottageRunner:
                 == self.executor.physics_steps
                 * len(self.executor.collision_pairs)
             ),
+            "base_only_contact_and_collision_monitor_verified": (
+                self.executor.robot_base_contact_gate_passed
+                and len(self.executor.robot_base_physics_audit)
+                == len(self.plan.robots)
+                and len(self.executor.robot_collision_self_tests)
+                == len(self.plan.robots)
+                and math.isclose(
+                    self.executor.config.planned_robot_footprint_radius_m,
+                    self.yard_config.robot_footprint_radius_m,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+            ),
             "exclusive_wheel_command_ownership_proven": (
                 self.executor.script_control_gate_passed
                 and set(self.executor.script_control_by_robot)
@@ -5025,6 +5051,7 @@ def write_phase5_artifact_bundle(
             "Logical lift and descent are not physical motion; only the final target-pose snap may contact installed structure.",
             "Idle and disabled robots remain infinite-height XY no-overflight exclusions.",
             "No arm, gripper, grasp contact, cooperative contact, or payload dynamics are claimed.",
+            "Imported non-base YouBot shapes retain their static/dynamic classification but are nonrespondable, noncollidable, and excluded from contact evidence.",
             "Only YouBot base wheel commands and measured base telemetry are physical simulator evidence.",
         ],
         artifacts=artifacts,
@@ -5592,12 +5619,24 @@ def _verify_passing_phase5_evidence(
         is not True
     ):
         raise ValueError("physical collision queries do not cover every physics step")
+    base_handles_by_robot, excluded_robot_shape_handles = (
+        _verify_robot_base_physics_audit(
+            diagnostics=diagnostics,
+            trace=trace,
+            robot_ids=robot_ids,
+            planned_radius_m=(
+                physical_yard.configuration.robot_footprint_radius_m
+            ),
+        )
+    )
     _verify_collision_trace(
         scenario=scenario,
         trace=trace,
         diagnostics=diagnostics,
         physics_steps=physics_steps,
         expected_queries=expected_queries,
+        base_handles_by_robot=base_handles_by_robot,
+        excluded_robot_shape_handles=excluded_robot_shape_handles,
     )
     _verify_runtime_inventory_trace(
         scenario=scenario,
@@ -5767,6 +5806,7 @@ def _verify_passing_phase5_evidence(
         "rigid_synchronized_carry_routes",
         "formation_offsets_within_configured_bound",
         "collision_queries_cover_every_physics_step",
+        "base_only_contact_and_collision_monitor_verified",
         "exclusive_wheel_command_ownership_proven",
         "site_obstacles_instantiated",
         "prior_generated_scene_cleanup_verified",
@@ -6841,6 +6881,168 @@ def _verify_logical_transition_stop_proof(
         )
 
 
+def _verify_robot_base_physics_audit(
+    *,
+    diagnostics: Mapping[str, object],
+    trace: list[object],
+    robot_ids: set[str],
+    planned_radius_m: float,
+) -> tuple[dict[str, set[int]], set[int]]:
+    audit = diagnostics.get("robot_base_physics_audit")
+    self_tests = diagnostics.get("robot_collision_self_tests")
+    measured_radii = _mapping_field(
+        diagnostics,
+        "measured_base_footprint_radius_m_by_robot",
+    )
+    if (
+        diagnostics.get("robot_base_contact_gate_passed") is not True
+        or not isinstance(audit, list)
+        or len(audit) != len(robot_ids)
+        or not isinstance(self_tests, list)
+        or len(self_tests) != len(robot_ids)
+        or set(measured_radii) != robot_ids
+        or diagnostics.get("robot_base_physics_audit_sha256")
+        != _sha256_json(audit)
+    ):
+        raise ValueError("mobile-base physics attestation is incomplete")
+    allowed_by_robot: dict[str, set[int]] = {}
+    excluded_handles: set[int] = set()
+    for raw_robot in audit:
+        if not isinstance(raw_robot, Mapping):
+            raise ValueError("mobile-base physics audit entry is malformed")
+        robot_id = raw_robot.get("robot_id")
+        allowed_raw = raw_robot.get("allowed_shape_handles")
+        excluded_raw = raw_robot.get("excluded_shape_handles")
+        records = raw_robot.get("shape_records")
+        if (
+            not isinstance(robot_id, str)
+            or robot_id not in robot_ids
+            or robot_id in allowed_by_robot
+            or not isinstance(allowed_raw, list)
+            or not isinstance(excluded_raw, list)
+            or not isinstance(records, list)
+        ):
+            raise ValueError("mobile-base physics robot audit is invalid")
+        allowed = {_integer_value(item) for item in allowed_raw}
+        excluded = {_integer_value(item) for item in excluded_raw}
+        if (
+            len(allowed) != 5
+            or not excluded
+            or allowed.intersection(excluded)
+            or len(records) != len(allowed | excluded)
+            or raw_robot.get("footprint_gate_passed") is not True
+            or raw_robot.get("base_only_policy_verified") is not True
+        ):
+            raise ValueError("mobile-base physics shape inventory is invalid")
+        record_handles: set[int] = set()
+        allowed_aliases: set[str] = set()
+        for raw_shape in records:
+            if not isinstance(raw_shape, Mapping):
+                raise ValueError("mobile-base shape audit record is malformed")
+            handle = _integer_value(raw_shape.get("handle"))
+            alias = raw_shape.get("alias")
+            before = raw_shape.get("before")
+            after = raw_shape.get("after")
+            if (
+                handle in record_handles
+                or not isinstance(alias, str)
+                or not isinstance(before, Mapping)
+                or not isinstance(after, Mapping)
+                or not isinstance(before.get("respondable"), int)
+                or not isinstance(before.get("static"), int)
+                or not isinstance(before.get("collidable"), bool)
+            ):
+                raise ValueError("mobile-base shape audit fields are invalid")
+            record_handles.add(handle)
+            if handle in allowed:
+                expected_role = "mobile_base"
+                expected_after = {
+                    "respondable": 1,
+                    "static": 0,
+                    "collidable": True,
+                }
+                allowed_aliases.add(alias.strip("/").rsplit("/", 1)[-1].casefold())
+            elif handle in excluded:
+                expected_role = "excluded_v1_geometry"
+                expected_after = {
+                    "respondable": 0,
+                    "static": before["static"],
+                    "collidable": False,
+                }
+            else:
+                raise ValueError("mobile-base shape audit has an unknown handle")
+            if raw_shape.get("role") != expected_role or dict(after) != expected_after:
+                raise ValueError("mobile-base shape policy readback is inconsistent")
+        expected_aliases = {
+            f"construction_intelligence_{robot_id}",
+            *(f"wheel_respondable_{name}" for name in ("fl", "rl", "rr", "fr")),
+        }
+        measured_radius = _number_value(
+            raw_robot.get("measured_footprint_radius_m")
+        )
+        if (
+            record_handles != allowed | excluded
+            or allowed_aliases != expected_aliases
+            or not math.isclose(
+                _number_value(raw_robot.get("planned_footprint_radius_m")),
+                planned_radius_m,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+            or measured_radius > planned_radius_m + 1e-9
+            or not math.isclose(
+                _number_value(measured_radii[robot_id]),
+                measured_radius,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError("mobile-base footprint evidence is inconsistent")
+        allowed_by_robot[robot_id] = allowed
+        excluded_handles.update(excluded)
+
+    tests_by_robot: dict[str, Mapping[str, object]] = {}
+    for raw_test in self_tests:
+        if not isinstance(raw_test, Mapping):
+            raise ValueError("collision-monitor self-test record is malformed")
+        robot_id = raw_test.get("robot_id")
+        handles = raw_test.get("colliding_object_handles")
+        if (
+            not isinstance(robot_id, str)
+            or robot_id not in allowed_by_robot
+            or robot_id in tests_by_robot
+            or raw_test.get("verified") is not True
+            or not isinstance(handles, list)
+            or len(handles) != 2
+        ):
+            raise ValueError("collision-monitor self-test is incomplete")
+        reported = {_integer_value(item) for item in handles}
+        probe_handle = _integer_value(raw_test.get("probe_handle"))
+        if (
+            probe_handle not in reported
+            or not reported.intersection(allowed_by_robot[robot_id])
+            or reported.intersection(excluded_handles)
+        ):
+            raise ValueError("collision-monitor self-test is not base-bound")
+        tests_by_robot[robot_id] = raw_test
+    if set(tests_by_robot) != robot_ids:
+        raise ValueError("collision-monitor self-tests do not cover the fleet")
+    ready = [
+        item
+        for item in trace
+        if isinstance(item, Mapping)
+        and item.get("event") == "collision_monitor_ready"
+    ]
+    if (
+        len(ready) != 1
+        or ready[0].get("base_physics_audit_sha256")
+        != _sha256_json(audit)
+        or ready[0].get("collision_self_tests") != self_tests
+    ):
+        raise ValueError("collision-monitor trace is not bound to base physics")
+    return allowed_by_robot, excluded_handles
+
+
 def _verify_collision_trace(
     *,
     scenario: ScenarioManifest,
@@ -6848,6 +7050,8 @@ def _verify_collision_trace(
     diagnostics: Mapping[str, object],
     physics_steps: int,
     expected_queries: int,
+    base_handles_by_robot: Mapping[str, set[int]],
+    excluded_robot_shape_handles: set[int],
 ) -> None:
     inventory = _expected_collision_inventory(scenario.plan)
     category_counts = Counter(
@@ -6938,6 +7142,17 @@ def _verify_collision_trace(
             ):
                 raise ValueError(
                     "collision trace contains an unknown or exempted pair"
+                )
+            raw_handles = raw_event.get("colliding_object_handles")
+            if not isinstance(raw_handles, list) or len(raw_handles) != 2:
+                raise ValueError("collision trace lacks an exact object pair")
+            object_handles = {_integer_value(item) for item in raw_handles}
+            if object_handles.intersection(excluded_robot_shape_handles) or any(
+                not object_handles.intersection(base_handles_by_robot[robot_id])
+                for robot_id in expected_robot_ids
+            ):
+                raise ValueError(
+                    "collision trace is not bound to the attested mobile base"
                 )
             derived_robots.update(
                 str(item) for item in expected_robot_ids
@@ -7533,6 +7748,12 @@ def _phase5_report(result: Phase5RunResult) -> str:
                 f"`{result.metrics.get('logical_payload_lift_count')} / "
                 f"{result.metrics.get('logical_installation_snap_count')}`"
             ),
+            (
+                "- Base contact/collision policy: `"
+                f"{result.metrics.get('robot_base_contact_gate_passed')}`; "
+                "measured footprint radii: `"
+                f"{result.metrics.get('measured_base_footprint_radius_m_by_robot')}`"
+            ),
             "",
             "## Acceptance gates",
             "",
@@ -7557,7 +7778,10 @@ def _phase5_report(result: Phase5RunResult) -> str:
                 "frozen final target pose after the measured team is stopped. Logical "
                 "lifting and descent are not physical motions. This evidence does not "
                 "claim arm motion, gripper actuation, grasp contact, cooperative contact "
-                "dynamics, or physical payload dynamics."
+                "dynamics, or physical payload dynamics. Imported non-base YouBot "
+                "shapes retain their static/dynamic classification but have respondable "
+                "and collidable contact disabled and are excluded from the attested "
+                "collision collections."
             ),
             "",
             f"Failure: `{result.error}`" if result.error else "",

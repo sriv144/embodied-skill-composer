@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,9 @@ class FakeDynamicSim:
     floatparam_simulation_time_step = 100
     scriptintparam_enabled = 101
     object_script_type = 102
+    object_shape_type = 0
     handle_tree = -1
+    handle_single = -8
     handle_scene = -2
     handle_all = -3
 
@@ -70,7 +73,11 @@ class FakeDynamicSim:
         self.script_sources: dict[int, str] = {}
         self.script_disabled: dict[int, bool] = {}
         self.bool_property_writes: list[tuple[int, str, bool]] = []
-        self.collections: dict[int, int] = {}
+        self.bool_properties: dict[tuple[int, str], bool] = {}
+        self.collections: dict[int, list[int]] = {}
+        self.shape_handles: set[int] = set()
+        self.shape_dimensions: dict[int, list[float]] = {}
+        self.object_matrices: dict[tuple[int, int], list[float]] = {}
         self.parents: dict[int, int] = {}
         self.removed_object_batches: list[list[int]] = []
 
@@ -82,10 +89,17 @@ class FakeDynamicSim:
         return self._handle()
 
     def createPrimitiveShape(self, _kind: int, _dimensions, _options: int) -> int:
-        return self._handle()
+        handle = self._handle()
+        self.shape_handles.add(handle)
+        self.shape_dimensions[handle] = [float(value) for value in _dimensions]
+        self.bool_properties[(handle, "collidable")] = True
+        return handle
 
     def loadModel(self, _path: str) -> int:
         root = self._handle()
+        self.shape_handles.add(root)
+        self.shape_dimensions[root] = [0.07, 0.15, 0.24]
+        self.bool_properties[(root, "collidable")] = False
         controller = self._handle()
         self.aliases[controller] = "/robot/Script"
         self.script_handles.add(controller)
@@ -112,6 +126,28 @@ class FakeDynamicSim:
             """
             self.script_disabled[script] = False
             descendants.extend((handle, script))
+            respondable_wheel = self._handle()
+            self.aliases[respondable_wheel] = f"/robot/wheel_respondable_{name}"
+            self.shape_handles.add(respondable_wheel)
+            self.shape_dimensions[respondable_wheel] = [0.042, 0.042, 0.042]
+            wheel_x = -0.02 if name in {"rl", "rr"} else 0.02
+            wheel_y = -0.067 if name in {"rl", "fl"} else 0.067
+            self.object_matrices[(respondable_wheel, root)] = [
+                1.0,
+                0.0,
+                0.0,
+                wheel_x,
+                0.0,
+                1.0,
+                0.0,
+                wheel_y,
+                0.0,
+                0.0,
+                1.0,
+                -0.096,
+            ]
+            self.bool_properties[(respondable_wheel, "collidable")] = False
+            descendants.append(respondable_wheel)
         arm_script = self._handle()
         self.aliases[arm_script] = "/robot/youBotArmJoint0/Script"
         self.script_handles.add(arm_script)
@@ -122,6 +158,13 @@ class FakeDynamicSim:
         """
         self.script_disabled[arm_script] = False
         descendants.append(arm_script)
+        for name in ("Rectangle13", "swedishWheel_rl"):
+            shape = self._handle()
+            self.aliases[shape] = f"/robot/{name}"
+            self.shape_handles.add(shape)
+            self.shape_dimensions[shape] = [0.03, 0.04, 0.04]
+            self.bool_properties[(shape, "collidable")] = True
+            descendants.append(shape)
         self.trees[root] = [root, *descendants]
         self.positions[root] = [0.0, 0.0, 0.05]
         self.orientations[root] = [0.0, 0.0, 0.0]
@@ -170,6 +213,8 @@ class FakeDynamicSim:
             descendants = sorted(collected)
         if object_type == self.object_script_type:
             return [item for item in descendants if item in self.script_handles]
+        if object_type == self.object_shape_type:
+            return [item for item in descendants if item in self.shape_handles]
         return descendants
 
     def scaleObjects(self, _handles, _scale: float, _positions_too: bool) -> None:
@@ -191,6 +236,13 @@ class FakeDynamicSim:
             self.script_sources.pop(handle, None)
             self.script_disabled.pop(handle, None)
             self.linear_velocities.pop(handle, None)
+            self.shape_handles.discard(handle)
+            self.shape_dimensions.pop(handle, None)
+            self.bool_properties = {
+                key: value
+                for key, value in self.bool_properties.items()
+                if key[0] != handle
+            }
         self.parents = {
             child: parent
             for child, parent in self.parents.items()
@@ -244,24 +296,31 @@ class FakeDynamicSim:
         return self.int_param_values.get((handle, parameter), 1)
 
     def getBoolProperty(self, handle: int, name: str) -> bool:
-        assert name == "scriptDisabled"
-        return self.script_disabled[handle]
+        if name == "scriptDisabled":
+            return self.script_disabled[handle]
+        return self.bool_properties[(handle, name)]
 
     def getStringProperty(self, handle: int, name: str) -> str:
         assert name == "code"
         return self.script_sources[handle]
 
     def setBoolProperty(self, handle: int, name: str, value: bool) -> None:
-        assert name == "scriptDisabled"
         self.bool_property_writes.append((handle, name, value))
-        self.script_disabled[handle] = value
+        if name == "scriptDisabled":
+            self.script_disabled[handle] = value
+        else:
+            self.bool_properties[(handle, name)] = value
 
-    def checkCollision(self, _first: int, _second: int) -> int:
+    def checkCollision(self, _first: int, _second: int):
+        if self.aliases.get(_second, "").startswith(
+            "collision_monitor_self_test_"
+        ):
+            return 1, [self.collections[_first][0], _second]
         return 0
 
     def createCollection(self, _options: int) -> int:
         handle = self._handle()
-        self.collections[handle] = -1
+        self.collections[handle] = []
         return handle
 
     def addItemToCollection(
@@ -271,7 +330,32 @@ class FakeDynamicSim:
         object_handle: int,
         _options: int,
     ) -> None:
-        self.collections[collection] = object_handle
+        assert _what == self.handle_single
+        self.collections[collection].append(object_handle)
+
+    def getShapeBB(self, handle: int):
+        return self.shape_dimensions[handle], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+    def getObjectMatrix(self, handle: int, relative_to: int):
+        if handle == relative_to:
+            return [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+            ]
+        return self.object_matrices.get(
+            (handle, relative_to),
+            [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        )
 
     def setJointTargetVelocity(self, handle: int, velocity: float) -> None:
         self.target_velocities.append((handle, velocity))
@@ -364,8 +448,13 @@ def test_dynamic_executor_commands_wheels_without_post_start_pose_sync(plan) -> 
     assert executor.verified_enabled_maintenance_scripts == 16
     assert executor.disabled_wheel_command_scripts == 4
     assert executor.disabled_arm_gripper_scripts == 4
-    assert len(fake.sim.bool_property_writes) == 24
-    for handle, _name, _disabled in fake.sim.bool_property_writes:
+    script_property_writes = [
+        item
+        for item in fake.sim.bool_property_writes
+        if item[1] == "scriptDisabled"
+    ]
+    assert len(script_property_writes) == 24
+    for handle, _name, _disabled in script_property_writes:
         alias = fake.sim.aliases[handle].casefold()
         expected_disabled = (
             alias.endswith("/script")
@@ -393,6 +482,19 @@ def test_dynamic_executor_commands_wheels_without_post_start_pose_sync(plan) -> 
     assert floor_center_z + CONSTRUCTION_FLOOR_THICKNESS_M / 2 == pytest.approx(0.0)
     assert any(item[1:] == (fake.sim.shapeintparam_respondable, 1) for item in fake.sim.int_params)
     assert all(set(wheels) == {"fl", "rl", "rr", "fr"} for wheels in executor.wheel_handles.values())
+    assert executor.robot_base_contact_gate_passed
+    assert len(executor.robot_base_physics_audit) == 4
+    assert all(
+        len(item["allowed_shape_handles"]) == 5
+        and item["excluded_shape_handles"]
+        and item["footprint_gate_passed"] is True
+        for item in executor.robot_base_physics_audit
+    )
+    assert all(
+        fake.sim.collections[executor.robot_collision_entities[robot_id]]
+        == sorted(executor.robot_base_shape_handles[robot_id])
+        for robot_id in executor.robot_handles
+    )
 
     executor.start()
     command = executor.command_body_velocity("robot_1", 0.5, -0.2, 0.1)
@@ -568,6 +670,90 @@ def test_dynamic_executor_rejects_unclassified_retained_script(plan) -> None:
         executor.connect()
 
 
+def test_dynamic_executor_rejects_undersized_planned_base_footprint(plan) -> None:
+    fake = FakeDynamicClient()
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        config=DynamicCoppeliaConfig(planned_robot_footprint_radius_m=0.05),
+        client_factory=lambda _config: fake,
+    )
+
+    with pytest.raises(DynamicCoppeliaError, match="exceeds planned radius"):
+        executor.connect()
+
+
+def test_dynamic_executor_rejects_blind_base_collision_collection(plan) -> None:
+    fake = FakeDynamicClient()
+    fake.sim.checkCollision = lambda _first, _second: 0  # type: ignore[method-assign]
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        client_factory=lambda _config: fake,
+    )
+
+    with pytest.raises(DynamicCoppeliaError, match="positive self-test"):
+        executor.connect()
+
+
+def test_dynamic_executor_rejects_collision_from_excluded_youbot_shape(plan) -> None:
+    fake = FakeDynamicClient()
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        config=DynamicCoppeliaConfig(settle_steps=0),
+        client_factory=lambda _config: fake,
+    )
+    executor.connect()
+    robot_id = plan.robots[0].robot_id
+    collection = executor.robot_collision_entities[robot_id]
+    module_handle = executor.module_handles[plan.modules[0].module_id]
+    excluded_handle = min(executor.robot_excluded_shape_handles[robot_id])
+
+    def excluded_collision(first: int, second: int):
+        if first == collection and second == module_handle:
+            return 1, [excluded_handle, module_handle]
+        return 0
+
+    fake.sim.checkCollision = excluded_collision  # type: ignore[method-assign]
+    executor.start()
+    with pytest.raises(DynamicCoppeliaError, match="excluded YouBot geometry"):
+        executor._step_physics()
+    executor.stop()
+
+
+def test_phase5_verifier_rejects_tampered_base_physics_readback(plan) -> None:
+    import embodied_skill_composer.construction.coppelia_phase5 as phase5
+
+    fake = FakeDynamicClient()
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        client_factory=lambda _config: fake,
+    )
+    executor.connect()
+    diagnostics = deepcopy(executor.diagnostics())
+    audit = diagnostics["robot_base_physics_audit"]
+    assert isinstance(audit, list)
+    first_robot = audit[0]
+    assert isinstance(first_robot, dict)
+    records = first_robot["shape_records"]
+    assert isinstance(records, list)
+    excluded = next(
+        record
+        for record in records
+        if record["role"] == "excluded_v1_geometry"
+    )
+    excluded["after"]["collidable"] = True
+    diagnostics["robot_base_physics_audit_sha256"] = phase5._sha256_json(
+        audit
+    )
+
+    with pytest.raises(ValueError, match="policy readback"):
+        phase5._verify_robot_base_physics_audit(
+            diagnostics=diagnostics,
+            trace=executor.runtime_events,
+            robot_ids={robot.robot_id for robot in plan.robots},
+            planned_radius_m=executor.config.planned_robot_footprint_radius_m,
+        )
+
+
 def test_logically_attached_module_collision_is_never_exempted(plan) -> None:
     fake = FakeDynamicClient()
     executor = DynamicCoppeliaExecutor(
@@ -582,8 +768,13 @@ def test_logically_attached_module_collision_is_never_exempted(plan) -> None:
     robot_collection = executor.robot_collision_entities[robot_id]
     module_handle = executor.module_handles[module_id]
 
-    def attached_module_collision(first: int, second: int) -> int:
-        return int(first == robot_collection and second == module_handle)
+    def attached_module_collision(first: int, second: int):
+        if first == robot_collection and second == module_handle:
+            return 1, [
+                min(executor.robot_base_shape_handles[robot_id]),
+                module_handle,
+            ]
+        return 0
 
     fake.sim.checkCollision = attached_module_collision  # type: ignore[method-assign]
     executor.logical_attachments[module_id] = [robot_id]

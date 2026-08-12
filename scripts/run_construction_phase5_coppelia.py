@@ -109,14 +109,20 @@ def main() -> int:
     run_id = f"{timestamp}-{args.scenario}-s{args.seed}"
     run_dir = args.output_root.resolve() / run_id
 
-    config = DynamicCoppeliaConfig(host=args.host, port=args.port)
-    if args.robot_model is not None:
-        config.robot_model_path = str(args.robot_model.resolve())
     design = load_house_design(args.design)
     generated_scenario = generate_cottage_scenario(args.seed, design)
     scenario, physical_yard = prepare_phase5_physical_yard(
         generated_scenario
     )
+    config = DynamicCoppeliaConfig(
+        host=args.host,
+        port=args.port,
+        planned_robot_footprint_radius_m=(
+            physical_yard.configuration.robot_footprint_radius_m
+        ),
+    )
+    if args.robot_model is not None:
+        config.robot_model_path = str(args.robot_model.resolve())
     executor = DynamicCoppeliaExecutor(scenario.plan, config=config)
     try:
         executor.connect()
