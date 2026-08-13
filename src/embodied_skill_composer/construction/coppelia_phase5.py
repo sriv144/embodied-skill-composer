@@ -591,6 +591,7 @@ class Phase5PhysicalYardConfig(_StrictModel):
     dispatch_robot_spacing_m: float = Field(default=1.0, ge=0.6)
     robot_footprint_radius_m: float = Field(default=0.12, ge=0.08)
     route_clearance_m: float = Field(default=0.16, ge=0.1)
+    route_tracking_error_m: float = Field(default=0.12, ge=0)
     formation_clearance_m: float = Field(default=0.5, ge=0.3)
     maximum_formation_expansion_m: float = Field(
         default=4.0,
@@ -651,6 +652,16 @@ class _Aabb3:
             self.minimum_y,
             self.maximum_y,
         )
+
+
+def _planned_robot_separation_m(config: Phase5PhysicalYardConfig) -> float:
+    """Return center separation that remains safe at bounded tracking error."""
+
+    return (
+        2 * config.robot_footprint_radius_m
+        + config.route_clearance_m
+        + 2 * config.route_tracking_error_m
+    )
 
 
 def prepare_phase5_physical_yard(
@@ -1409,9 +1420,7 @@ def _phase5_route_grid(
                 _inflate_bounds(bounds, base_world_clearance),
             )
         )
-    idle_clearance = (
-        2 * config.robot_footprint_radius_m + config.route_clearance_m
-    )
+    idle_clearance = _planned_robot_separation_m(config)
     for robot_id, position in robot_positions.items():
         if robot_id in active_robot_ids:
             continue
@@ -1820,9 +1829,7 @@ def _phase5_carrier_route_grid(
                 bounds,
                 clearance=config.route_clearance_m,
             )
-    idle_radius = (
-        2 * config.robot_footprint_radius_m + config.route_clearance_m
-    )
+    idle_radius = _planned_robot_separation_m(config)
     for robot_id, position in robot_positions.items():
         if robot_id in active_robot_ids:
             continue
@@ -1997,6 +2004,13 @@ def _minimum_record(
     values: list[tuple[float, str, str]],
     config: Phase5PhysicalYardConfig,
 ) -> Phase5ClearanceMinimum:
+    required_clearance = config.route_clearance_m
+    if (
+        source == "planned"
+        and mover_kind == "robot_base"
+        and obstacle_kind in {"idle_robot", "disabled_robot"}
+    ):
+        required_clearance += 2 * config.route_tracking_error_m
     if not values:
         return Phase5ClearanceMinimum(
             phase=phase,
@@ -2004,7 +2018,7 @@ def _minimum_record(
             mover_kind=mover_kind,
             obstacle_kind=obstacle_kind,
             minimum_surface_clearance_m=None,
-            required_clearance_m=config.route_clearance_m,
+            required_clearance_m=required_clearance,
             evaluated_pair_count=0,
         )
     minimum, mover_id, obstacle_id = min(
@@ -2017,7 +2031,7 @@ def _minimum_record(
         mover_kind=mover_kind,
         obstacle_kind=obstacle_kind,
         minimum_surface_clearance_m=max(0.0, minimum),
-        required_clearance_m=config.route_clearance_m,
+        required_clearance_m=required_clearance,
         evaluated_pair_count=len(values),
         limiting_mover_id=mover_id,
         limiting_obstacle_id=obstacle_id,
@@ -2552,10 +2566,7 @@ def _plan_rigid_phase5_job(
             }
             approach_routes = _synchronize_safe_route_pair(
                 approach_routes,
-                minimum_separation_m=(
-                    2 * config.robot_footprint_radius_m
-                    + config.route_clearance_m
-                ),
+                minimum_separation_m=_planned_robot_separation_m(config),
             )
             approach = approach.model_copy(
                 update={"world_paths": approach_routes}
@@ -2693,10 +2704,7 @@ def _plan_phase5_dispatch_return(
         }
         exact_routes = _synchronize_safe_route_pair(
             exact_routes,
-            minimum_separation_m=(
-                2 * config.robot_footprint_radius_m
-                + config.route_clearance_m
-            ),
+            minimum_separation_m=_planned_robot_separation_m(config),
         )
         route = route.model_copy(update={"world_paths": exact_routes})
         clearance_records = _base_world_clearance_minima(
@@ -3486,6 +3494,15 @@ class Phase5FullCottageRunner:
         ):
             raise ValueError(
                 "Phase 5 executor footprint does not match the physical-yard plan"
+            )
+        if (
+            _planned_robot_separation_m(physical_yard.configuration) + 1e-9
+            < executor.config.safety_distance_m
+            + 2 * executor.config.waypoint_tolerance_m
+        ):
+            raise ValueError(
+                "Phase 5 planned robot separation cannot absorb the executor "
+                "tracking error"
             )
         if not executor.robot_base_contact_gate_passed:
             raise ValueError(
@@ -6416,9 +6433,8 @@ def _verify_replay_semantics(
             trace_records=trace_records,
             config=config,
         )
-        required_pair_separation = (
-            2 * physical_yard.configuration.robot_footprint_radius_m
-            + physical_yard.configuration.route_clearance_m
+        required_pair_separation = _planned_robot_separation_m(
+            physical_yard.configuration
         )
         for phase_name, routes in (
             ("approach", item.approach_routes),

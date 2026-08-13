@@ -107,7 +107,9 @@ Both runs must show:
 - per-robot pickup formation, team-spacing, and install errors inside configured
   tolerances;
 - equal-horizon base routes rigidly derived from one carrier route, with synchronized
-  measured formation error inside tolerance;
+  measured formation error inside tolerance; approach and return routing reserves
+  the configured clearance plus both bases' bounded waypoint-tracking error before
+  any wheel command, so controller tolerance cannot consume the live safety gap;
 - continuous planned and measured base-to-payload clearance of at least the robot
   footprint radius plus route clearance at every carry sample;
 - analytic continuous planned and measured world clearance for every approach,

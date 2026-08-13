@@ -6,8 +6,11 @@ import pytest
 
 from embodied_skill_composer.construction.coppelia_phase5 import (
     Phase5ClearanceMinimum,
+    Phase5PhysicalYardConfig,
     _Aabb3,
+    _minimum_record,
     _oriented_half_extents_xyz,
+    _planned_robot_separation_m,
     _require_clearance_records,
     _route_bounds_clearance,
     _segment_segment_distance,
@@ -120,6 +123,46 @@ def test_route_time_scheduler_rejects_an_impossible_position_swap() -> None:
             },
             minimum_separation_m=0.4,
         )
+
+
+def test_planned_robot_separation_absorbs_both_bases_tracking_error() -> None:
+    config = Phase5PhysicalYardConfig(
+        robot_footprint_radius_m=0.12,
+        route_clearance_m=0.16,
+        route_tracking_error_m=0.12,
+    )
+
+    assert _planned_robot_separation_m(config) == pytest.approx(0.64)
+    assert _planned_robot_separation_m(config) > 0.34 + 2 * 0.12
+
+    with pytest.raises(RoutingError, match="start below"):
+        _synchronize_safe_route_pair(
+            {
+                "robot_0": [Vec2(x=0, y=0)],
+                "robot_1": [Vec2(x=0.455, y=0)],
+            },
+            minimum_separation_m=_planned_robot_separation_m(config),
+        )
+
+    planned_idle_clearance = _minimum_record(
+        phase="return",
+        source="planned",
+        mover_kind="robot_base",
+        obstacle_kind="idle_robot",
+        values=[(0.4, "robot_0", "robot_1")],
+        config=config,
+    )
+    measured_idle_clearance = _minimum_record(
+        phase="return",
+        source="measured",
+        mover_kind="robot_base",
+        obstacle_kind="idle_robot",
+        values=[(0.16, "robot_0", "robot_1")],
+        config=config,
+    )
+
+    assert planned_idle_clearance.required_clearance_m == pytest.approx(0.4)
+    assert measured_idle_clearance.required_clearance_m == pytest.approx(0.16)
 
 
 def test_payload_may_clear_finite_structure_vertically_but_not_a_robot() -> None:
