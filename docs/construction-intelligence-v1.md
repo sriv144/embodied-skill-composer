@@ -64,6 +64,7 @@ data.
 | [Reproducibility](construction-intelligence-v1-reproducibility.md) | Environments, quality gates, fingerprints, durable jobs, and strict resume behavior |
 | [Public-demo provenance](construction-intelligence-public-demo-provenance.md) | Preview/release channels, input descriptors, hashes, and fail-closed packaging |
 | [Release assets](construction-intelligence-v1-release.md) | Deterministic ZIP staging, draft verification, and fail-closed GitHub publication |
+| [V1 release notes](construction-intelligence-v1-release-notes.md) | Public release summary, asset inventory, reproduction links, and simulator boundary |
 | [Phase 3 evidence](construction-intelligence-v1-phase3-evidence.md) | Protocol smoke matrix and protected-check evidence |
 | [Phase 5 runbook](construction-intelligence-v1-phase5-runbook.md) | Required live Coppelia nominal and unavailable-robot runs |
 | [Phase 6 evidence](construction-intelligence-v1-phase6-evidence.md) | Local editor, workbench, accessibility, responsive, and browser acceptance evidence |
