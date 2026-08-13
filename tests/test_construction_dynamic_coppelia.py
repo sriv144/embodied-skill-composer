@@ -885,7 +885,10 @@ def test_remote_step_handshake_fails_closed_without_measured_advance(plan) -> No
     fake = UnadvancedStepHandshakeClient()
     executor = DynamicCoppeliaExecutor(
         plan,
-        config=DynamicCoppeliaConfig(settle_steps=0),
+        config=DynamicCoppeliaConfig(
+            settle_steps=0,
+            maximum_remote_step_handshake_retries=0,
+        ),
         client_factory=lambda _config: fake,
     )
     executor.connect()
@@ -899,7 +902,57 @@ def test_remote_step_handshake_fails_closed_without_measured_advance(plan) -> No
 
     assert executor.physics_steps == 0
     assert executor.remote_step_handshake_reconciliations == 0
+    assert executor.remote_step_handshake_retries == 0
     assert executor.collision_query_rounds == 0
+
+
+def test_remote_step_handshake_retries_only_when_measured_time_is_unchanged(
+    plan,
+) -> None:
+    class UnadvancedThenSuccessfulStepClient(FakeDynamicClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        def step(self) -> None:
+            self.attempts += 1
+            if self.attempts == 1:
+                raise RuntimeError("No such function: _*executed*_")
+            super().step()
+
+    fake = UnadvancedThenSuccessfulStepClient()
+    executor = DynamicCoppeliaExecutor(
+        plan,
+        config=DynamicCoppeliaConfig(settle_steps=0),
+        client_factory=lambda _config: fake,
+    )
+    executor.connect()
+    executor.start()
+    executor._step_physics()
+    executor.stop()
+
+    assert fake.attempts == 2
+    assert fake.steps == 1
+    assert executor.physics_steps == 1
+    assert executor.remote_step_handshake_reconciliations == 0
+    assert executor.remote_step_handshake_retries == 1
+    assert executor.collision_query_rounds == 1
+    event = next(
+        item
+        for item in executor.runtime_events
+        if item["event"] == "remote_step_handshake_retried"
+    )
+    assert event == {
+        "timestamp_s": 0.0,
+        "event": "remote_step_handshake_retried",
+        "physics_step": 1,
+        "retry_index": 1,
+        "observed_simulation_time_s": 0.0,
+        "previous_simulation_time_s": 0.0,
+        "expected_simulation_time_s": 0.05,
+        "error": "No such function: _*executed*_",
+    }
+    assert executor.diagnostics()["remote_step_handshake_retries"] == 1
 
 
 def test_remote_step_handshake_evidence_is_bound_to_measured_time() -> None:
@@ -907,9 +960,20 @@ def test_remote_step_handshake_evidence_is_bound_to_measured_time() -> None:
 
     diagnostics = {
         "remote_step_handshake_reconciliations": 1,
+        "remote_step_handshake_retries": 1,
         "executor_config": DynamicCoppeliaConfig().model_dump(mode="json"),
     }
     trace: list[object] = [
+        {
+            "timestamp_s": 0.0,
+            "event": "remote_step_handshake_retried",
+            "physics_step": 1,
+            "retry_index": 1,
+            "observed_simulation_time_s": 0.0,
+            "previous_simulation_time_s": 0.0,
+            "expected_simulation_time_s": 0.05,
+            "error": "No such function: _*executed*_",
+        },
         {
             "timestamp_s": 0.05,
             "event": "remote_step_handshake_reconciled",
@@ -926,14 +990,27 @@ def test_remote_step_handshake_evidence_is_bound_to_measured_time() -> None:
     )
 
     tampered = deepcopy(trace)
-    assert isinstance(tampered[0], dict)
-    tampered[0]["observed_simulation_time_s"] = 0.1
+    assert isinstance(tampered[1], dict)
+    tampered[1]["observed_simulation_time_s"] = 0.1
     with pytest.raises(
         ValueError,
         match="reconciliation trace is invalid",
     ):
         phase5._verify_remote_step_handshake_reconciliations(
             trace=tampered,
+            diagnostics=diagnostics,
+            physics_steps=2,
+        )
+
+    tampered_retry = deepcopy(trace)
+    assert isinstance(tampered_retry[0], dict)
+    tampered_retry[0]["observed_simulation_time_s"] = 0.05
+    with pytest.raises(
+        ValueError,
+        match="retry trace is invalid",
+    ):
+        phase5._verify_remote_step_handshake_reconciliations(
+            trace=tampered_retry,
             diagnostics=diagnostics,
             physics_steps=2,
         )

@@ -7057,6 +7057,9 @@ def _verify_remote_step_handshake_reconciliations(
     recorded_count = _integer_value(
         diagnostics.get("remote_step_handshake_reconciliations", 0)
     )
+    recorded_retry_count = _integer_value(
+        diagnostics.get("remote_step_handshake_retries", 0)
+    )
     config = DynamicCoppeliaConfig.model_validate(
         _mapping_field(diagnostics, "executor_config")
     )
@@ -7066,9 +7069,17 @@ def _verify_remote_step_handshake_reconciliations(
         if isinstance(item, Mapping)
         and item.get("event") == "remote_step_handshake_reconciled"
     ]
+    retry_records = [
+        item
+        for item in trace
+        if isinstance(item, Mapping)
+        and item.get("event") == "remote_step_handshake_retried"
+    ]
     if (
         recorded_count != len(records)
         or recorded_count > config.maximum_remote_step_handshake_reconciliations
+        or recorded_retry_count != len(retry_records)
+        or recorded_retry_count > config.maximum_remote_step_handshake_retries
     ):
         raise ValueError("remote step handshake reconciliation count is invalid")
     seen_steps: set[int] = set()
@@ -7108,6 +7119,51 @@ def _verify_remote_step_handshake_reconciliations(
         ):
             raise ValueError("remote step handshake reconciliation trace is invalid")
         seen_steps.add(step)
+    for retry_index, record in enumerate(retry_records, start=1):
+        step = _integer_value(record.get("physics_step"))
+        observed_time = _number_value(
+            record.get("observed_simulation_time_s")
+        )
+        previous_time = _number_value(
+            record.get("previous_simulation_time_s")
+        )
+        expected_time = _number_value(
+            record.get("expected_simulation_time_s")
+        )
+        timestamp_s = _number_value(record.get("timestamp_s"))
+        derived_previous_time = (step - 1) / config.control_hz
+        derived_expected_time = step / config.control_hz
+        if (
+            step < 1
+            or step > physics_steps
+            or record.get("retry_index") != retry_index
+            or record.get("error") != "No such function: _*executed*_"
+            or not math.isclose(
+                previous_time,
+                derived_previous_time,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                observed_time,
+                derived_previous_time,
+                rel_tol=0.0,
+                abs_tol=max(1e-9, (1.0 / config.control_hz) * 1e-6),
+            )
+            or not math.isclose(
+                expected_time,
+                derived_expected_time,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+            or not math.isclose(
+                timestamp_s,
+                observed_time,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise ValueError("remote step handshake retry trace is invalid")
 
 
 def _verify_collision_trace(

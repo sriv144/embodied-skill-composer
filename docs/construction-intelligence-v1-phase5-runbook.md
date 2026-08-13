@@ -98,9 +98,11 @@ Both runs must show:
   query. The manifest still binds the exhaustive robot/module and robot/obstacle
   pair inventory, exact collection membership, and exact detected object handles;
 - any ZeroMQ `_*executed*_` step-handshake fault is reconciled only when the
-  simulator clock independently proves exactly one expected deterministic step;
-  each reconciliation is recorded and verified, capped at eight, and every other
-  transport error or clock mismatch fails the run without retrying the step;
+  simulator clock independently proves exactly one expected deterministic step.
+  When the same clock proves that no step started, the request is reissued up to
+  eight times; every reissue and reconciliation is recorded and independently
+  verified. Any ambiguous clock value, exhausted bound, or other transport error
+  fails the run;
 - every planned site obstacle instantiated as a respondable simulator object;
 - per-robot pickup formation, team-spacing, and install errors inside configured
   tolerances;

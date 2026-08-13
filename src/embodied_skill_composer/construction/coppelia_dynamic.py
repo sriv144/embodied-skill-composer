@@ -88,6 +88,11 @@ class DynamicCoppeliaConfig(BaseModel):
         ge=0,
         le=100,
     )
+    maximum_remote_step_handshake_retries: int = Field(
+        default=8,
+        ge=0,
+        le=100,
+    )
 
 
 class DynamicCoppeliaError(RuntimeError):
@@ -147,6 +152,7 @@ class DynamicCoppeliaExecutor:
         self.install_errors_m: list[float] = []
         self.physics_steps = 0
         self.remote_step_handshake_reconciliations = 0
+        self.remote_step_handshake_retries = 0
         self.collision_stops = 0
         self.proximity_safety_stops = 0
         self.physical_collision_stops = 0
@@ -1510,6 +1516,9 @@ class DynamicCoppeliaExecutor:
             "remote_step_handshake_reconciliations": (
                 self.remote_step_handshake_reconciliations
             ),
+            "remote_step_handshake_retries": (
+                self.remote_step_handshake_retries
+            ),
             "measured_duration_s": self.simulation_time_s,
             "wheel_command_count": len(self.commands),
             "telemetry_sample_count": len(self.telemetry),
@@ -2569,37 +2578,67 @@ class DynamicCoppeliaExecutor:
             )
 
     def _step_physics(self) -> None:
-        try:
-            self.client.step()
-        except Exception as exc:
-            if str(exc).strip() != _REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR:
-                raise
-            observed_time = self._reconcile_remote_step_handshake(exc)
-            self.runtime_events.append(
-                {
-                    "timestamp_s": observed_time,
-                    "event": "remote_step_handshake_reconciled",
-                    "physics_step": self.physics_steps + 1,
-                    "observed_simulation_time_s": observed_time,
-                    "expected_simulation_time_s": (
-                        (self.physics_steps + 1) / self.config.control_hz
-                    ),
-                    "error": _REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR,
-                }
-            )
-            self.remote_step_handshake_reconciliations += 1
+        while True:
+            try:
+                self.client.step()
+            except Exception as exc:
+                if str(exc).strip() != _REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR:
+                    raise
+                outcome, observed_time = self._classify_remote_step_handshake(exc)
+                expected_time = (self.physics_steps + 1) / self.config.control_hz
+                if outcome == "completed":
+                    if (
+                        self.remote_step_handshake_reconciliations
+                        >= self.config.maximum_remote_step_handshake_reconciliations
+                    ):
+                        raise DynamicCoppeliaError(
+                            "remote step handshake reconciliation limit was exceeded"
+                        ) from exc
+                    self.runtime_events.append(
+                        {
+                            "timestamp_s": observed_time,
+                            "event": "remote_step_handshake_reconciled",
+                            "physics_step": self.physics_steps + 1,
+                            "observed_simulation_time_s": observed_time,
+                            "expected_simulation_time_s": expected_time,
+                            "error": _REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR,
+                        }
+                    )
+                    self.remote_step_handshake_reconciliations += 1
+                    break
+                if (
+                    self.remote_step_handshake_retries
+                    >= self.config.maximum_remote_step_handshake_retries
+                ):
+                    raise DynamicCoppeliaError(
+                        "remote step handshake failed without exactly one measured "
+                        "simulator step and retry limit was exceeded"
+                    ) from exc
+                self.remote_step_handshake_retries += 1
+                self.runtime_events.append(
+                    {
+                        "timestamp_s": observed_time,
+                        "event": "remote_step_handshake_retried",
+                        "physics_step": self.physics_steps + 1,
+                        "retry_index": self.remote_step_handshake_retries,
+                        "observed_simulation_time_s": observed_time,
+                        "previous_simulation_time_s": (
+                            self.physics_steps / self.config.control_hz
+                        ),
+                        "expected_simulation_time_s": expected_time,
+                        "error": _REMOTE_STEP_EXECUTED_HANDSHAKE_ERROR,
+                    }
+                )
+                continue
+            break
         self.physics_steps += 1
         self._query_physical_collisions()
         self._update_command_responses()
 
-    def _reconcile_remote_step_handshake(self, exc: Exception) -> float:
-        if (
-            self.remote_step_handshake_reconciliations
-            >= self.config.maximum_remote_step_handshake_reconciliations
-        ):
-            raise DynamicCoppeliaError(
-                "remote step handshake reconciliation limit was exceeded"
-            ) from exc
+    def _classify_remote_step_handshake(
+        self,
+        exc: Exception,
+    ) -> tuple[Literal["completed", "not_started"], float]:
         get_simulation_time = getattr(self.sim, "getSimulationTime", None)
         if not callable(get_simulation_time):
             raise DynamicCoppeliaError(
@@ -2611,19 +2650,31 @@ class DynamicCoppeliaExecutor:
             raise DynamicCoppeliaError(
                 "remote step handshake failed without measurable simulator time"
             ) from time_exc
+        previous_time = self.physics_steps / self.config.control_hz
         expected_time = (self.physics_steps + 1) / self.config.control_hz
         tolerance = max(1e-9, (1.0 / self.config.control_hz) * 1e-6)
-        if not math.isfinite(observed_time) or not math.isclose(
+        if not math.isfinite(observed_time):
+            raise DynamicCoppeliaError(
+                "remote step handshake failed without exactly one measured "
+                "simulator step"
+            ) from exc
+        if math.isclose(
             observed_time,
             expected_time,
             rel_tol=0.0,
             abs_tol=tolerance,
         ):
-            raise DynamicCoppeliaError(
-                "remote step handshake failed without exactly one measured "
-                "simulator step"
-            ) from exc
-        return observed_time
+            return "completed", observed_time
+        if math.isclose(
+            observed_time,
+            previous_time,
+            rel_tol=0.0,
+            abs_tol=tolerance,
+        ):
+            return "not_started", observed_time
+        raise DynamicCoppeliaError(
+            "remote step handshake failed without exactly one measured simulator step"
+        ) from exc
 
     def _query_physical_collisions(self) -> None:
         detected: list[dict[str, object]] = []
