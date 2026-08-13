@@ -95,6 +95,7 @@ git push origin v1.0.0
 
 gh release create v1.0.0 --draft --verify-tag `
   --title "Construction Intelligence v1.0.0" `
+  --notes-file docs\construction-intelligence-v1-release-notes.md `
   output\construction-intelligence-v1-release\construction-intelligence-v1-public-demo.zip `
   output\construction-intelligence-v1-release\construction-intelligence-v1-research-evidence.zip `
   output\construction-intelligence-v1-release\construction-intelligence-v1-coppelia-evidence.zip `
