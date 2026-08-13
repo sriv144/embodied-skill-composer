@@ -38,7 +38,9 @@ jobs:
           tag_commit="$(git rev-parse HEAD)"
           main_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
           test "$tag_commit" = "$main_commit"
-          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = "true"
+          release_state="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease)"
+          test "$(jq -r '.isDraft' <<<"$release_state")" = "true"
+          test "$(jq -r '.isPrerelease' <<<"$release_state")" = "false"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -125,7 +127,9 @@ jobs:
           tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
           main_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
           test "$tag_commit" = "$main_commit"
-          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = "true"
+          release_state="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease)"
+          test "$(jq -r '.isDraft' <<<"$release_state")" = "true"
+          test "$(jq -r '.isPrerelease' <<<"$release_state")" = "false"
           mkdir "$RUNNER_TEMP/release-assets"
           gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/release-assets"
           actual_asset_set_sha256="$(

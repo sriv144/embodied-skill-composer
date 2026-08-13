@@ -120,6 +120,8 @@ constraints, downloads the existing draft, requires the exact five-file inventor
 every identity, hash, archive, public-demo claim, selected checkpoint, and tag-to-HEAD relation.
 It passes only a SHA-256 fingerprint of that complete asset set to a fresh publication runner. The
 write-token job rechecks the tag, `main`, draft state, and downloaded asset-set fingerprint before
-running `gh release edit v1.0.0 --draft=false`. Configure the
+running `gh release edit v1.0.0 --draft=false`. Both jobs require a non-prerelease draft and bind
+its exact title and normalized body to the committed
+`construction-intelligence-v1-release-notes.md` file. Configure the
 `construction-intelligence-v1-release` GitHub environment with required reviewers and protect the
 `v1.0.0` tag. A failed, cancelled, changed, or unapproved run leaves the release unpublished.
