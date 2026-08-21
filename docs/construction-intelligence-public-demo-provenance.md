@@ -21,7 +21,7 @@ fixture and visibly records that learned-policy and live Coppelia evidence are a
 ```powershell
 .\.venv\Scripts\python.exe scripts\export_construction_public_demo.py `
   --channel release `
-  --deterministic-bundle release-inputs\deterministic-bundle.json `
+  --deterministic-bundle release-inputs\deterministic\deterministic-bundle.json `
   --research-bundle release-inputs\research-bundle.json `
   --simulator-bundle release-inputs\simulator-bundle.json `
   --source-commit <40-character-commit> `
@@ -29,6 +29,11 @@ fixture and visibly records that learned-policy and live Coppelia evidence are a
   --source-tree-digest <64-character-clean-tree-digest> `
   --output workbench\public\demo
 ```
+
+Create that canonical deterministic descriptor from the clean release commit with
+`scripts/export_construction_public_demo.py --deterministic-input-only --output
+release-inputs/deterministic`. The default exporter remains a truthful fixture preview and never
+silently promotes itself to canonical evidence.
 
 The final packaging command must run from a clean, explicitly recorded commit. Each evidence
 descriptor also records its own clean source identity. Those input commits may differ when, for
