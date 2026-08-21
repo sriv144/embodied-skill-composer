@@ -27,6 +27,7 @@ from embodied_skill_composer.construction.policy import (
     load_policy_checkpoint_metadata,
 )
 from embodied_skill_composer.construction.public_demo_provenance import (
+    EvidenceBundleManifest,
     PublicDemoExportError,
     SourceIdentity,
     export_public_demo_bundle,
@@ -45,12 +46,12 @@ ReleaseAssetRole = Literal[
     "coppelia_evidence",
     "selected_policies",
 ]
-RELEASE_ASSET_SCHEMA_VERSION: Literal[
+RELEASE_ASSET_SCHEMA_VERSION: Literal["construction-intelligence-release-assets-v1"] = (
     "construction-intelligence-release-assets-v1"
-] = "construction-intelligence-release-assets-v1"
-POLICY_ASSET_SCHEMA_VERSION: Literal[
+)
+POLICY_ASSET_SCHEMA_VERSION: Literal["construction-intelligence-selected-policies-v1"] = (
     "construction-intelligence-selected-policies-v1"
-] = "construction-intelligence-selected-policies-v1"
+)
 RELEASE_IDENTITY_FILE = "construction-intelligence-v1-release-assets.json"
 POLICY_INDEX_FILE = "policy-assets.json"
 _GENERATED_AT: Literal["1970-01-01T00:00:00Z"] = "1970-01-01T00:00:00Z"
@@ -297,9 +298,15 @@ def stage_release_assets(
             expected_release_version=release_version,
             expected_release_tag=release_tag,
         )
+        public_selection_path = public_root / "evidence" / "research" / "selections.json"
+        selection_source, checkpoint_source_root = _selected_policy_source(
+            research_bundle,
+            fallback=public_selection_path,
+        )
         policy_index = _stage_selected_policies(
-            public_root / "evidence" / "research" / "selections.json",
+            selection_source,
             policy_root,
+            checkpoint_source_root=checkpoint_source_root,
         )
         _write_json(
             policy_root / POLICY_INDEX_FILE,
@@ -382,9 +389,7 @@ def verify_release_assets(
 
     root = asset_dir.resolve()
     observed_files = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
+        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
     }
     if observed_files != _EXPECTED_FILES:
         raise ReleaseAssetError(
@@ -427,9 +432,7 @@ def verify_release_assets(
             raise ReleaseAssetError(f"release asset integrity check failed: {record.file}")
         entry_count = verify_deterministic_zip(path)
         if entry_count != record.entry_count:
-            raise ReleaseAssetError(
-                f"release asset entry count changed: {record.file}"
-            )
+            raise ReleaseAssetError(f"release asset entry count changed: {record.file}")
 
     public_zip = root / _ASSET_FILES["public_demo"]
     research_zip = root / _ASSET_FILES["research_evidence"]
@@ -457,13 +460,8 @@ def verify_release_assets(
                 expected_release_tag=manifest.release_tag,
             )
         except (OSError, ValueError, PublicDemoExportError) as exc:
-            raise ReleaseAssetError(
-                f"public demo release verification failed: {exc}"
-            ) from exc
-        if (
-            file_sha256(public_root / "provenance.json")
-            != manifest.public_demo_provenance_sha256
-        ):
+            raise ReleaseAssetError(f"public demo release verification failed: {exc}") from exc
+        if file_sha256(public_root / "provenance.json") != manifest.public_demo_provenance_sha256:
             raise ReleaseAssetError("public demo provenance identity does not match")
 
         research_root = temporary_root / "research"
@@ -488,9 +486,7 @@ def repository_source_identity(workspace: Path) -> SourceIdentity:
     root = workspace.resolve()
     commit = _git_bytes(root, "rev-parse", "--verify", "HEAD").decode().strip()
     if re.fullmatch(_COMMIT_PATTERN, commit) is None:
-        raise ReleaseAssetError(
-            "release packaging requires a full 40-character Git commit"
-        )
+        raise ReleaseAssetError("release packaging requires a full 40-character Git commit")
     status = _git_bytes(
         root,
         "status",
@@ -498,9 +494,7 @@ def repository_source_identity(workspace: Path) -> SourceIdentity:
         "--untracked-files=all",
     )
     if status.strip():
-        raise ReleaseAssetError(
-            "release packaging requires a completely clean Git worktree"
-        )
+        raise ReleaseAssetError("release packaging requires a completely clean Git worktree")
     tree_listing = _git_bytes(root, "ls-tree", "-r", "--full-tree", "HEAD")
     if not tree_listing:
         raise ReleaseAssetError("release Git tree listing is empty")
@@ -517,17 +511,11 @@ def require_tag_points_at_head(workspace: Path, tag: str) -> None:
     root = workspace.resolve()
     head = _git_bytes(root, "rev-parse", "--verify", "HEAD").decode().strip()
     try:
-        tag_commit = (
-            _git_bytes(root, "rev-list", "-n", "1", f"refs/tags/{tag}")
-            .decode()
-            .strip()
-        )
+        tag_commit = _git_bytes(root, "rev-list", "-n", "1", f"refs/tags/{tag}").decode().strip()
     except ReleaseAssetError as exc:
         raise ReleaseAssetError(f"release tag does not exist: {tag}") from exc
     if not tag_commit or tag_commit != head:
-        raise ReleaseAssetError(
-            f"release tag {tag!r} does not point at checked-out HEAD"
-        )
+        raise ReleaseAssetError(f"release tag {tag!r} does not point at checked-out HEAD")
 
 
 def write_deterministic_zip(
@@ -566,11 +554,14 @@ def write_deterministic_zip(
             info.extra = b""
             info.comment = b""
             info.file_size = source.stat().st_size
-            with source.open("rb") as source_handle, archive.open(
-                info,
-                mode="w",
-                force_zip64=False,
-            ) as archive_handle:
+            with (
+                source.open("rb") as source_handle,
+                archive.open(
+                    info,
+                    mode="w",
+                    force_zip64=False,
+                ) as archive_handle,
+            ):
                 shutil.copyfileobj(source_handle, archive_handle, length=1024 * 1024)
     verify_deterministic_zip(destination)
     return len(normalized)
@@ -617,9 +608,7 @@ def verify_deterministic_zip(path: Path) -> int:
                     )
             corrupt = archive.testzip()
             if corrupt is not None:
-                raise ReleaseAssetError(
-                    f"release archive contains corrupt data: {corrupt}"
-                )
+                raise ReleaseAssetError(f"release archive contains corrupt data: {corrupt}")
             return len(infos)
     except (OSError, zipfile.BadZipFile) as exc:
         raise ReleaseAssetError(f"release archive is unreadable: {path}: {exc}") from exc
@@ -631,15 +620,12 @@ def _validate_zip_resource_limits(
     budget: _ArchiveBudget,
 ) -> None:
     if len(infos) > budget.max_members:
-        raise ReleaseAssetError(
-            f"release archive exceeds the member-count limit: {archive_name}"
-        )
+        raise ReleaseAssetError(f"release archive exceeds the member-count limit: {archive_name}")
     total_uncompressed = 0
     for info in infos:
         if info.file_size > budget.max_member_uncompressed_bytes:
             raise ReleaseAssetError(
-                "release archive member exceeds the uncompressed-size limit: "
-                f"{info.filename}"
+                f"release archive member exceeds the uncompressed-size limit: {info.filename}"
             )
         total_uncompressed += info.file_size
         if total_uncompressed > budget.max_uncompressed_bytes:
@@ -686,9 +672,7 @@ def _validate_source_resource_limits(
     budget: _ArchiveBudget,
 ) -> None:
     if len(entries) > budget.max_members:
-        raise ReleaseAssetError(
-            f"release archive exceeds the member-count limit: {archive_name}"
-        )
+        raise ReleaseAssetError(f"release archive exceeds the member-count limit: {archive_name}")
     total_bytes = 0
     for name, source in entries:
         path_bytes = len(name.encode("utf-8"))
@@ -735,34 +719,18 @@ def _preflight_zip_central_directory(
         ) = struct.unpack_from("<4s4H2IH", tail, relative_offset)
         eocd_offset = file_size - tail_size + relative_offset
         if comment_length != 0 or eocd_offset + eocd_size != file_size:
-            raise ReleaseAssetError(
-                f"release archive EOCD is not canonical: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive EOCD is not canonical: {path.name}")
         if disk_number != 0 or central_disk != 0 or disk_entries != total_entries:
-            raise ReleaseAssetError(
-                f"release archive cannot span disks: {path.name}"
-            )
-        if (
-            total_entries == 0xFFFF
-            or central_size == 0xFFFFFFFF
-            or central_offset == 0xFFFFFFFF
-        ):
-            raise ReleaseAssetError(
-                f"release archive cannot use ZIP64 metadata: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive cannot span disks: {path.name}")
+        if total_entries == 0xFFFF or central_size == 0xFFFFFFFF or central_offset == 0xFFFFFFFF:
+            raise ReleaseAssetError(f"release archive cannot use ZIP64 metadata: {path.name}")
         if total_entries == 0 or total_entries > budget.max_members:
-            raise ReleaseAssetError(
-                f"release archive exceeds the member-count limit: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive exceeds the member-count limit: {path.name}")
         if central_size > _MAX_CENTRAL_DIRECTORY_BYTES:
-            raise ReleaseAssetError(
-                f"release archive central directory is too large: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive central directory is too large: {path.name}")
         central_end = central_offset + central_size
         if central_offset > eocd_offset or central_end != eocd_offset:
-            raise ReleaseAssetError(
-                f"release archive central directory is invalid: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive central directory is invalid: {path.name}")
         handle.seek(central_offset)
         position = central_offset
         for _ in range(total_entries):
@@ -820,12 +788,25 @@ def extract_verified_zip(path: Path, destination: Path) -> None:
 def _stage_selected_policies(
     selection_path: Path,
     destination: Path,
+    *,
+    checkpoint_source_root: Path | None = None,
 ) -> PolicyAssetIndex:
     matrix_id, protocol_digest, selections = _load_selected_checkpoints(selection_path)
     destination.mkdir(parents=True, exist_ok=False)
     packaged: list[PackagedPolicy] = []
     for run_key, selected in selections:
-        checkpoint_path = Path(selected.checkpoint_path).resolve()
+        checkpoint_value = Path(selected.checkpoint_path)
+        if checkpoint_value.is_absolute():
+            checkpoint_path = checkpoint_value.resolve()
+        elif checkpoint_source_root is not None:
+            resolved_root = checkpoint_source_root.resolve()
+            checkpoint_path = (resolved_root / checkpoint_value).resolve()
+            if not checkpoint_path.is_relative_to(resolved_root):
+                raise ReleaseAssetError(
+                    f"selected checkpoint escapes its research bundle: {run_key}"
+                )
+        else:
+            checkpoint_path = checkpoint_value.resolve()
         _validate_selected_checkpoint_file(checkpoint_path, selected)
         bundle = load_policy_checkpoint(checkpoint_path, device="cpu")
         expected_algorithm = _EXPECTED_ALGORITHMS[selected.experiment_variant]
@@ -844,13 +825,9 @@ def _stage_selected_policies(
             device="cpu",
         )
         if exported_onnx.resolve() != (run_root / "actor.onnx").resolve():
-            raise ReleaseAssetError(
-                f"ONNX exporter returned an unexpected path for {run_key}"
-            )
+            raise ReleaseAssetError(f"ONNX exporter returned an unexpected path for {run_key}")
         onnx_paths = sorted(
-            path
-            for path in run_root.rglob("*")
-            if path.is_file() and path != packaged_checkpoint
+            path for path in run_root.rglob("*") if path.is_file() and path != packaged_checkpoint
         )
         if run_root / "actor.onnx" not in onnx_paths:
             raise ReleaseAssetError(f"ONNX export is missing for {run_key}")
@@ -860,9 +837,7 @@ def _stage_selected_policies(
                 run_key=run_key,
                 selected_checkpoint=selected,
                 checkpoint=_archive_member(packaged_checkpoint, destination),
-                onnx_artifacts=[
-                    _archive_member(path, destination) for path in onnx_paths
-                ],
+                onnx_artifacts=[_archive_member(path, destination) for path in onnx_paths],
             )
         )
     return PolicyAssetIndex(
@@ -873,6 +848,34 @@ def _stage_selected_policies(
         policy_count=20,
         policies=sorted(packaged, key=lambda item: item.run_key),
     )
+
+
+def _selected_policy_source(
+    research_bundle: Path,
+    *,
+    fallback: Path,
+) -> tuple[Path, Path | None]:
+    """Resolve private bundle-local policy sources without publishing local paths."""
+
+    descriptor = research_bundle.resolve()
+    if not descriptor.is_file():
+        return fallback, None
+    try:
+        manifest = EvidenceBundleManifest.model_validate_json(
+            descriptor.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        raise ReleaseAssetError(f"research bundle descriptor is invalid: {exc}") from exc
+    selection = next(
+        (artifact for artifact in manifest.artifacts if artifact.role == "selections"),
+        None,
+    )
+    if manifest.kind != "research" or selection is None:
+        raise ReleaseAssetError("research bundle does not declare canonical selection evidence")
+    selection_path = Path(selection.path)
+    if not selection_path.is_absolute():
+        selection_path = descriptor.parent / selection_path
+    return selection_path.resolve(), descriptor.parent
 
 
 def _verify_packaged_policies(
@@ -909,9 +912,7 @@ def _verify_packaged_policies(
                 or path.stat().st_size != member.bytes
                 or file_sha256(path) != member.sha256
             ):
-                raise ReleaseAssetError(
-                    f"packaged policy member integrity failed: {member.path}"
-                )
+                raise ReleaseAssetError(f"packaged policy member integrity failed: {member.path}")
             declared_paths.add(member.path)
         _validate_selected_checkpoint_file(
             policy_root / Path(*PurePosixPath(policy.checkpoint.path).parts),
@@ -922,9 +923,7 @@ def _verify_packaged_policies(
             device="cpu",
         )
         if bundle.algorithm != _EXPECTED_ALGORITHMS[selected.experiment_variant]:
-            raise ReleaseAssetError(
-                f"packaged policy algorithm mismatch: {policy.run_key}"
-            )
+            raise ReleaseAssetError(f"packaged policy algorithm mismatch: {policy.run_key}")
         _validate_onnx_model(policy_root / "policies" / policy.run_key / "actor.onnx")
     if set(expected) != {item.run_key for item in index.policies}:
         raise ReleaseAssetError("selected-policy archive does not cover all 20 selections")
@@ -975,8 +974,7 @@ def _load_selected_checkpoints(
             ) from exc
         selections.append((run_key, selected))
     identities = {
-        (selected.experiment_variant, selected.training_seed)
-        for _, selected in selections
+        (selected.experiment_variant, selected.training_seed) for _, selected in selections
     }
     if (
         len(selections) != 20
@@ -997,9 +995,7 @@ def _validate_selected_checkpoint_file(
         raise ReleaseAssetError(f"selected checkpoint is missing: {path}")
     actual_sha = file_sha256(path)
     if actual_sha != selected.checkpoint_sha256:
-        raise ReleaseAssetError(
-            f"selected checkpoint SHA-256 mismatch: {path}"
-        )
+        raise ReleaseAssetError(f"selected checkpoint SHA-256 mismatch: {path}")
     try:
         metadata = load_policy_checkpoint_metadata(path, device="cpu")
     except (OSError, ValueError, RuntimeError) as exc:
@@ -1016,9 +1012,7 @@ def _validate_selected_checkpoint_file(
         "checkpoint_lineage": selected.checkpoint_lineage,
         "resume_provenance": selected.resume_provenance,
     }
-    mismatches = [
-        name for name, value in expected.items() if metadata.get(name) != value
-    ]
+    mismatches = [name for name, value in expected.items() if metadata.get(name) != value]
     fraction = metadata.get("checkpoint_fraction")
     if (
         not isinstance(fraction, (int, float))
@@ -1047,24 +1041,16 @@ def _validate_onnx_model(path: Path) -> None:
         for tensor in external_data_helper._get_all_tensors(model):
             if not external_data_helper.uses_external_data(tensor):
                 continue
-            locations = [
-                item.value for item in tensor.external_data if item.key == "location"
-            ]
+            locations = [item.value for item in tensor.external_data if item.key == "location"]
             if len(locations) != 1:
-                raise ReleaseAssetError(
-                    f"ONNX tensor has invalid external-data locations: {path}"
-                )
+                raise ReleaseAssetError(f"ONNX tensor has invalid external-data locations: {path}")
             relative = _safe_archive_name(locations[0])
-            external_path = (
-                path.parent / Path(*PurePosixPath(relative).parts)
-            ).resolve()
+            external_path = (path.parent / Path(*PurePosixPath(relative).parts)).resolve()
             if (
                 not external_path.is_relative_to(path.parent.resolve())
                 or not external_path.is_file()
             ):
-                raise ReleaseAssetError(
-                    f"ONNX external data is missing or unsafe: {relative}"
-                )
+                raise ReleaseAssetError(f"ONNX external data is missing or unsafe: {relative}")
         external_data_helper.load_external_data_for_model(
             model,
             str(path.parent.resolve()),
@@ -1114,11 +1100,7 @@ def _require_archive_subset(
 ) -> None:
     parent = _zip_member_identities(parent_path)
     subset = _zip_member_identities(subset_path)
-    expected = {
-        name: identity
-        for name, identity in parent.items()
-        if name.startswith(prefix)
-    }
+    expected = {name: identity for name, identity in parent.items() if name.startswith(prefix)}
     if subset != expected:
         raise ReleaseAssetError(
             f"release evidence archive does not match public demo subset: {prefix}"
@@ -1161,9 +1143,7 @@ def _require_repository_release_identity(
 ) -> None:
     validate_release_identity(release_version, release_tag)
     if identity.version != release_version or identity.tag != release_tag:
-        raise ReleaseAssetError(
-            "release asset identity does not match repository package versions"
-        )
+        raise ReleaseAssetError("release asset identity does not match repository package versions")
 
 
 def _write_json(path: Path, payload: object) -> None:

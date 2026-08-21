@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 60
     outputs:
       asset_set_sha256: ${{ steps.fingerprint.outputs.asset_set_sha256 }}
+      release_notes_sha256: ${{ steps.release_notes.outputs.release_notes_sha256 }}
     steps:
       - name: Check out the fixed v1 tag
         uses: actions/checkout@v6
@@ -37,7 +38,9 @@ jobs:
           tag_commit="$(git rev-parse HEAD)"
           main_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
           test "$tag_commit" = "$main_commit"
-          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = "true"
+          release_state="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease)"
+          test "$(jq -r '.isDraft' <<<"$release_state")" = "true"
+          test "$(jq -r '.isPrerelease' <<<"$release_state")" = "false"
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -75,6 +78,21 @@ jobs:
           --expected-tag "$RELEASE_TAG"
           --require-tag-at-head
 
+      - name: Bind the draft title and release notes
+        id: release_notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --json name,body > "$RUNNER_TEMP/release.json"
+          release_notes_sha256="$(
+            python scripts/check_release_notes.py \
+              --expected docs/construction-intelligence-v1-release-notes.md \
+              --actual-json "$RUNNER_TEMP/release.json"
+          )"
+          echo "release_notes_sha256=$release_notes_sha256" >> "$GITHUB_OUTPUT"
+
       - name: Bind the verified asset set
         id: fingerprint
         shell: bash
@@ -103,12 +121,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_ASSET_SET_SHA256: ${{ needs.verify.outputs.asset_set_sha256 }}
+          EXPECTED_RELEASE_NOTES_SHA256: ${{ needs.verify.outputs.release_notes_sha256 }}
         run: |
           set -euo pipefail
           tag_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq '.sha')"
           main_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/main" --jq '.sha')"
           test "$tag_commit" = "$main_commit"
-          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = "true"
+          release_state="$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease)"
+          test "$(jq -r '.isDraft' <<<"$release_state")" = "true"
+          test "$(jq -r '.isPrerelease' <<<"$release_state")" = "false"
           mkdir "$RUNNER_TEMP/release-assets"
           gh release download "$RELEASE_TAG" --dir "$RUNNER_TEMP/release-assets"
           actual_asset_set_sha256="$(
@@ -120,6 +141,23 @@ jobs:
               | /usr/bin/cut -d' ' -f1
           )"
           test "$actual_asset_set_sha256" = "$EXPECTED_ASSET_SET_SHA256"
+          gh release view "$RELEASE_TAG" --json name,body > "$RUNNER_TEMP/release.json"
+          actual_release_notes_sha256="$(python - "$RUNNER_TEMP/release.json" <<'PY'
+          import hashlib
+          import json
+          import sys
+
+          payload = json.load(open(sys.argv[1], encoding="utf-8"))
+          if payload.get("name") != "Construction Intelligence v1.0.0":
+              raise SystemExit("release title changed after verification")
+          body = payload.get("body")
+          if not isinstance(body, str):
+              raise SystemExit("release body changed after verification")
+          canonical = body.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+          print(hashlib.sha256(canonical.encode("utf-8")).hexdigest())
+          PY
+          )"
+          test "$actual_release_notes_sha256" = "$EXPECTED_RELEASE_NOTES_SHA256"
 
       - name: Publish the verified draft
         shell: bash

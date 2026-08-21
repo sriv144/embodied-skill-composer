@@ -19,7 +19,39 @@ semantically rather than attempting an impossible self-hash.
 Run staging only from the clean commit that will receive `v1.0.0`. All repository version
 declarations must already agree; the packager never changes versions.
 
-First package the two independently verified native Phase 5 directories. This renders the public
+First stage the canonical deterministic cottage baseline. Unlike the default preview exporter,
+this mode requires a clean Git worktree and writes the complete canonical descriptor consumed by
+release packaging:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_construction_public_demo.py `
+  --deterministic-input-only `
+  --output release-inputs\deterministic
+```
+
+Use `release-inputs\deterministic\deterministic-bundle.json` as the deterministic descriptor
+below.
+
+Next package the completed Phase 4 matrix from its read-only durable registry and canonical
+selection/held-out artifacts. The packager rejects incomplete runs, failed acceptance gates,
+invalid hashes, and source-identity disagreement. It copies the 20 selected checkpoint sources
+into the private input directory under stable public-safe names; only the separately verified
+selected-policy release archive publishes their bytes.
+
+```powershell
+.\.venv\Scripts\python.exe scripts\package_construction_research_evidence.py `
+  --registry <phase4-root>\logs\construction_intelligence\lab.sqlite `
+  --matrix-id construction_intelligence_v1-research-79e5444bb108 `
+  --selection-evidence <phase4-root>\logs\construction_intelligence\experiments\validation\construction_intelligence_v1-research-79e5444bb108\matrix_selections.json `
+  --heldout-run-dir <phase4-heldout-evaluation-directory> `
+  --output release-inputs\research
+```
+
+Use `release-inputs\research\research-bundle.json` as the research descriptor below. After this
+atomic staging step the descriptor is self-contained and does not require a writable or live lab
+database.
+
+Then package the two independently verified native Phase 5 directories. This renders the public
 nominal and recovery MP4 files deterministically from measured base telemetry and the typed replay;
 it does not alter either native bundle or present logical payload motion as contact dynamics.
 
@@ -35,8 +67,8 @@ Use the emitted `release-inputs\coppelia\simulator-bundle.json` as the simulator
 ```powershell
 .\.venv\Scripts\python.exe scripts\package_construction_release.py `
   --output output\construction-intelligence-v1-release `
-  --deterministic-bundle release-inputs\deterministic-bundle.json `
-  --research-bundle release-inputs\research-bundle.json `
+  --deterministic-bundle release-inputs\deterministic\deterministic-bundle.json `
+  --research-bundle release-inputs\research\research-bundle.json `
   --simulator-bundle release-inputs\coppelia\simulator-bundle.json `
   --release-version 1.0.0 `
   --release-tag v1.0.0
@@ -95,6 +127,7 @@ git push origin v1.0.0
 
 gh release create v1.0.0 --draft --verify-tag `
   --title "Construction Intelligence v1.0.0" `
+  --notes-file docs\construction-intelligence-v1-release-notes.md `
   output\construction-intelligence-v1-release\construction-intelligence-v1-public-demo.zip `
   output\construction-intelligence-v1-release\construction-intelligence-v1-research-evidence.zip `
   output\construction-intelligence-v1-release\construction-intelligence-v1-coppelia-evidence.zip `
@@ -119,6 +152,8 @@ constraints, downloads the existing draft, requires the exact five-file inventor
 every identity, hash, archive, public-demo claim, selected checkpoint, and tag-to-HEAD relation.
 It passes only a SHA-256 fingerprint of that complete asset set to a fresh publication runner. The
 write-token job rechecks the tag, `main`, draft state, and downloaded asset-set fingerprint before
-running `gh release edit v1.0.0 --draft=false`. Configure the
+running `gh release edit v1.0.0 --draft=false`. Both jobs require a non-prerelease draft and bind
+its exact title and normalized body to the committed
+`construction-intelligence-v1-release-notes.md` file. Configure the
 `construction-intelligence-v1-release` GitHub environment with required reviewers and protect the
 `v1.0.0` tag. A failed, cancelled, changed, or unapproved run leaves the release unpublished.

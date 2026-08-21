@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from statistics import median
 from typing import Literal, cast
 
@@ -212,16 +212,10 @@ class EvidenceBundleManifest(_FrozenModel):
         if self.protocol_digest is not None:
             _require_sha256(self.protocol_digest, "protocol digest")
         if self.kind == "research" and (
-            self.profile is None
-            or self.matrix_id is None
-            or self.protocol_digest is None
+            self.profile is None or self.matrix_id is None or self.protocol_digest is None
         ):
-            raise ValueError(
-                "research bundles require profile, matrix_id, and protocol_digest"
-            )
-        if self.kind != "research" and (
-            self.profile is not None or self.matrix_id is not None
-        ):
+            raise ValueError("research bundles require profile, matrix_id, and protocol_digest")
+        if self.kind != "research" and (self.profile is not None or self.matrix_id is not None):
             raise ValueError("only research bundles may declare profile or matrix_id")
         return self
 
@@ -279,9 +273,7 @@ def export_public_demo_bundle(
         else None
     )
     validated_research = _validate_research(research) if research is not None else None
-    validated_simulator = (
-        _validate_simulator(simulator) if simulator is not None else None
-    )
+    validated_simulator = _validate_simulator(simulator) if simulator is not None else None
     _validate_export_claims(
         channel,
         source,
@@ -294,9 +286,7 @@ def export_public_demo_bundle(
 
     destination = output_dir.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent)
-    )
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
     try:
         artifact_sources: dict[str, tuple[str, str]] = {}
         _copy_bundle(deterministic, staging, artifact_sources)
@@ -435,9 +425,7 @@ def verify_public_demo_export(
     try:
         source = SourceIdentity.model_validate(payload.get("source"))
     except ValueError as exc:
-        raise PublicDemoExportError(
-            f"provenance source identity is invalid: {exc}"
-        ) from exc
+        raise PublicDemoExportError(f"provenance source identity is invalid: {exc}") from exc
     release_version = payload.get("release_version")
     release_tag = payload.get("release_tag")
     if release_version is not None and not isinstance(release_version, str):
@@ -459,13 +447,8 @@ def verify_public_demo_export(
     if expected_source is not None and source != expected_source:
         raise PublicDemoExportError("provenance source identity does not match expectation")
     if (expected_release_version is None) != (expected_release_tag is None):
-        raise PublicDemoExportError(
-            "expected release version and tag must be supplied together"
-        )
-    if (
-        expected_release_version is not None
-        and expected_release_tag is not None
-    ):
+        raise PublicDemoExportError("expected release version and tag must be supplied together")
+    if expected_release_version is not None and expected_release_tag is not None:
         try:
             validate_release_identity(
                 expected_release_version,
@@ -473,18 +456,13 @@ def verify_public_demo_export(
             )
         except ValueError as exc:
             raise PublicDemoExportError(str(exc)) from exc
-        if (
-            release_version != expected_release_version
-            or release_tag != expected_release_tag
-        ):
+        if release_version != expected_release_version or release_tag != expected_release_tag:
             raise PublicDemoExportError(
                 "provenance release version or tag does not match expectation"
             )
     _validate_provenance_inputs(payload, channel=typed_channel)
     artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list) or not all(
-        isinstance(item, dict) for item in artifacts
-    ):
+    if not isinstance(artifacts, list) or not all(isinstance(item, dict) for item in artifacts):
         raise PublicDemoExportError("provenance artifacts must be a list of objects")
     artifact_records = cast(list[dict[str, object]], artifacts)
     expected_path_list: list[str] = []
@@ -506,9 +484,7 @@ def verify_public_demo_export(
             or not isinstance(role, str)
             or not role
         ):
-            raise PublicDemoExportError(
-                "provenance contains a malformed artifact record"
-            )
+            raise PublicDemoExportError("provenance contains a malformed artifact record")
         try:
             _safe_relative_path(relative)
         except ValueError as exc:
@@ -555,10 +531,18 @@ def verify_public_demo_regeneration_identity(
     reference = verify_public_demo_export(reference_dir)
     regenerated = verify_public_demo_export(regenerated_dir)
     if reference != regenerated:
-        raise PublicDemoExportError(
-            "public-demo regeneration identity mismatch"
-        )
+        raise PublicDemoExportError("public-demo regeneration identity mismatch")
     return regenerated
+
+
+def verify_research_release_evidence(
+    descriptor_path: Path,
+) -> EvidenceBundleManifest:
+    """Re-hash and semantically verify one canonical research input bundle."""
+
+    bundle = _load_bundle(descriptor_path, expected_kind="research")
+    _validate_research(bundle)
+    return bundle.manifest
 
 
 def _load_bundle(
@@ -576,9 +560,7 @@ def _load_bundle(
             f"invalid {expected_kind} bundle manifest {manifest_path}: {exc}"
         ) from exc
     if manifest.kind != expected_kind:
-        raise PublicDemoExportError(
-            f"expected a {expected_kind} bundle, got {manifest.kind}"
-        )
+        raise PublicDemoExportError(f"expected a {expected_kind} bundle, got {manifest.kind}")
     _validate_public_artifact_contract(manifest)
     files: dict[str, Path] = {}
     for artifact in manifest.artifacts:
@@ -587,13 +569,9 @@ def _load_bundle(
             source_path = manifest_path.parent / source_path
         source_path = source_path.resolve()
         if not source_path.is_file():
-            raise PublicDemoExportError(
-                f"{expected_kind} artifact is missing: {artifact.path}"
-            )
+            raise PublicDemoExportError(f"{expected_kind} artifact is missing: {artifact.path}")
         if _sha256_file(source_path) != artifact.sha256:
-            raise PublicDemoExportError(
-                f"{expected_kind} artifact hash mismatch: {artifact.path}"
-            )
+            raise PublicDemoExportError(f"{expected_kind} artifact hash mismatch: {artifact.path}")
         files[artifact.role] = source_path
     return _LoadedBundle(
         path=manifest_path,
@@ -620,10 +598,7 @@ def _validate_public_artifact_contract(
                 f"{manifest.kind} artifact role is not public-safe: {artifact.role}"
             )
         expected_target, expected_media_type = expected
-        if (
-            artifact.target != expected_target
-            or artifact.media_type != expected_media_type
-        ):
+        if artifact.target != expected_target or artifact.media_type != expected_media_type:
             raise PublicDemoExportError(
                 f"{manifest.kind} artifact does not match its passive public contract: "
                 f"{artifact.role}"
@@ -635,8 +610,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
     roles = set(bundle.files)
     if roles != _RESEARCH_ROLES:
         raise PublicDemoExportError(
-            "research bundle roles must be exactly "
-            f"{sorted(_RESEARCH_ROLES)}; got {sorted(roles)}"
+            f"research bundle roles must be exactly {sorted(_RESEARCH_ROLES)}; got {sorted(roles)}"
         )
     if manifest.evidence_status != "canonical" or manifest.profile != "research":
         raise PublicDemoExportError(
@@ -654,9 +628,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
         )
     matrix = _read_object(bundle.files["matrix"], "research matrix")
     runs_value = matrix.get("runs")
-    if not isinstance(runs_value, list) or not all(
-        isinstance(item, dict) for item in runs_value
-    ):
+    if not isinstance(runs_value, list) or not all(isinstance(item, dict) for item in runs_value):
         raise PublicDemoExportError("research matrix runs are malformed")
     runs = cast(list[dict[str, object]], runs_value)
     if (
@@ -686,10 +658,15 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             config.get("profile") != "research"
             or config.get("source_commit") != manifest.source.commit
             or config.get("source_dirty") is not False
+            or config.get("source_tree_digest") != manifest.source.tree_digest
         ):
-            raise PublicDemoExportError(
-                f"research run provenance mismatch: {run_key}"
-            )
+            raise PublicDemoExportError(f"research run provenance mismatch: {run_key}")
+        if (
+            "output_root" in config
+            or "resume_checkpoint" in config
+            or _contains_absolute_path(config)
+        ):
+            raise PublicDemoExportError(f"research matrix contains machine-local paths: {run_key}")
     expected_run_identities = {
         (variant, seed)
         for variant in (
@@ -717,30 +694,22 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
         "mappo_no_bc": "mappo",
         "mappo_no_failure_curriculum": "mappo",
     }
-    if (
-        observed_run_identities != expected_run_identities
-        or any(
-            config.get("algorithm")
-            != expected_algorithms.get(str(config.get("experiment_variant", "")))
-            or config.get("transitions") != 1_500_000
-            or config.get("checkpoint_fractions")
-            != [0.1, 0.25, 0.5, 0.75, 1.0]
-            for config in run_configs.values()
-        )
+    if observed_run_identities != expected_run_identities or any(
+        config.get("algorithm")
+        != expected_algorithms.get(str(config.get("experiment_variant", "")))
+        or config.get("transitions") != 1_500_000
+        or config.get("checkpoint_fractions") != [0.1, 0.25, 0.5, 0.75, 1.0]
+        for config in run_configs.values()
     ):
         raise PublicDemoExportError(
             "research matrix does not match the frozen variants, seeds, "
             "transition budget, and checkpoint grid"
         )
     observed_digests = sorted(
-        {
-            str(config.get("configuration_digest", ""))
-            for config in run_configs.values()
-        }
+        {str(config.get("configuration_digest", "")) for config in run_configs.values()}
     )
-    if (
-        any(not _is_sha256(item) for item in observed_digests)
-        or observed_digests != sorted(manifest.configuration_digests)
+    if any(not _is_sha256(item) for item in observed_digests) or observed_digests != sorted(
+        manifest.configuration_digests
     ):
         raise PublicDemoExportError(
             "research configuration digests do not match the bundle declaration"
@@ -771,8 +740,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             "research selections must cover all 20 matrix runs exactly once"
         )
     raw_selection_by_run = {
-        str(item["run_key"]): item
-        for item in cast(list[dict[str, object]], selections_value)
+        str(item["run_key"]): item for item in cast(list[dict[str, object]], selections_value)
     }
     selected_by_identity: dict[tuple[str, int], tuple[str, SelectedCheckpoint]] = {}
     for record in selection_records:
@@ -785,37 +753,29 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             raise PublicDemoExportError(
                 f"frozen selection is malformed for {run_key}: {exc}"
             ) from exc
+        _require_public_checkpoint_provenance(selection, run_key)
         if (
             selection.split != protocol.selection.split
             or selection.scenario_seeds != protocol.selection.scenario_seeds
-            or selection.required_checkpoint_fractions
-            != [0.1, 0.25, 0.5, 0.75, 1.0]
+            or selection.required_checkpoint_fractions != [0.1, 0.25, 0.5, 0.75, 1.0]
             or selection.source_commit != manifest.source.commit
-            or selection.configuration_digest
-            != config.get("configuration_digest")
+            or selection.configuration_digest != config.get("configuration_digest")
             or selection.experiment_id != protocol.experiment_id
-            or selection.experiment_variant
-            != config.get("experiment_variant")
+            or selection.experiment_variant != config.get("experiment_variant")
             or selection.training_seed != config.get("training_seed")
         ):
-            raise PublicDemoExportError(
-                f"frozen selection provenance is invalid: {run_key}"
-            )
+            raise PublicDemoExportError(f"frozen selection provenance is invalid: {run_key}")
         candidates = raw_selection_by_run[run_key].get("candidates")
         if not isinstance(candidates, list) or not all(
             isinstance(candidate, dict) for candidate in candidates
         ):
-            raise PublicDemoExportError(
-                f"validation candidates are malformed: {run_key}"
-            )
+            raise PublicDemoExportError(f"validation candidates are malformed: {run_key}")
         fractions: list[float] = []
         candidate_results: list[CheckpointValidationResult] = []
         for candidate in cast(list[dict[str, object]], candidates):
             result_payload = candidate.get("result")
             episodes_payload = candidate.get("episodes")
-            if not isinstance(result_payload, dict) or not isinstance(
-                episodes_payload, list
-            ):
+            if not isinstance(result_payload, dict) or not isinstance(episodes_payload, list):
                 raise PublicDemoExportError(
                     f"validation candidate evidence is malformed: {run_key}"
                 )
@@ -826,6 +786,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
                 raise PublicDemoExportError(
                     f"validation candidate evidence is malformed for {run_key}: {exc}"
                 ) from exc
+            _require_public_checkpoint_provenance(result, run_key)
             fraction = result.checkpoint_fraction
             if isinstance(fraction, bool):
                 raise PublicDemoExportError(
@@ -849,8 +810,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
                 len(episodes) != 10
                 or cells != expected_cells
                 or result.source_commit != manifest.source.commit
-                or result.configuration_digest
-                != config.get("configuration_digest")
+                or result.configuration_digest != config.get("configuration_digest")
             ):
                 raise PublicDemoExportError(
                     f"validation candidate grid or provenance is invalid: {run_key}"
@@ -880,14 +840,11 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             ) from exc
         if recomputed_selection != selection:
             raise PublicDemoExportError(
-                f"selected checkpoint does not match deterministic validation "
-                f"ranking: {run_key}"
+                f"selected checkpoint does not match deterministic validation ranking: {run_key}"
             )
         identity = (selection.experiment_variant, selection.training_seed)
         if identity in selected_by_identity:
-            raise PublicDemoExportError(
-                f"duplicate selected policy identity: {identity}"
-            )
+            raise PublicDemoExportError(f"duplicate selected policy identity: {identity}")
         selected_by_identity[identity] = (run_key, selection)
 
     try:
@@ -897,9 +854,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
     except (OSError, ValueError) as exc:
         raise PublicDemoExportError(f"held-out evaluation is invalid: {exc}") from exc
     grid = suite.grid_validation
-    learned_count = sum(
-        episode.controller in {"mappo", "ippo"} for episode in suite.episodes
-    )
+    learned_count = sum(episode.controller in {"mappo", "ippo"} for episode in suite.episodes)
     baseline_count = len(suite.episodes) - learned_count
     expected_summary_groups = {
         (algorithm, variant, failure)
@@ -965,20 +920,11 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
         or baseline_count != 40
         or observed_episode_cells != expected_episode_cells
         or observed_summary_groups != expected_summary_groups
-        or any(
-            set(summary.metrics) != required_metrics
-            for summary in suite.summaries
-        )
+        or any(set(summary.metrics) != required_metrics for summary in suite.summaries)
         or len(suite.per_training_seed) != 48
         or len(suite.per_scenario_seed) != 80
-        or any(
-            set(summary.metrics) != required_metrics
-            for summary in suite.per_training_seed
-        )
-        or any(
-            set(summary.metrics) != required_metrics
-            for summary in suite.per_scenario_seed
-        )
+        or any(set(summary.metrics) != required_metrics for summary in suite.per_training_seed)
+        or any(set(summary.metrics) != required_metrics for summary in suite.per_scenario_seed)
     ):
         raise PublicDemoExportError(
             "held-out evaluation is not the complete 200 learned + 40 baseline grid"
@@ -1024,9 +970,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
         ) as handle:
             observed_csv = handle.read()
     except OSError as exc:
-        raise PublicDemoExportError(
-            f"held-out episode CSV is unreadable: {exc}"
-        ) from exc
+        raise PublicDemoExportError(f"held-out episode CSV is unreadable: {exc}") from exc
     if observed_csv != expected_csv:
         raise PublicDemoExportError(
             "held-out episode CSV does not exactly match evaluation.json episodes"
@@ -1034,13 +978,9 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
     try:
         observed_report = bundle.files["report"].read_text(encoding="utf-8")
     except OSError as exc:
-        raise PublicDemoExportError(
-            f"held-out report is unreadable: {exc}"
-        ) from exc
+        raise PublicDemoExportError(f"held-out report is unreadable: {exc}") from exc
     if observed_report != render_evaluation_report(suite):
-        raise PublicDemoExportError(
-            "held-out report does not match the canonical evaluation suite"
-        )
+        raise PublicDemoExportError("held-out report does not match the canonical evaluation suite")
     try:
         acceptance = PrimaryAcceptanceAudit.model_validate_json(
             bundle.files["acceptance"].read_text(encoding="utf-8")
@@ -1053,25 +993,17 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             "declared acceptance does not match recomputed held-out metrics"
         )
     if not recomputed_acceptance.passed:
-        raise PublicDemoExportError(
-            "one or more recomputed primary research thresholds failed"
-        )
+        raise PublicDemoExportError("one or more recomputed primary research thresholds failed")
     try:
-        ablations_payload = json.loads(
-            bundle.files["ablations"].read_text(encoding="utf-8")
-        )
-        ablations = TypeAdapter(list[AblationDecision]).validate_python(
-            ablations_payload
-        )
+        ablations_payload = json.loads(bundle.files["ablations"].read_text(encoding="utf-8"))
+        ablations = TypeAdapter(list[AblationDecision]).validate_python(ablations_payload)
     except (OSError, ValueError) as exc:
         raise PublicDemoExportError(f"ablation evidence is invalid: {exc}") from exc
     if {item.hypothesis for item in ablations} != {
         "behavior_cloning",
         "failure_curriculum",
     }:
-        raise PublicDemoExportError(
-            "both pre-registered ablation interpretations are required"
-        )
+        raise PublicDemoExportError("both pre-registered ablation interpretations are required")
     reproducibility_audit = _read_object(
         bundle.files["reproducibility_audit"],
         "research reproducibility audit",
@@ -1079,16 +1011,27 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
     if (
         reproducibility_audit.get("matrix_id") != manifest.matrix_id
         or reproducibility_audit.get("complete") is not True
-        or not isinstance(
-            reproducibility_audit.get("checked_file_count"), int
-        )
+        or not isinstance(reproducibility_audit.get("checked_file_count"), int)
         or cast(int, reproducibility_audit["checked_file_count"]) <= 0
         or reproducibility_audit.get("missing_paths") != []
         or reproducibility_audit.get("invalid_artifacts") != []
     ):
+        raise PublicDemoExportError("research reproducibility audit is incomplete or invalid")
+    file_hashes = reproducibility_audit.get("file_hashes")
+    if not isinstance(file_hashes, dict) or not file_hashes:
+        raise PublicDemoExportError("research reproducibility audit file hashes are missing")
+    if not all(
+        isinstance(label, str) and isinstance(digest, str) and _is_sha256(digest)
+        for label, digest in file_hashes.items()
+    ):
+        raise PublicDemoExportError("research reproducibility audit file hashes are malformed")
+    try:
+        for label in file_hashes:
+            _safe_relative_path(str(label))
+    except ValueError as exc:
         raise PublicDemoExportError(
-            "research reproducibility audit is incomplete or invalid"
-        )
+            "research reproducibility audit exposes a machine-local path"
+        ) from exc
     release_completeness = _read_object(
         bundle.files["release_completeness"],
         "research release completeness",
@@ -1106,9 +1049,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             )
         )
     ):
-        raise PublicDemoExportError(
-            "research release-completeness decision has blockers"
-        )
+        raise PublicDemoExportError("research release-completeness decision has blockers")
     return _ValidatedResearch(
         matrix=matrix,
         selection_records=selection_records,
@@ -1195,16 +1136,12 @@ def _recompute_hierarchical_metric(
     training_groups: dict[int | None, dict[int, list[float]]] = {}
     for episode in episodes:
         scenario_groups = training_groups.setdefault(episode.training_seed, {})
-        scenario_groups.setdefault(episode.seed, []).append(
-            float(getattr(episode, field))
-        )
+        scenario_groups.setdefault(episode.seed, []).append(float(getattr(episode, field)))
     training_seeds = sorted(
         training_groups,
         key=lambda value: -1 if value is None else value,
     )
-    scenario_grids = {
-        tuple(sorted(scenarios)) for scenarios in training_groups.values()
-    }
+    scenario_grids = {tuple(sorted(scenarios)) for scenarios in training_groups.values()}
     if len(scenario_grids) != 1:
         raise PublicDemoExportError(
             "published summaries use inconsistent hierarchical scenario grids"
@@ -1261,6 +1198,34 @@ def _recompute_hierarchical_metric(
     )
 
 
+def _require_public_checkpoint_provenance(
+    checkpoint: CheckpointValidationResult | SelectedCheckpoint,
+    run_key: str,
+) -> None:
+    try:
+        _safe_relative_path(checkpoint.checkpoint_path)
+        for item in checkpoint.checkpoint_lineage:
+            _safe_relative_path(item)
+    except ValueError as exc:
+        raise PublicDemoExportError(
+            f"checkpoint provenance contains machine-local paths: {run_key}"
+        ) from exc
+    if _contains_absolute_path(checkpoint.resume_provenance):
+        raise PublicDemoExportError(
+            f"checkpoint resume provenance contains machine-local paths: {run_key}"
+        )
+
+
+def _contains_absolute_path(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_absolute_path(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_absolute_path(item) for item in value)
+    if isinstance(value, str):
+        return Path(value).is_absolute() or PureWindowsPath(value).is_absolute()
+    return False
+
+
 def _validate_validation_candidate(
     run_key: str,
     result: CheckpointValidationResult,
@@ -1274,12 +1239,9 @@ def _validate_validation_candidate(
         result.experiment_id != "construction_intelligence_v1"
         or result.experiment_variant != experiment_variant
         or result.training_seed != training_seed
-        or result.transition_count
-        != int(round(1_500_000 * result.checkpoint_fraction))
+        or result.transition_count != int(round(1_500_000 * result.checkpoint_fraction))
     ):
-        raise PublicDemoExportError(
-            f"validation checkpoint identity is inconsistent: {run_key}"
-        )
+        raise PublicDemoExportError(f"validation checkpoint identity is inconsistent: {run_key}")
     for episode in episodes:
         if (
             episode.controller != algorithm
@@ -1298,9 +1260,7 @@ def _validate_validation_candidate(
             raise PublicDemoExportError(
                 f"validation episode is not tied to its checkpoint: {run_key}"
             )
-    mean_completion = sum(
-        episode.structure_completion_rate for episode in episodes
-    ) / len(episodes)
+    mean_completion = sum(episode.structure_completion_rate for episode in episodes) / len(episodes)
     mean_makespan = sum(episode.makespan_s for episode in episodes) / len(episodes)
     if not math.isclose(
         result.mean_completion_rate,
@@ -1490,12 +1450,7 @@ def _verify_simulator_video(path: Path, scenario: str) -> None:
         with path.open("rb") as handle:
             header = handle.read(32)
         size = path.stat().st_size
-        if (
-            size < 1_024
-            or size > 512 * 1024 * 1024
-            or len(header) < 12
-            or header[4:8] != b"ftyp"
-        ):
+        if size < 1_024 or size > 512 * 1024 * 1024 or len(header) < 12 or header[4:8] != b"ftyp":
             raise ValueError("invalid MP4 container")
         import imageio.v3 as imageio
 
@@ -1514,8 +1469,7 @@ def _validate_phase5_metrics(
     scenario: Literal["nominal", "unavailable_robot_recovery"],
 ) -> None:
     if (
-        payload.get("schema_version")
-        != "construction_intelligence.coppelia_evidence.v1"
+        payload.get("schema_version") != "construction_intelligence.coppelia_evidence.v1"
         or payload.get("scenario") != scenario
         or payload.get("evidence_kind") != "live_coppelia"
         or payload.get("status") != "completed"
@@ -1523,8 +1477,10 @@ def _validate_phase5_metrics(
     ):
         raise ValueError(f"{scenario} metrics are not passing live evidence")
     acceptance = payload.get("acceptance")
-    if not isinstance(acceptance, dict) or not acceptance or any(
-        value is not True for value in acceptance.values()
+    if (
+        not isinstance(acceptance, dict)
+        or not acceptance
+        or any(value is not True for value in acceptance.values())
     ):
         raise ValueError(f"{scenario} acceptance gates did not all pass")
     expected_module_count = payload.get("expected_module_count")
@@ -1579,8 +1535,7 @@ def _validate_export_claims(
         return
     if not deterministic.manifest.configuration_digests:
         raise PublicDemoExportError(
-            "release deterministic bundle must declare at least one "
-            "configuration digest"
+            "release deterministic bundle must declare at least one configuration digest"
         )
     if (
         source.dirty
@@ -1599,17 +1554,14 @@ def _validate_export_claims(
         raise PublicDemoExportError(
             "release deterministic bundle does not contain every required artifact"
         )
-    deterministic_targets = {
-        item.role: item.target for item in deterministic.manifest.artifacts
-    }
+    deterministic_targets = {item.role: item.target for item in deterministic.manifest.artifacts}
     if deterministic_targets != _RELEASE_DETERMINISTIC_TARGETS:
         raise PublicDemoExportError(
             "release deterministic artifact targets do not match the public contract"
         )
     bundles = (deterministic, research, simulator)
     if any(
-        bundle.manifest.source.dirty
-        or not _is_sha256(bundle.manifest.source.tree_digest)
+        bundle.manifest.source.dirty or not _is_sha256(bundle.manifest.source.tree_digest)
         for bundle in bundles
     ):
         raise PublicDemoExportError(
@@ -1626,15 +1578,11 @@ def _copy_bundle(
         target = _safe_relative_path(artifact.target).as_posix()
         if target in artifact_sources:
             raise PublicDemoExportError(f"bundle target collision: {target}")
-        if bundle.manifest.kind == "research" and not target.startswith(
-            "evidence/research/"
-        ):
+        if bundle.manifest.kind == "research" and not target.startswith("evidence/research/"):
             raise PublicDemoExportError(
                 f"research artifacts must target evidence/research/: {target}"
             )
-        if bundle.manifest.kind == "simulator" and not target.startswith(
-            "evidence/coppelia/"
-        ):
+        if bundle.manifest.kind == "simulator" and not target.startswith("evidence/coppelia/"):
             raise PublicDemoExportError(
                 f"simulator artifacts must target evidence/coppelia/: {target}"
             )
@@ -1653,9 +1601,7 @@ def _write_research_views(
     matrix_id = cast(str, bundle.manifest.matrix_id)
     suite_payload = evidence.suite.model_dump(mode="json")
     _write_json(staging / "experiment-matrices.json", [evidence.matrix])
-    selections_path = (
-        staging / "experiment-matrices" / matrix_id / "selections.json"
-    )
+    selections_path = staging / "experiment-matrices" / matrix_id / "selections.json"
     _write_json(selections_path, evidence.selection_records)
     _write_json(
         staging / "evaluations.json",
@@ -1716,9 +1662,7 @@ def _write_research_views(
         {
             "id": selection["checkpoint_id"],
             "controller": (
-                "ippo"
-                if str(selection["experiment_variant"]).startswith("ippo")
-                else "mappo"
+                "ippo" if str(selection["experiment_variant"]).startswith("ippo") else "mappo"
             ),
             "manifest": selection,
             "created_at": bundle.manifest.created_at,
@@ -1792,9 +1736,7 @@ def _artifact_references_for_roles(
             "label": label,
             "href": artifacts[role].target,
             "path": artifacts[role].target,
-            "media_type": (
-                artifacts[role].media_type or "application/octet-stream"
-            ),
+            "media_type": (artifacts[role].media_type or "application/octet-stream"),
         }
         for role, label in labels.items()
         if role in artifacts
@@ -1818,10 +1760,7 @@ def _artifact_references_for_prefix(
     }
     return _artifact_references_for_roles(
         bundle,
-        {
-            f"{prefix}_{role}": f"{prefix.title()} {label}"
-            for role, label in labels.items()
-        },
+        {f"{prefix}_{role}": f"{prefix.title()} {label}" for role, label in labels.items()},
     )
 
 
@@ -1855,10 +1794,7 @@ def _research_validation_curves(
                 continue
             transitions = result.get("transition_count")
             completion = result.get("mean_completion_rate")
-            if (
-                isinstance(transitions, int)
-                and isinstance(completion, (int, float))
-            ):
+            if isinstance(transitions, int) and isinstance(completion, (int, float)):
                 points.append(
                     {
                         "transitions": transitions,
@@ -1870,9 +1806,7 @@ def _research_validation_curves(
         curves.append(
             {
                 "run_key": str(item.get("run_key", "")),
-                "controller": (
-                    "ippo" if variant.startswith("ippo") else "mappo"
-                ),
+                "controller": ("ippo" if variant.startswith("ippo") else "mappo"),
                 "experiment_variant": variant,
                 "training_seed": seed,
                 "status": "completed",
@@ -1890,14 +1824,10 @@ def _validate_release_metadata(
 ) -> None:
     if channel == "preview":
         if release_version is not None or release_tag is not None:
-            raise PublicDemoExportError(
-                "preview exports must not declare a release version or tag"
-            )
+            raise PublicDemoExportError("preview exports must not declare a release version or tag")
         return
     if release_version is None or release_tag is None:
-        raise PublicDemoExportError(
-            "release exports require both release_version and release_tag"
-        )
+        raise PublicDemoExportError("release exports require both release_version and release_tag")
     try:
         validate_release_identity(release_version, release_tag)
     except ValueError as exc:
@@ -1910,9 +1840,7 @@ def _validate_provenance_inputs(
     channel: Literal["preview", "release"],
 ) -> None:
     if payload.get("generated_at") != _GENERATED_AT:
-        raise PublicDemoExportError(
-            "provenance generated_at must use the deterministic Unix epoch"
-        )
+        raise PublicDemoExportError("provenance generated_at must use the deterministic Unix epoch")
     coverage = payload.get("coverage")
     if (
         not isinstance(coverage, dict)
@@ -1943,13 +1871,10 @@ def _validate_provenance_inputs(
             or evidence_status not in {"fixture", "canonical"}
             or not isinstance(configuration_digests, list)
             or not all(
-                isinstance(digest, str) and _is_sha256(digest)
-                for digest in configuration_digests
+                isinstance(digest, str) and _is_sha256(digest) for digest in configuration_digests
             )
         ):
-            raise PublicDemoExportError(
-                "provenance contains a malformed input descriptor"
-            )
+            raise PublicDemoExportError("provenance contains a malformed input descriptor")
         try:
             input_source = SourceIdentity.model_validate(item.get("source"))
         except ValueError as exc:
@@ -1957,16 +1882,10 @@ def _validate_provenance_inputs(
                 f"provenance input source identity is invalid: {exc}"
             ) from exc
         protocol_digest = item.get("protocol_digest")
-        if (
-            protocol_digest is not None
-            and (
-                not isinstance(protocol_digest, str)
-                or not _is_sha256(protocol_digest)
-            )
+        if protocol_digest is not None and (
+            not isinstance(protocol_digest, str) or not _is_sha256(protocol_digest)
         ):
-            raise PublicDemoExportError(
-                "provenance input protocol digest is invalid"
-            )
+            raise PublicDemoExportError("provenance input protocol digest is invalid")
         kinds.append(kind)
         if channel == "release":
             if (
@@ -1990,21 +1909,14 @@ def _validate_provenance_inputs(
         "simulator",
     }:
         raise PublicDemoExportError(
-            "release provenance must contain deterministic, research, and "
-            "simulator inputs"
+            "release provenance must contain deterministic, research, and simulator inputs"
         )
     try:
         source = SourceIdentity.model_validate(payload.get("source"))
     except ValueError as exc:
-        raise PublicDemoExportError(
-            f"provenance source identity is invalid: {exc}"
-        ) from exc
-    if channel == "release" and (
-        source.dirty or not _is_sha256(source.tree_digest)
-    ):
-        raise PublicDemoExportError(
-            "release provenance must record a clean source identity"
-        )
+        raise PublicDemoExportError(f"provenance source identity is invalid: {exc}") from exc
+    if channel == "release" and (source.dirty or not _is_sha256(source.tree_digest)):
+        raise PublicDemoExportError("release provenance must record a clean source identity")
 
 
 def _validate_release_status(
@@ -2016,28 +1928,19 @@ def _validate_release_status(
 ) -> None:
     status = _read_object(root / "release-status.json", "release status")
     if (
-        status.get("schema_version")
-        != "construction-intelligence-public-status-v1"
+        status.get("schema_version") != "construction-intelligence-public-status-v1"
         or status.get("channel") != channel
         or status.get("release_ready") is not (channel == "release")
     ):
-        raise PublicDemoExportError(
-            "release status does not match the provenance channel"
-        )
+        raise PublicDemoExportError("release status does not match the provenance channel")
     status_version = status.get("release_version")
     status_tag = status.get("release_tag")
     if status_version is not None and not isinstance(status_version, str):
-        raise PublicDemoExportError(
-            "release status version must be a string or null"
-        )
+        raise PublicDemoExportError("release status version must be a string or null")
     if status_tag is not None and not isinstance(status_tag, str):
-        raise PublicDemoExportError(
-            "release status tag must be a string or null"
-        )
+        raise PublicDemoExportError("release status tag must be a string or null")
     if status_version != release_version or status_tag != release_tag:
-        raise PublicDemoExportError(
-            "release status version or tag does not match provenance"
-        )
+        raise PublicDemoExportError("release status version or tag does not match provenance")
     evidence = status.get("evidence")
     if channel == "release" and (
         status.get("claim_status") != "release_evidence"
@@ -2049,9 +1952,7 @@ def _validate_release_status(
             "coppelia": "validated",
         }
     ):
-        raise PublicDemoExportError(
-            "release status does not attest complete canonical evidence"
-        )
+        raise PublicDemoExportError("release status does not attest complete canonical evidence")
 
 
 def _write_release_status(
@@ -2078,8 +1979,7 @@ def _write_release_status(
     limitations: list[str] = []
     if not research_present:
         limitations.append(
-            "Canonical 20-run research evidence is absent; no learned-policy "
-            "release claim is made."
+            "Canonical 20-run research evidence is absent; no learned-policy release claim is made."
         )
     if not simulator_present:
         limitations.append(
@@ -2087,9 +1987,7 @@ def _write_release_status(
             "traces do not substitute for simulator execution."
         )
     if deterministic.manifest.evidence_status == "fixture":
-        limitations.append(
-            "Deterministic content is a reviewed fixture intended for preview use."
-        )
+        limitations.append("Deterministic content is a reviewed fixture intended for preview use.")
     _write_json(
         staging / "release-status.json",
         {
@@ -2151,9 +2049,7 @@ def _build_provenance(
             "manifest_sha256": bundle.sha256,
             "evidence_status": bundle.manifest.evidence_status,
             "source": bundle.manifest.source.model_dump(mode="json"),
-            "configuration_digests": sorted(
-                bundle.manifest.configuration_digests
-            ),
+            "configuration_digests": sorted(bundle.manifest.configuration_digests),
             "protocol_digest": bundle.manifest.protocol_digest,
             "profile": bundle.manifest.profile,
             "matrix_id": bundle.manifest.matrix_id,
@@ -2173,8 +2069,7 @@ def _build_provenance(
             "evidence timestamps come only from hash-pinned input bundles."
         ),
         "ordering_strategy": (
-            "JSON object keys, input descriptors, and artifact paths are "
-            "lexicographically sorted."
+            "JSON object keys, input descriptors, and artifact paths are lexicographically sorted."
         ),
         "inputs": sorted(inputs, key=lambda item: str(item["kind"])),
         "artifact_count": len(artifacts),
@@ -2273,9 +2168,7 @@ def _safe_relative_path(value: str) -> PurePosixPath:
 def _replace_directory(staging: Path, destination: Path) -> None:
     backup: Path | None = None
     if destination.exists():
-        backup = destination.with_name(
-            f".{destination.name}.previous-{os.getpid()}"
-        )
+        backup = destination.with_name(f".{destination.name}.previous-{os.getpid()}")
         if backup.exists():
             shutil.rmtree(backup)
         destination.replace(backup)
