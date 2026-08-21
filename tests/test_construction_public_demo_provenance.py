@@ -1158,6 +1158,7 @@ def _research_bundle(root: Path) -> Path:
                         "algorithm": algorithm,
                         "source_commit": SOURCE.commit,
                         "source_dirty": False,
+                        "source_tree_digest": SOURCE.tree_digest,
                         "configuration_digest": digest,
                         "transitions": 1_500_000,
                         "checkpoint_fractions": [0.1, 0.25, 0.5, 0.75, 1.0],

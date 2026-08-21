@@ -22,8 +22,8 @@ fixture and visibly records that learned-policy and live Coppelia evidence are a
 .\.venv\Scripts\python.exe scripts\export_construction_public_demo.py `
   --channel release `
   --deterministic-bundle release-inputs\deterministic\deterministic-bundle.json `
-  --research-bundle release-inputs\research-bundle.json `
-  --simulator-bundle release-inputs\simulator-bundle.json `
+  --research-bundle release-inputs\research\research-bundle.json `
+  --simulator-bundle release-inputs\coppelia\simulator-bundle.json `
   --source-commit <40-character-commit> `
   --source-clean `
   --source-tree-digest <64-character-clean-tree-digest> `
@@ -108,8 +108,13 @@ unsupported hypothesis is allowed.
 Phase 4 can create this descriptor after its durable executor writes the final matrix detail,
 `matrix_selections.json`, `evaluation.json`, `episodes.csv`, `report.md`, `acceptance.json`,
 `ablations.json`, `reproducibility_audit.json`, and `release_completeness.json`. Both final audits
-must be complete and blocker-free. The descriptor points at those files and records their exact
-SHA-256 values; the exporter does not need the live SQLite database.
+must be complete and blocker-free. Run
+`scripts/package_construction_research_evidence.py` with the read-only registry, matrix id,
+selection evidence, held-out directory, and an empty output location. It creates a self-contained,
+atomically replaced descriptor directory, records every public artifact SHA-256, replaces
+machine-local paths with stable public references, and stages hash-verified selected checkpoint
+sources for the separate policy archive. The exporter does not need the live SQLite database after
+that packaging step.
 
 ### Simulator bundle
 
