@@ -4,16 +4,26 @@ import asyncio
 import pickle
 import socket
 from contextlib import asynccontextmanager
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal, cast
+from urllib.parse import quote, urlsplit
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+from starlette.websockets import WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
 from embodied_skill_composer.construction.compiler import compile_house_design
+from embodied_skill_composer.construction.design_validation import (
+    DesignValidationError,
+    DesignValidationResult,
+    validate_house_design,
+)
 from embodied_skill_composer.construction.experiment_execution import (
     evaluate_and_freeze_run_selection,
     materialize_matrix_selection_evidence,
@@ -25,7 +35,10 @@ from embodied_skill_composer.construction.experiment_protocol import (
     load_experiment_protocol,
     protocol_digest,
 )
-from embodied_skill_composer.construction.floorplan import infer_orthogonal_floor_plan
+from embodied_skill_composer.construction.floorplan import (
+    MAX_FLOORPLAN_ENCODED_BYTES,
+    infer_orthogonal_floor_plan,
+)
 from embodied_skill_composer.construction.evaluation import ControllerName
 from embodied_skill_composer.construction.lab_registry import (
     QUIESCENT_RUN_STATUSES,
@@ -41,13 +54,232 @@ from embodied_skill_composer.construction.runtime import load_house_design
 from embodied_skill_composer.construction.scheduler import compare_controllers
 from embodied_skill_composer.construction.scenarios import generate_cottage_scenario
 from embodied_skill_composer.construction.trace import build_execution_trace
+from embodied_skill_composer.construction.workbench_evidence import (
+    artifact_references,
+    build_local_coppelia_summary,
+    build_local_research_summary,
+    phase5_run_directory,
+    resolve_artifact,
+)
 
 
 WORKSPACE = Path(__file__).resolve().parents[3]
 DEFAULT_DESIGN = WORKSPACE / "configs" / "construction" / "cottage_v1.yaml"
 DEFAULT_ASSETS = WORKSPACE / "artifacts" / "construction_v2" / "cottage_v1"
 DEFAULT_LAB_DATABASE = WORKSPACE / "logs" / "construction_intelligence" / "lab.sqlite"
-LOCAL_ORIGINS = {"http://localhost:5173", "http://127.0.0.1:5173"}
+DEFAULT_COPPELIA_EVIDENCE = (
+    WORKSPACE / "logs" / "construction_intelligence" / "coppelia_phase5"
+)
+LOCAL_ORIGINS = frozenset(
+    {
+        "http://127.0.0.1:4173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://localhost:5173",
+    }
+)
+UNSAFE_HTTP_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+TRUSTED_FETCH_SITES = frozenset({"same-origin", "same-site", "none"})
+MAX_FLOORPLAN_MULTIPART_OVERHEAD_BYTES = 256 * 1024
+MAX_FLOORPLAN_MULTIPART_BODY_BYTES = (
+    MAX_FLOORPLAN_ENCODED_BYTES + MAX_FLOORPLAN_MULTIPART_OVERHEAD_BYTES
+)
+API_SECURITY_RESPONSE_HEADERS = (
+    (
+        b"content-security-policy",
+        b"frame-ancestors 'none'; object-src 'none'; base-uri 'none'; "
+        b"form-action 'self'",
+    ),
+    (b"x-frame-options", b"DENY"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+)
+
+
+class SecurityResponseHeadersMiddleware:
+    """Apply browser hardening headers to every HTTP response."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                existing = {name.lower() for name, _value in headers}
+                headers.extend(
+                    (name, value)
+                    for name, value in API_SECURITY_RESPONSE_HEADERS
+                    if name not in existing
+                )
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
+
+
+class FloorplanUploadBodyLimitMiddleware:
+    """Bound the multipart request before Starlette parses or spools it."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_body_bytes: int,
+    ) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if (
+            scope["type"] != "http"
+            or str(scope.get("method", "")).upper() != "POST"
+            or scope.get("path") != "/api/intent/parse"
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    status_code=400,
+                    detail="invalid Content-Length for floor-plan upload",
+                )
+                return
+            if declared_length < 0:
+                await self._reject(
+                    scope,
+                    receive,
+                    send,
+                    status_code=400,
+                    detail="invalid Content-Length for floor-plan upload",
+                )
+                return
+            if declared_length > self.max_body_bytes:
+                await self._reject(scope, receive, send)
+                return
+
+        received_bytes = 0
+        request_messages: list[Message] = []
+        while True:
+            message = await receive()
+            if message["type"] == "http.request":
+                received_bytes += len(message.get("body", b""))
+                if received_bytes > self.max_body_bytes:
+                    await self._reject(scope, receive, send)
+                    return
+            request_messages.append(message)
+            if (
+                message["type"] != "http.request"
+                or not message.get("more_body", False)
+            ):
+                break
+
+        message_index = 0
+
+        async def replay_receive() -> Message:
+            nonlocal message_index
+            if message_index < len(request_messages):
+                message = request_messages[message_index]
+                message_index += 1
+                return message
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+    async def _reject(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        *,
+        status_code: int = 413,
+        detail: str = (
+            "floor-plan multipart request exceeds the bounded upload limit"
+        ),
+    ) -> None:
+        response = JSONResponse(
+            status_code=status_code,
+            content={"detail": detail},
+        )
+        await response(scope, receive, send)
+
+
+class UnsafeMethodOriginMiddleware:
+    """Reject browser cross-site mutations while retaining trusted CLI access."""
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        allowed_origins: frozenset[str],
+    ) -> None:
+        self.app = app
+        self.allowed_origins = allowed_origins
+
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        if (
+            scope["type"] != "http"
+            or str(scope.get("method", "")).upper() not in UNSAFE_HTTP_METHODS
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {
+            key.lower(): value.decode("latin-1")
+            for key, value in scope.get("headers", [])
+        }
+        origin = headers.get(b"origin")
+        fetch_site = headers.get(b"sec-fetch-site")
+        rejected = (
+            origin is not None and origin not in self.allowed_origins
+        ) or (
+            fetch_site is not None
+            and fetch_site.lower() not in TRUSTED_FETCH_SITES
+        )
+        if rejected:
+            response = JSONResponse(
+                status_code=403,
+                content={
+                    "detail": (
+                        "cross-site mutation rejected; use the loopback "
+                        "workbench origin or a trusted no-Origin CLI client"
+                    )
+                },
+            )
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 
 class WorkbenchState:
@@ -55,13 +287,17 @@ class WorkbenchState:
         self.replace_design(design)
 
     def replace_design(self, design: HouseDesign) -> None:
-        self.design = design
-        self.plan = compile_house_design(design)
-        self.schedules = compare_controllers(self.plan)
-        self.traces = {
-            name: build_execution_trace(self.plan, schedule)
-            for name, schedule in self.schedules.items()
+        candidate_design = design.model_copy(deep=True)
+        candidate_plan = compile_house_design(candidate_design)
+        candidate_schedules = compare_controllers(candidate_plan)
+        candidate_traces = {
+            name: build_execution_trace(candidate_plan, schedule)
+            for name, schedule in candidate_schedules.items()
         }
+        self.design = candidate_design
+        self.plan = candidate_plan
+        self.schedules = candidate_schedules
+        self.traces = candidate_traces
 
 
 class RebuildRequest(BaseModel):
@@ -112,7 +348,11 @@ def create_app(
     registry_path: Path | None = None,
     training_runner=None,
     evaluation_runner=None,
+    allowed_origins: Iterable[str] | None = None,
+    coppelia_evidence_root: Path | None = None,
 ) -> FastAPI:
+    local_origins = _validated_local_origins(allowed_origins or LOCAL_ORIGINS)
+    phase5_root = (coppelia_evidence_root or DEFAULT_COPPELIA_EVIDENCE).resolve()
     registry = LabRegistry(registry_path or DEFAULT_LAB_DATABASE)
     service = LabService(
         registry,
@@ -131,16 +371,25 @@ def create_app(
         lifespan=lifespan,
     )
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=sorted(LOCAL_ORIGINS),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        FloorplanUploadBodyLimitMiddleware,
+        max_body_bytes=MAX_FLOORPLAN_MULTIPART_BODY_BYTES,
+    )
+    app.add_middleware(
+        UnsafeMethodOriginMiddleware,
+        allowed_origins=local_origins,
     )
     app.add_middleware(
         TrustedHostMiddleware,
         allowed_hosts=["127.0.0.1", "localhost", "testserver", "[::1]"],
     )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=sorted(local_origins),
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.add_middleware(SecurityResponseHeadersMiddleware)
     state = WorkbenchState(load_house_design(DEFAULT_DESIGN))
     registry.upsert_scenario(
         state.design.design_id,
@@ -212,6 +461,11 @@ def create_app(
     def rebuild(payload: RebuildRequest) -> dict[str, object]:
         try:
             state.replace_design(payload.design)
+        except DesignValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=exc.result.model_dump(mode="json"),
+            ) from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         registry.upsert_scenario(
@@ -225,14 +479,33 @@ def create_app(
         )
         return project()
 
+    @app.post("/api/design/validate", response_model=DesignValidationResult)
+    def validate_design(payload: RebuildRequest) -> DesignValidationResult:
+        return validate_house_design(payload.design)
+
     @app.post("/api/intent/parse")
     async def parse_intent(
         file: UploadFile = File(...),
         known_width_m: float = Query(gt=1, le=40),
     ) -> dict[str, object]:
+        if (
+            file.size is not None
+            and file.size > MAX_FLOORPLAN_ENCODED_BYTES
+        ):
+            raise HTTPException(
+                status_code=413,
+                detail="floor-plan upload exceeds the 8 MiB encoded-image limit",
+            )
+        image_bytes = await file.read(MAX_FLOORPLAN_ENCODED_BYTES + 1)
+        if len(image_bytes) > MAX_FLOORPLAN_ENCODED_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail="floor-plan upload exceeds the 8 MiB encoded-image limit",
+            )
         try:
             inferred = infer_orthogonal_floor_plan(
-                await file.read(), known_width_m=known_width_m
+                image_bytes,
+                known_width_m=known_width_m,
             )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -271,6 +544,14 @@ def create_app(
     ) -> list[dict[str, object]]:
         return registry.list_evaluations(matrix_id=matrix_id)
 
+    @app.get("/api/lab/evidence/research-summary")
+    def research_summary() -> dict[str, object]:
+        return build_local_research_summary(registry)
+
+    @app.get("/api/lab/evidence/coppelia")
+    def coppelia_evidence() -> dict[str, object]:
+        return build_local_coppelia_summary(phase5_root)
+
     @app.get("/api/lab/runs")
     def runs(limit: int = Query(default=100, ge=1, le=500)) -> list[dict[str, object]]:
         return registry.list_runs(limit=limit)
@@ -281,6 +562,79 @@ def create_app(
         if item is None:
             raise HTTPException(status_code=404, detail="run not found")
         return item
+
+    @app.get("/api/lab/runs/{run_id}/artifacts")
+    def run_artifacts(run_id: str) -> list[dict[str, str]]:
+        item = registry.get_run(run_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        root = _registered_artifact_root(item)
+        if root is None:
+            return []
+        return artifact_references(
+            root,
+            f"/api/lab/runs/{quote(run_id, safe='')}/artifacts",
+        )
+
+    @app.get("/api/lab/runs/{run_id}/artifacts/{artifact_path:path}")
+    def run_artifact(run_id: str, artifact_path: str) -> FileResponse:
+        item = registry.get_run(run_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        root = _registered_artifact_root(item)
+        if root is None:
+            raise HTTPException(status_code=404, detail="run has no artifacts")
+        return _artifact_response(root, artifact_path)
+
+    @app.get("/api/lab/evaluations/{evaluation_id}/artifacts")
+    def evaluation_artifacts(evaluation_id: str) -> list[dict[str, str]]:
+        item = _evaluation_record(registry, evaluation_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="evaluation not found")
+        root = Path(str(item["artifact_dir"]))
+        return artifact_references(
+            root,
+            f"/api/lab/evaluations/{quote(evaluation_id, safe='')}/artifacts",
+        )
+
+    @app.get(
+        "/api/lab/evaluations/{evaluation_id}/artifacts/{artifact_path:path}"
+    )
+    def evaluation_artifact(
+        evaluation_id: str,
+        artifact_path: str,
+    ) -> FileResponse:
+        item = _evaluation_record(registry, evaluation_id)
+        if item is None:
+            raise HTTPException(status_code=404, detail="evaluation not found")
+        return _artifact_response(Path(str(item["artifact_dir"])), artifact_path)
+
+    @app.get("/api/lab/coppelia/evidence/{run_id}/artifacts")
+    def coppelia_artifacts(run_id: str) -> list[dict[str, str]]:
+        try:
+            root = phase5_run_directory(phase5_root, run_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="validated Coppelia evidence run not found",
+            ) from exc
+        return artifact_references(
+            root,
+            f"/api/lab/coppelia/evidence/{quote(run_id, safe='')}/artifacts",
+        )
+
+    @app.get(
+        "/api/lab/coppelia/evidence/{run_id}/artifacts/{artifact_path:path}"
+    )
+    def coppelia_artifact(run_id: str, artifact_path: str) -> FileResponse:
+        try:
+            root = phase5_run_directory(phase5_root, run_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=404,
+                detail="validated Coppelia evidence run not found",
+            ) from exc
+        return _artifact_response(root, artifact_path)
 
     @app.get(
         "/api/lab/runs/{run_id}/events",
@@ -600,13 +954,28 @@ def create_app(
     @app.websocket("/api/lab/runs/{run_id}/events/ws")
     async def stream_run_events(websocket: WebSocket, run_id: str) -> None:
         origin = websocket.headers.get("origin")
-        if origin is not None and origin not in LOCAL_ORIGINS:
+        if origin is not None and origin not in local_origins:
             await websocket.close(code=1008, reason="origin is not allowed")
             return
         await websocket.accept()
         if registry.get_run(run_id) is None:
             await websocket.close(code=1008, reason="run not found")
             return
+        await _stream_run_events(websocket, registry, run_id)
+
+    if DEFAULT_ASSETS.is_dir():
+        app.mount("/artifacts", StaticFiles(directory=DEFAULT_ASSETS), name="artifacts")
+    return app
+
+
+async def _stream_run_events(
+    websocket: WebSocket,
+    registry: LabRegistry,
+    run_id: str,
+) -> None:
+    """Stream persisted envelopes until the run or browser connection closes."""
+
+    try:
         sequence = 0
         while True:
             events = registry.list_event_envelopes(run_id, after=sequence)
@@ -620,10 +989,63 @@ def create_app(
                 await websocket.close(code=1000)
                 return
             await asyncio.sleep(0.25)
+    except WebSocketDisconnect:
+        return
 
-    if DEFAULT_ASSETS.is_dir():
-        app.mount("/artifacts", StaticFiles(directory=DEFAULT_ASSETS), name="artifacts")
-    return app
+
+def _validated_local_origins(origins: Iterable[str]) -> frozenset[str]:
+    validated: set[str] = set()
+    for origin in origins:
+        parsed = urlsplit(origin)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed.port is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "workbench origins must be explicit HTTP(S) loopback origins "
+                "with a port and no path, query, credentials, or fragment"
+            )
+        validated.add(origin.rstrip("/"))
+    if not validated:
+        raise ValueError("at least one explicit loopback workbench origin is required")
+    return frozenset(validated)
+
+
+def _registered_artifact_root(item: dict[str, object]) -> Path | None:
+    value = item.get("artifact_dir")
+    return Path(value) if isinstance(value, str) and value else None
+
+
+def _evaluation_record(
+    registry: LabRegistry,
+    evaluation_id: str,
+) -> dict[str, object] | None:
+    return next(
+        (
+            item
+            for item in registry.list_evaluations()
+            if item.get("id") == evaluation_id
+        ),
+        None,
+    )
+
+
+def _artifact_response(root: Path, artifact_path: str) -> FileResponse:
+    try:
+        path = resolve_artifact(root, artifact_path)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="artifact not found") from exc
+    return FileResponse(
+        path,
+        filename=path.name,
+        content_disposition_type="attachment",
+    )
 
 
 app = create_app()

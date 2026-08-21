@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -454,6 +455,10 @@ def test_training_claim_is_atomic_fifo_and_single_slot(tmp_path: Path) -> None:
 def test_queued_cancellation_is_terminal_and_never_claimed(tmp_path: Path) -> None:
     registry = LabRegistry(tmp_path / "lab.sqlite")
     run_id = registry.create_run("training", {"seed": 7})
+    queued = registry.get_run(run_id)
+    assert queued is not None
+    assert queued["can_cancel"] is True
+    assert queued["can_resume"] is False
 
     assert registry.request_cancel(run_id)
     run = registry.get_run(run_id)
@@ -461,9 +466,65 @@ def test_queued_cancellation_is_terminal_and_never_claimed(tmp_path: Path) -> No
     assert run["status"] == "cancelled"
     assert run["cancel_requested"] is True
     assert run["ended_at"] is not None
+    assert run["can_cancel"] is False
+    assert run["can_resume"] is True
     assert registry.request_cancel(run_id) is False
     assert registry.claim_next_training() is None
     assert registry.list_events(run_id)[-1]["payload"] == {"event": "cancelled"}
+
+
+def test_running_cancel_request_is_idempotently_rejected_after_first_request(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "running-cancel.sqlite")
+    run_id = registry.create_run(
+        "training",
+        {"seed": 7},
+        status="running",
+    )
+
+    assert registry.request_cancel(run_id) is True
+    requested = registry.get_run(run_id)
+    assert requested is not None
+    assert requested["status"] == "cancel_requested"
+    assert requested["can_cancel"] is False
+    assert registry.request_cancel(run_id) is False
+
+
+def test_resume_capability_is_limited_to_durable_runs_with_compatible_state(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "resume-capability.sqlite")
+    restartable = registry.create_run(
+        "training",
+        {},
+        status="interrupted",
+        run_id="restartable",
+    )
+    nondurable = registry.create_run(
+        "evaluation",
+        {},
+        status="interrupted",
+        run_id="nondurable",
+    )
+    missing = registry.create_run(
+        "training",
+        {},
+        status="interrupted",
+        run_id="missing-checkpoint",
+    )
+    registry.update_run(missing, latest_checkpoint=str(tmp_path / "missing.pt"))
+
+    restartable_record = registry.get_run(restartable)
+    nondurable_record = registry.get_run(nondurable)
+    missing_record = registry.get_run(missing)
+    assert restartable_record is not None
+    assert nondurable_record is not None
+    assert missing_record is not None
+    assert restartable_record["can_resume"] is True
+    assert nondurable_record["can_resume"] is False
+    assert missing_record["can_resume"] is False
+    assert registry.request_resume(nondurable) is False
 
 
 def test_stale_reconciliation_terminates_owned_worker_and_ignores_reused_pid(
@@ -659,6 +720,172 @@ def test_resume_rejects_missing_checkpoint_and_completed_run(tmp_path: Path) -> 
     assert completed is not None and completed["status"] == "completed"
 
 
+@pytest.mark.parametrize("status", ["interrupted", "failed", "cancelled"])
+def test_resume_restarts_training_before_first_checkpoint(
+    tmp_path: Path,
+    status: RunStatus,
+) -> None:
+    registry = LabRegistry(tmp_path / f"restart-{status}.sqlite")
+    run_id = registry.create_run("training", {}, status=status, run_id=status)
+    registry.update_run(run_id, progress=0.08, artifact_dir=str(tmp_path / "partial"))
+
+    assert registry.request_resume(run_id) is True
+
+    restarted = registry.get_run(run_id)
+    assert restarted is not None
+    assert restarted["status"] == "resuming"
+    assert restarted["progress"] == 0
+    assert restarted["artifact_dir"] is None
+    assert restarted["started_at"] is None
+    assert registry.list_events(run_id)[-1]["payload"] == {
+        "event": "resume_requested",
+        "restart_from_beginning": True,
+    }
+
+
+@pytest.mark.parametrize("status", ["interrupted", "failed", "cancelled"])
+def test_restart_requeues_only_zero_progress_training_without_checkpoint(
+    tmp_path: Path,
+    status: RunStatus,
+) -> None:
+    registry = LabRegistry(tmp_path / f"safe-restart-{status}.sqlite")
+    run_id = registry.create_run("training", {}, run_id=status)
+    claimed = registry.claim_next_training()
+    assert claimed is not None
+    claim_token = str(claimed["claim_token"])
+    terminal_event: dict[str, object]
+    if status == "failed":
+        terminal_event = {"event": "failed", "error": "preflight failed"}
+    elif status == "cancelled":
+        terminal_event = {"event": "cancelled", "error": "preflight cancelled"}
+    else:
+        terminal_event = {"event": "run_interrupted", "reason": "stale_worker"}
+    registry.finalize_run(
+        run_id,
+        status=status,
+        event=terminal_event,
+        claim_token=claim_token,
+        progress=0,
+        artifact_dir=str(tmp_path / "partial"),
+        error="operational preflight failure",
+    )
+
+    assert registry.request_restart(run_id) is True
+
+    restarted = registry.get_run(run_id)
+    assert restarted is not None
+    assert restarted["status"] == "resuming"
+    assert restarted["attempt"] == 1
+    assert restarted["progress"] == 0
+    assert restarted["artifact_dir"] is None
+    assert restarted["error"] is None
+    assert restarted["cancel_requested"] is False
+    assert restarted["started_at"] is None
+    assert restarted["ended_at"] is None
+    assert restarted["interrupted_at"] is None
+    assert restarted["heartbeat_at"] is None
+    assert restarted["pid"] is None
+    assert restarted["process_identity"] is None
+    assert restarted["claim_token"] is None
+    assert registry.list_events(run_id)[-1]["payload"] == {
+        "event": "restart_requested",
+        "previous_status": status,
+        "restart_from_beginning": True,
+    }
+    assert registry.request_restart(run_id) is False
+
+    second_claim = registry.claim_next_training()
+    assert second_claim is not None
+    assert second_claim["id"] == run_id
+    assert second_claim["attempt"] == 2
+
+
+def test_restart_rejects_nontraining_progress_checkpoint_and_active_status(
+    tmp_path: Path,
+) -> None:
+    registry = LabRegistry(tmp_path / "restart-rejections.sqlite")
+    wrong_kind = registry.create_run("matrix_evaluation", {}, status="failed")
+    progressed = registry.create_run("training", {}, status="failed")
+    registry.update_run(progressed, progress=0.01)
+    checkpointed = registry.create_run("training", {}, status="failed")
+    registry.update_run(checkpointed, latest_checkpoint=str(tmp_path / "snapshot.pt"))
+    completed = registry.create_run("training", {}, status="completed")
+
+    for run_id in (wrong_kind, progressed, checkpointed, completed, "missing"):
+        before = registry.list_events(run_id) if run_id != "missing" else []
+        assert registry.request_restart(run_id) is False
+        if run_id != "missing":
+            after = registry.list_events(run_id)
+            assert after == before
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("claim_token", "live-claim"),
+        ("pid", 4242),
+        ("process_identity", "live-process"),
+    ],
+)
+def test_restart_rejects_any_inconsistent_live_ownership(
+    tmp_path: Path,
+    column: str,
+    value: object,
+) -> None:
+    path = tmp_path / f"restart-live-{column}.sqlite"
+    registry = LabRegistry(path)
+    run_id = registry.create_run("training", {}, status="failed")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            f"UPDATE runs SET {column} = ? WHERE id = ?",
+            (value, run_id),
+        )
+
+    assert registry.request_restart(run_id) is False
+    rejected = registry.get_run(run_id)
+    assert rejected is not None
+    assert rejected["status"] == "failed"
+    assert registry.list_events(run_id)[-1]["payload"]["event"] == "run_created"
+
+
+def test_restart_is_atomic_under_concurrent_requests(tmp_path: Path) -> None:
+    path = tmp_path / "restart-concurrent.sqlite"
+    registry = LabRegistry(path)
+    run_id = registry.create_run("training", {}, status="failed")
+
+    contenders = (LabRegistry(path), LabRegistry(path))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda item: item.request_restart(run_id), contenders))
+
+    assert sorted(results) == [False, True]
+    restart_events = [
+        item
+        for item in registry.list_events(run_id)
+        if item["payload"]["event"] == "restart_requested"
+    ]
+    assert len(restart_events) == 1
+
+
+def test_restart_rolls_back_state_when_event_insert_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = LabRegistry(tmp_path / "restart-rollback.sqlite")
+    run_id = registry.create_run("training", {}, status="failed")
+
+    def fail_event_insert(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("synthetic event failure")
+
+    monkeypatch.setattr(lab_registry_module, "_insert_event", fail_event_insert)
+    with pytest.raises(RuntimeError, match="synthetic event failure"):
+        registry.request_restart(run_id)
+
+    rolled_back = registry.get_run(run_id)
+    assert rolled_back is not None
+    assert rolled_back["status"] == "failed"
+    assert registry.list_events(run_id)[-1]["payload"]["event"] == "run_created"
+
+
 def test_dispatcher_builds_claim_bound_worker_command_without_running_training(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -715,6 +942,18 @@ def test_dispatcher_builds_claim_bound_worker_command_without_running_training(
     assert command[command.index("--run-id") + 1] == run_id
     assert isinstance(command[command.index("--claim-token") + 1], str)
     assert command[command.index("--claim-token") + 1]
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    environment = kwargs["env"]
+    assert isinstance(environment, dict)
+    expected_source_root = Path(lab_service_module.__file__).resolve().parents[2]
+    expected_workspace_root = Path(lab_service_module.__file__).resolve().parents[3]
+    assert str(environment["PYTHONPATH"]).split(os.pathsep)[0] == str(
+        expected_source_root
+    )
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert environment["PYTHONUTF8"] == "1"
+    assert kwargs["cwd"] == expected_workspace_root
     assert run["attempt"] == 1
     assert run["pid"] is None
     assert run["process_identity"] is None

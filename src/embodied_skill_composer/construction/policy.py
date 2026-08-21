@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from hashlib import sha256
 from math import sqrt
@@ -323,6 +324,7 @@ def export_actor_onnx(
         torch.ones(1, FLEET_SIZE, MAX_MODULES + 1, dtype=torch.bool, device=device),
     )
     batch_dimension = torch.export.Dim("batch", min=1)
+    _ensure_unicode_safe_standard_streams()
     torch.onnx.export(
         model,
         sample_inputs,
@@ -334,6 +336,22 @@ def export_actor_onnx(
         dynamo=True,
     )
     return path
+
+
+def _ensure_unicode_safe_standard_streams() -> None:
+    """Prevent Torch's Unicode diagnostics from failing on legacy Windows code pages."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = str(getattr(stream, "encoding", "") or "")
+        if encoding.lower().replace("-", "") == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (OSError, TypeError, ValueError):
+            # Some redirected or embedded streams expose reconfigure but reject it.
+            continue
 
 
 def file_sha256(path: Path) -> str:

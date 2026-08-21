@@ -63,6 +63,10 @@ environment schema, source commit and tree digest, and checkpoint lineage.
 Resume is deliberately strict. A schema, algorithm, environment, configuration, design, source commit,
 or source-tree mismatch is rejected before weights or optimizer state are applied. A stale worker is marked
 `interrupted`; a live orphan with a fresh heartbeat retains its claim, preventing a second GPU job.
+If a worker exits before its first checkpoint, resume restarts that same immutable configuration from
+transition zero, clears the partial progress/artifact pointer, and records
+`resume_requested: restart_from_beginning` in the append-only event stream. A run that names a checkpoint
+which is missing on disk is rejected rather than silently restarted.
 
 The interactive API binds only to `127.0.0.1`; its Coppelia health probe is also pinned to loopback.
 Host and WebSocket-origin checks protect that single-user boundary. GitHub Pages remains read-only.
@@ -71,5 +75,4 @@ Host and WebSocket-origin checks protect that single-user boundary. GitHub Pages
 
 The protected Python check verifies lock drift, dependency integrity, byte compilation, Ruff,
 full-source mypy, and the pytest suite with branch measurement enabled. Coverage.py reports the combined
-statement/branch total; the release floor is 80%. The measured pre-test-hardening total was 75.56%, so
-the floor was not lowered to match the old baseline.
+statement/branch total; the required release floor is 82.19%.

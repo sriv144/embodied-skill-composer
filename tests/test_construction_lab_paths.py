@@ -17,7 +17,10 @@ from embodied_skill_composer.construction import (
 )
 from embodied_skill_composer.construction import lab_worker as lab_worker_module
 from embodied_skill_composer.construction import policy as policy_module
-from embodied_skill_composer.construction.api import create_app
+from embodied_skill_composer.construction.api import (
+    MAX_FLOORPLAN_MULTIPART_BODY_BYTES,
+    create_app,
+)
 from embodied_skill_composer.construction.experiment_protocol import (
     load_experiment_protocol,
     protocol_digest,
@@ -144,6 +147,28 @@ def test_api_read_routes_disruptions_static_assets_and_errors(
         }
 
 
+def test_api_and_docs_responses_deny_framing(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        registry_path=tmp_path / "api.sqlite",
+        training_runner=_unused_training_runner,
+    )
+    with TestClient(app) as client:
+        for path in ("/api/health", "/docs", "/openapi.json"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert "frame-ancestors 'none'" in response.headers[
+                "content-security-policy"
+            ]
+            assert response.headers["x-frame-options"] == "DENY"
+            assert response.headers["x-content-type-options"] == "nosniff"
+            assert response.headers["referrer-policy"] == "no-referrer"
+            assert response.headers["permissions-policy"] == (
+                "camera=(), microphone=(), geolocation=()"
+            )
+
+
 def test_api_rebuild_and_floorplan_parse_success_and_failures(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -206,6 +231,188 @@ def test_api_rebuild_and_floorplan_parse_success_and_failures(
             ).status_code
             == 422
         )
+
+        monkeypatch.setattr(api_module, "MAX_FLOORPLAN_ENCODED_BYTES", 5)
+        oversized = client.post(
+            "/api/intent/parse?known_width_m=12",
+            files={"file": ("floor.png", b"123456", "image/png")},
+        )
+        assert oversized.status_code == 413
+        assert "encoded-image limit" in oversized.json()["detail"]
+
+
+def test_unsafe_method_origin_guard_covers_every_mutating_route(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        registry_path=tmp_path / "csrf.sqlite",
+        training_runner=_unused_training_runner,
+    )
+    with TestClient(app) as client:
+        openapi = client.get("/openapi.json").json()
+        mutating_routes = [
+            (method.upper(), path)
+            for path, operations in openapi["paths"].items()
+            for method in operations
+            if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
+        ]
+        assert len(mutating_routes) >= 10
+
+        for method, path in mutating_routes:
+            concrete_path = path
+            for parameter in (
+                "controller",
+                "run_id",
+                "matrix_id",
+                "run_key",
+                "evaluation_id",
+                "scenario_id",
+            ):
+                concrete_path = concrete_path.replace(
+                    f"{{{parameter}}}",
+                    "csrf-fixture",
+                )
+            response = client.request(
+                method,
+                concrete_path,
+                headers={"origin": "https://evil.example"},
+            )
+            assert response.status_code == 403, (method, path, response.text)
+            assert "cross-site mutation rejected" in response.json()["detail"]
+
+
+def test_origin_guard_allows_local_browser_and_no_origin_cli_but_rejects_fetch_site(
+    tmp_path: Path,
+) -> None:
+    app = create_app(
+        registry_path=tmp_path / "origin.sqlite",
+        training_runner=_unused_training_runner,
+    )
+    with TestClient(app) as client:
+        design = client.get("/api/project").json()["design"]
+        payload = {"design": design}
+
+        local_browser = client.post(
+            "/api/design/validate",
+            json=payload,
+            headers={
+                "origin": "http://127.0.0.1:5173",
+                "sec-fetch-site": "same-site",
+            },
+        )
+        assert local_browser.status_code == 200
+
+        trusted_cli = client.post("/api/design/validate", json=payload)
+        assert trusted_cli.status_code == 200
+
+        cross_site_without_origin = client.post(
+            "/api/design/validate",
+            json=payload,
+            headers={"sec-fetch-site": "cross-site"},
+        )
+        assert cross_site_without_origin.status_code == 403
+
+        inconsistent_browser_headers = client.post(
+            "/api/design/validate",
+            json=payload,
+            headers={
+                "origin": "http://127.0.0.1:5173",
+                "sec-fetch-site": "cross-site",
+            },
+        )
+        assert inconsistent_browser_headers.status_code == 403
+
+
+def test_floorplan_body_limit_rejects_oversized_declared_length_before_parser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser_called = False
+
+    def parser_must_not_run(_payload: bytes, *, known_width_m: float) -> None:
+        nonlocal parser_called
+        del known_width_m
+        parser_called = True
+
+    monkeypatch.setattr(
+        api_module,
+        "infer_orthogonal_floor_plan",
+        parser_must_not_run,
+    )
+    app = create_app(
+        registry_path=tmp_path / "declared-limit.sqlite",
+        training_runner=_unused_training_runner,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/intent/parse?known_width_m=8",
+            content=b"",
+            headers={
+                "content-type": "multipart/form-data; boundary=declared",
+                "content-length": str(MAX_FLOORPLAN_MULTIPART_BODY_BYTES + 1),
+            },
+        )
+
+    assert response.status_code == 413
+    assert "multipart request" in response.json()["detail"]
+    assert parser_called is False
+
+
+def test_floorplan_body_limit_rejects_chunked_stream_before_endpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    endpoint_called = False
+
+    def endpoint_must_not_run(_payload: bytes, *, known_width_m: float) -> None:
+        nonlocal endpoint_called
+        del known_width_m
+        endpoint_called = True
+
+    monkeypatch.setattr(
+        api_module,
+        "infer_orthogonal_floor_plan",
+        endpoint_must_not_run,
+    )
+    boundary = b"chunked-floorplan"
+    prefix = (
+        b"--"
+        + boundary
+        + b"\r\nContent-Disposition: form-data; name=\"file\"; "
+        b"filename=\"floor.png\"\r\nContent-Type: image/png\r\n\r\n"
+    )
+    suffix = b"\r\n--" + boundary + b"--\r\n"
+
+    def multipart_chunks():
+        yield prefix
+        remaining = MAX_FLOORPLAN_MULTIPART_BODY_BYTES + 1
+        chunk = b"x" * (1024 * 1024)
+        while remaining:
+            emitted = chunk[: min(len(chunk), remaining)]
+            yield emitted
+            remaining -= len(emitted)
+        yield suffix
+
+    app = create_app(
+        registry_path=tmp_path / "chunked-limit.sqlite",
+        training_runner=_unused_training_runner,
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/intent/parse?known_width_m=8",
+            content=multipart_chunks(),
+            headers={
+                "content-type": (
+                    "multipart/form-data; boundary="
+                    + boundary.decode("ascii")
+                ),
+                "transfer-encoding": "chunked",
+            },
+        )
+
+    assert response.status_code == 413
+    assert "multipart request" in response.json()["detail"]
+    assert endpoint_called is False
 
 
 def test_api_cancel_resume_run_events_and_websockets(tmp_path: Path) -> None:

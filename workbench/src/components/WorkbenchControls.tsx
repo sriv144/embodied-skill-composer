@@ -9,13 +9,23 @@ export function ControllerSelect({
   onChange: (value: string) => void;
 }) {
   return (
-    <div className="segmented controller-select" aria-label="Replay controller">
+    <div
+      className="segmented controller-select"
+      role="group"
+      aria-label="Replay controller"
+    >
       {[
         ["sequential", "Sequential"],
         ["greedy", "Greedy"],
         ["optimized", "CP-SAT"]
       ].map(([id, label]) => (
-        <button key={id} className={value === id ? "selected" : ""} onClick={() => onChange(id)}>
+        <button
+          key={id}
+          type="button"
+          className={value === id ? "selected" : ""}
+          aria-pressed={value === id}
+          onClick={() => onChange(id)}
+        >
           {label}
         </button>
       ))}
