@@ -19,6 +19,19 @@ semantically rather than attempting an impossible self-hash.
 Run staging only from the clean commit that will receive `v1.0.0`. All repository version
 declarations must already agree; the packager never changes versions.
 
+First stage the canonical deterministic cottage baseline. Unlike the default preview exporter,
+this mode requires a clean Git worktree and writes the complete canonical descriptor consumed by
+release packaging:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\export_construction_public_demo.py `
+  --deterministic-input-only `
+  --output release-inputs\deterministic
+```
+
+Use `release-inputs\deterministic\deterministic-bundle.json` as the deterministic descriptor
+below.
+
 First package the two independently verified native Phase 5 directories. This renders the public
 nominal and recovery MP4 files deterministically from measured base telemetry and the typed replay;
 it does not alter either native bundle or present logical payload motion as contact dynamics.
@@ -35,7 +48,7 @@ Use the emitted `release-inputs\coppelia\simulator-bundle.json` as the simulator
 ```powershell
 .\.venv\Scripts\python.exe scripts\package_construction_release.py `
   --output output\construction-intelligence-v1-release `
-  --deterministic-bundle release-inputs\deterministic-bundle.json `
+  --deterministic-bundle release-inputs\deterministic\deterministic-bundle.json `
   --research-bundle release-inputs\research-bundle.json `
   --simulator-bundle release-inputs\coppelia\simulator-bundle.json `
   --release-version 1.0.0 `

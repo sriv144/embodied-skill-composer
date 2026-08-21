@@ -10,6 +10,7 @@ from typing import Literal
 import pytest
 import numpy as np
 
+import scripts.export_construction_public_demo as public_demo_script
 import embodied_skill_composer.construction.coppelia_phase5 as phase5
 from embodied_skill_composer.construction.coppelia_dynamic import (
     DynamicCoppeliaConfig,
@@ -60,7 +61,10 @@ from tests.test_construction_dynamic_coppelia import (
     FakeDynamicSim,
 )
 
-from scripts.export_construction_public_demo import export_public_demo
+from scripts.export_construction_public_demo import (
+    export_public_demo,
+    package_deterministic_release_input,
+)
 
 
 SOURCE = SourceIdentity(
@@ -134,8 +138,7 @@ class _AttestedDynamicClient(FakeDynamicClient):
         assert function == "zmqRemoteApi.info"
         assert arguments == ["sim"]
         return {
-            capability: {"func": []}
-            for capability in phase5._LIVE_REQUIRED_REMOTE_API_CAPABILITIES
+            capability: {"func": []} for capability in phase5._LIVE_REQUIRED_REMOTE_API_CAPABILITIES
         }
 
 
@@ -217,11 +220,7 @@ def test_real_default_preview_export_is_byte_reproducible(tmp_path: Path) -> Non
     first = tmp_path / "first"
     second = tmp_path / "second"
     canonical_house = (
-        Path(__file__).resolve().parents[1]
-        / "workbench"
-        / "public"
-        / "demo"
-        / "house.glb"
+        Path(__file__).resolve().parents[1] / "workbench" / "public" / "demo" / "house.glb"
     )
     canonical_robot = (
         Path(__file__).resolve().parents[1]
@@ -237,12 +236,69 @@ def test_real_default_preview_export_is_byte_reproducible(tmp_path: Path) -> Non
     assert _directory_bytes(first) == _directory_bytes(second)
     assert b"\r\n" not in (first / "report.md").read_bytes()
     assert (first / "house.glb").read_bytes() == canonical_house.read_bytes()
-    assert (first / "construction_robot.glb").read_bytes() == (
-        canonical_robot.read_bytes()
-    )
+    assert (first / "construction_robot.glb").read_bytes() == (canonical_robot.read_bytes())
     assert verify_public_demo_regeneration_identity(first, second) == (
         verify_public_demo_export(first)
     )
+
+
+def test_canonical_deterministic_input_is_complete_atomic_and_reproducible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(public_demo_script, "_current_source", lambda: SOURCE)
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "stale.txt").write_text("must be replaced", encoding="utf-8")
+    second = tmp_path / "second"
+
+    descriptor = package_deterministic_release_input(first, source=SOURCE)
+    second_descriptor = package_deterministic_release_input(second, source=SOURCE)
+
+    assert descriptor == first / "deterministic-bundle.json"
+    assert not (first / "stale.txt").exists()
+    assert _directory_bytes(first) == _directory_bytes(second)
+    manifest = _read_json(descriptor)
+    second_manifest = _read_json(second_descriptor)
+    assert manifest == second_manifest
+    assert manifest["kind"] == "deterministic"
+    assert manifest["evidence_status"] == "canonical"
+    assert manifest["source"] == SOURCE.model_dump(mode="json")
+    artifacts = manifest["artifacts"]
+    assert isinstance(artifacts, list)
+    assert {item["role"] for item in artifacts} == {
+        "house",
+        "policies",
+        "project",
+        "report",
+        "robot",
+        "runs",
+        "scenarios",
+        "trace_greedy",
+        "trace_optimized",
+        "trace_recovery",
+        "trace_sequential",
+    }
+    for artifact in artifacts:
+        path = first / artifact["path"]
+        assert path.is_file()
+        assert _sha256(path) == artifact["sha256"]
+    assert "canonical deterministic cottage baseline" in (first / "report.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_canonical_deterministic_input_rejects_dirty_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirty = SOURCE.model_copy(update={"dirty": True})
+    monkeypatch.setattr(public_demo_script, "_current_source", lambda: dirty)
+
+    with pytest.raises(ValueError, match="requires a clean Git worktree"):
+        package_deterministic_release_input(tmp_path / "output")
+
+    assert not (tmp_path / "output").exists()
 
 
 def test_release_recomputes_primary_acceptance_from_episodes(
@@ -261,10 +317,7 @@ def test_release_recomputes_primary_acceptance_from_episodes(
     assert isinstance(episodes, list)
     for episode in episodes:
         assert isinstance(episode, dict)
-        if (
-            episode["experiment_variant"] == "mappo_full"
-            and episode["failure_enabled"] is False
-        ):
+        if episode["experiment_variant"] == "mappo_full" and episode["failure_enabled"] is False:
             episode["structure_completion_rate"] = 0.0
     _rewrite_evaluation_artifacts(tmp_path / "research", evaluation)
     acceptance_path = tmp_path / "research" / "acceptance.json"
@@ -275,8 +328,7 @@ def test_release_recomputes_primary_acceptance_from_episodes(
     mappo_nominal = next(
         item
         for item in results
-        if isinstance(item, dict)
-        and item["name"] == "mappo_no_failure_mean_completion"
+        if isinstance(item, dict) and item["name"] == "mappo_no_failure_mean_completion"
     )
     mappo_nominal["observed"] = 0.0
     _write_json(acceptance_path, acceptance)
@@ -345,13 +397,8 @@ def test_fast_release_summary_recomputation_matches_canonical_bootstrap() -> Non
                 controller="mappo",
                 variant="mappo_full",
                 training_seed=training_seed,
-                configuration_digest=hashlib.sha256(
-                    f"seed-{training_seed}".encode()
-                ).hexdigest(),
-                structure_completion_rate=(
-                    (training_seed - 7) * 5 + scenario_seed - 900
-                )
-                / 24,
+                configuration_digest=hashlib.sha256(f"seed-{training_seed}".encode()).hexdigest(),
+                structure_completion_rate=((training_seed - 7) * 5 + scenario_seed - 900) / 24,
                 makespan_s=float(training_seed * 10 + scenario_seed - 899),
                 policy_id=f"policy-{training_seed}",
                 transition_count=1_500_000,
@@ -366,9 +413,7 @@ def test_fast_release_summary_recomputation_matches_canonical_bootstrap() -> Non
         for scenario_seed in range(900, 905)
     ]
 
-    assert _recompute_controller_summaries(episodes) == summarize_evaluations(
-        episodes
-    )
+    assert _recompute_controller_summaries(episodes) == summarize_evaluations(episodes)
 
 
 def test_release_requires_episode_csv_to_match_evaluation_json(
@@ -436,9 +481,7 @@ def test_release_recomputes_validation_checkpoint_ranking(
     record["selected"] = {
         **forged_result,
         "selection_rule": selected["selection_rule"],
-        "required_checkpoint_fractions": selected[
-            "required_checkpoint_fractions"
-        ],
+        "required_checkpoint_fractions": selected["required_checkpoint_fractions"],
         "candidate_ranking": ranking,
     }
     _write_json(selections_path, payload)
@@ -473,8 +516,7 @@ def test_release_ties_heldout_episodes_to_selected_checkpoint_lineage(
     learned = next(
         episode
         for episode in episodes
-        if isinstance(episode, dict)
-        and episode["experiment_variant"] == "mappo_full"
+        if isinstance(episode, dict) and episode["experiment_variant"] == "mappo_full"
     )
     learned["checkpoint_lineage"] = ["forged-lineage"]
     _rewrite_evaluation_artifacts(tmp_path / "research", evaluation)
@@ -552,8 +594,7 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
     research_references = research_summary["artifact_references"]
     assert research_references
     assert all(
-        item["path"].startswith("evidence/research/")
-        and Path(item["path"]).suffix
+        item["path"].startswith("evidence/research/") and Path(item["path"]).suffix
         for item in research_references
     )
     coppelia_summary = _read_json(output / "coppelia-evidence.json")
@@ -565,8 +606,7 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
         assert all(
             (
                 item["path"].startswith(f"evidence/coppelia/{scenario}/")
-                or item["path"]
-                == f"evidence/coppelia/visualizations/{scenario}.mp4"
+                or item["path"] == f"evidence/coppelia/visualizations/{scenario}.mp4"
             )
             and Path(item["path"]).suffix
             for item in references
@@ -652,11 +692,14 @@ def test_source_identity_rejects_noncanonical_git_commits(commit: str) -> None:
             tree_digest=hashlib.sha256(b"tree").hexdigest(),
         )
 
-    assert SourceIdentity(
-        commit="b" * 64,
-        dirty=False,
-        tree_digest=hashlib.sha256(b"tree").hexdigest(),
-    ).commit == "b" * 64
+    assert (
+        SourceIdentity(
+            commit="b" * 64,
+            dirty=False,
+            tree_digest=hashlib.sha256(b"tree").hexdigest(),
+        ).commit
+        == "b" * 64
+    )
 
 
 def test_bundle_descriptor_requires_timezone_aware_created_at(
@@ -722,9 +765,7 @@ def test_public_evidence_rejects_active_targets_and_media_types(
         "configuration_digests": [hashlib.sha256(b"config").hexdigest()],
         "protocol_digest": PROTOCOL_DIGEST if kind == "research" else None,
         "profile": "research" if kind == "research" else None,
-        "matrix_id": "construction_intelligence_v1-research"
-        if kind == "research"
-        else None,
+        "matrix_id": "construction_intelligence_v1-research" if kind == "research" else None,
         "artifacts": [
             {
                 "role": role,
@@ -828,9 +869,7 @@ def test_regeneration_identity_compares_two_verified_exports(
     _write_json(changed_project, {"role": "project", "revision": 2})
     changed_manifest = _read_json(changed_descriptor)
     project_record = next(
-        item
-        for item in changed_manifest["artifacts"]
-        if item["role"] == "project"
+        item for item in changed_manifest["artifacts"] if item["role"] == "project"
     )
     project_record["sha256"] = _sha256(changed_project)
     _write_json(changed_descriptor, changed_manifest)
@@ -857,9 +896,7 @@ def test_release_refuses_an_incomplete_research_matrix(tmp_path: Path) -> None:
     matrix["runs"].pop()
     _write_json(matrix_path, matrix)
     descriptor = _read_json(research)
-    matrix_artifact = next(
-        item for item in descriptor["artifacts"] if item["role"] == "matrix"
-    )
+    matrix_artifact = next(item for item in descriptor["artifacts"] if item["role"] == "matrix")
     matrix_artifact["sha256"] = _sha256(matrix_path)
     _write_json(research, descriptor)
 
@@ -955,12 +992,7 @@ def test_release_rejects_rehashed_non_coppelia_scene_bytes(
         attested_simulator_bundle_template,
         tmp_path / "simulator",
     )
-    scene_path = (
-        tmp_path
-        / "simulator"
-        / "nominal"
-        / "construction_intelligence.ttt"
-    )
+    scene_path = tmp_path / "simulator" / "nominal" / "construction_intelligence.ttt"
     scene_path.write_bytes(b"arbitrary bytes with freshly updated hashes")
     _rehash_native_phase5_file(
         simulator,
@@ -1037,8 +1069,7 @@ def test_release_rejects_rehashed_collision_booleans_without_raw_rounds(
         [
             item
             for item in trace
-            if not isinstance(item, dict)
-            or item.get("event") != "collision_query_round"
+            if not isinstance(item, dict) or item.get("event") != "collision_query_round"
         ],
     )
     _rehash_native_phase5_file(
@@ -1176,12 +1207,8 @@ def _research_bundle(root: Path) -> Path:
                                 policy_id=str(checkpoint["checkpoint_id"]),
                                 transition_count=transition_count,
                                 checkpoint_path=str(checkpoint["checkpoint_path"]),
-                                checkpoint_sha256=str(
-                                    checkpoint["checkpoint_sha256"]
-                                ),
-                                checkpoint_lineage=list(
-                                    checkpoint["checkpoint_lineage"]
-                                ),
+                                checkpoint_sha256=str(checkpoint["checkpoint_sha256"]),
+                                checkpoint_lineage=list(checkpoint["checkpoint_lineage"]),
                             )
                             for scenario_seed in range(800, 805)
                             for failure in (False, True)
@@ -1207,13 +1234,10 @@ def _research_bundle(root: Path) -> Path:
                             1.0,
                         ],
                         "candidate_ranking": [
-                            str(item["checkpoint_id"])
-                            for item in reversed(candidate_results)
+                            str(item["checkpoint_id"]) for item in reversed(candidate_results)
                         ],
                     },
-                    "evidence_path": (
-                        f"evidence/{run_key}/validation_selection.json"
-                    ),
+                    "evidence_path": (f"evidence/{run_key}/validation_selection.json"),
                 }
             )
     matrix = {
@@ -1239,10 +1263,7 @@ def _research_bundle(root: Path) -> Path:
     _write_json(root / "evaluation.json", suite)
     typed_suite = EvaluationSuite.model_validate(suite)
     with (root / "episodes.csv").open("w", encoding="utf-8", newline="") as handle:
-        rows = [
-            episode.model_dump(mode="json")
-            for episode in typed_suite.episodes
-        ]
+        rows = [episode.model_dump(mode="json") for episode in typed_suite.episodes]
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
@@ -1328,10 +1349,7 @@ def _evaluation_suite(
     runs: list[dict[str, object]],
     selections: list[dict[str, object]],
 ) -> dict[str, object]:
-    selected_by_run = {
-        str(item["run_key"]): item["selected"]
-        for item in selections
-    }
+    selected_by_run = {str(item["run_key"]): item["selected"] for item in selections}
     episodes: list[dict[str, object]] = []
     for run in runs:
         config = run["config"]
@@ -1366,9 +1384,7 @@ def _evaluation_suite(
                         controller=controller,
                     )
                 )
-    typed_episodes = [
-        EpisodeEvaluation.model_validate(episode) for episode in episodes
-    ]
+    typed_episodes = [EpisodeEvaluation.model_validate(episode) for episode in episodes]
     return EvaluationSuite(
         evaluation_id="canonical-heldout",
         seeds=[900, 901, 902, 903, 904],
@@ -1555,9 +1571,7 @@ def _simulator_bundle(
         "video": "evidence_replay.mp4",
     }
     workspace = Path(__file__).resolve().parents[1]
-    design = load_house_design(
-        workspace / "configs" / "construction" / "cottage_v1.yaml"
-    )
+    design = load_house_design(workspace / "configs" / "construction" / "cottage_v1.yaml")
     generated_cottage = generate_cottage_scenario(
         900,
         design,
@@ -1568,9 +1582,7 @@ def _simulator_bundle(
             obstacle_count_range=(1, 1),
         ),
     )
-    cottage, physical_yard = prepare_phase5_physical_yard(
-        generated_cottage
-    )
+    cottage, physical_yard = prepare_phase5_physical_yard(generated_cottage)
     for prefix, scenario in (
         ("nominal", "nominal"),
         ("recovery", "unavailable_robot_recovery"),
@@ -1622,9 +1634,7 @@ def _simulator_bundle(
         for artifact, file_name in role_files.items():
             role = f"{prefix}_{artifact}"
             source_paths[role] = (
-                f"videos/{prefix}.mp4"
-                if artifact == "video"
-                else f"{prefix}/{file_name}"
+                f"videos/{prefix}.mp4" if artifact == "video" else f"{prefix}/{file_name}"
             )
             role_targets[role] = (
                 f"evidence/coppelia/visualizations/{prefix}.mp4"
@@ -1678,11 +1688,7 @@ def _rehash_research_files(
     assert isinstance(descriptor, dict)
     artifacts = descriptor["artifacts"]
     assert isinstance(artifacts, list)
-    by_role = {
-        str(item["role"]): item
-        for item in artifacts
-        if isinstance(item, dict)
-    }
+    by_role = {str(item["role"]): item for item in artifacts if isinstance(item, dict)}
     for role in roles:
         artifact = by_role[role]
         source_path = descriptor_path.parent / str(artifact["path"])
@@ -1777,27 +1783,17 @@ def _rehash_native_phase5_file(
     assert isinstance(artifact_sha256, dict)
     artifact_sha256[file_name] = _sha256(changed_path)
     attestation["binding_digest"] = phase5._sha256_json(
-        {
-            key: value
-            for key, value in attestation.items()
-            if key != "binding_digest"
-        }
+        {key: value for key, value in attestation.items() if key != "binding_digest"}
     )
     _write_json(attestation_path, attestation)
 
-    artifact = next(
-        item
-        for item in phase5_manifest["artifacts"]
-        if item["path"] == file_name
-    )
+    artifact = next(item for item in phase5_manifest["artifacts"] if item["path"] == file_name)
     artifact["sha256"] = _sha256(changed_path)
     artifact["bytes"] = changed_path.stat().st_size
     attestation_digest = _sha256(attestation_path)
     phase5_manifest["runtime_attestation_digest"] = attestation_digest
     attestation_artifact = next(
-        item
-        for item in phase5_manifest["artifacts"]
-        if item["path"] == attestation_path.name
+        item for item in phase5_manifest["artifacts"] if item["path"] == attestation_path.name
     )
     attestation_artifact["sha256"] = attestation_digest
     attestation_artifact["bytes"] = attestation_path.stat().st_size
@@ -1806,15 +1802,11 @@ def _rehash_native_phase5_file(
     descriptor = _read_json(descriptor_path)
     assert isinstance(descriptor, dict)
     changed_artifact = next(
-        item
-        for item in descriptor["artifacts"]
-        if item["path"] == f"{prefix}/{file_name}"
+        item for item in descriptor["artifacts"] if item["path"] == f"{prefix}/{file_name}"
     )
     changed_artifact["sha256"] = _sha256(changed_path)
     manifest_artifact = next(
-        item
-        for item in descriptor["artifacts"]
-        if item["path"] == f"{prefix}/manifest.json"
+        item for item in descriptor["artifacts"] if item["path"] == f"{prefix}/manifest.json"
     )
     manifest_artifact["sha256"] = _sha256(manifest_path)
     _write_json(descriptor_path, descriptor)
