@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import struct
 import zipfile
 from pathlib import Path
@@ -105,6 +106,68 @@ def test_release_assets_are_byte_deterministic_and_include_external_onnx_data(
     assert sum(name.endswith("/actor.onnx.data") for name in names) == 20
 
 
+def test_release_staging_resolves_bundle_local_selected_checkpoint_sources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source_checkpoints = tmp_path / "source-checkpoints"
+    selections = _selection_fixture(source_checkpoints)
+    bundle_root = tmp_path / "research-input"
+    selection_path = bundle_root / "selections.json"
+    records = selections["selections"]
+    assert isinstance(records, list)
+    for record in records:
+        run_key = record["run_key"]
+        selected = record["selected"]
+        original = Path(selected["checkpoint_path"])
+        relative = Path("policies") / run_key / "checkpoint.pt"
+        target = bundle_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(original, target)
+        selected["checkpoint_path"] = relative.as_posix()
+    _write_json(selection_path, selections)
+    descriptor = bundle_root / "research-bundle.json"
+    _write_json(
+        descriptor,
+        {
+            "schema_version": "construction-intelligence-public-demo-input-v1",
+            "kind": "research",
+            "evidence_status": "canonical",
+            "source": SOURCE.model_dump(mode="json"),
+            "created_at": "2026-08-21T00:00:00Z",
+            "configuration_digests": [hashlib.sha256(b"fixture").hexdigest()],
+            "protocol_digest": PROTOCOL_DIGEST,
+            "profile": "research",
+            "matrix_id": MATRIX_ID,
+            "artifacts": [
+                {
+                    "role": "selections",
+                    "path": "selections.json",
+                    "target": "evidence/research/selections.json",
+                    "sha256": _sha256(selection_path),
+                    "media_type": "application/json",
+                }
+            ],
+        },
+    )
+    _install_release_fakes(monkeypatch, selections)
+
+    manifest = stage_release_assets(
+        tmp_path / "release",
+        workspace=workspace,
+        deterministic_bundle=tmp_path / "deterministic.json",
+        research_bundle=descriptor,
+        simulator_bundle=tmp_path / "simulator.json",
+        release_version=RELEASE_VERSION,
+        release_tag=RELEASE_TAG,
+    )
+
+    assert len(manifest.assets) == 4
+    assert (tmp_path / "release" / RELEASE_IDENTITY_FILE).is_file()
+
+
 def test_release_verifier_rejects_missing_and_extra_assets(
     packaged_assets: dict[str, Path],
 ) -> None:
@@ -194,9 +257,7 @@ def test_release_archive_budgets_fit_hosted_runner_guardrail() -> None:
         role: release_assets._archive_budget(filename)
         for role, filename in release_assets._ASSET_FILES.items()
     }
-    verification_disk_bytes = sum(
-        budget.max_compressed_bytes for budget in budgets.values()
-    ) + sum(
+    verification_disk_bytes = sum(budget.max_compressed_bytes for budget in budgets.values()) + sum(
         budgets[role].max_uncompressed_bytes
         for role in ("public_demo", "research_evidence", "selected_policies")
     )
@@ -206,9 +267,7 @@ def test_release_archive_budgets_fit_hosted_runner_guardrail() -> None:
         <= release_assets._MAX_RELEASE_VERIFICATION_DISK_BYTES
         <= 5 * 1024**3
     )
-    assert max(
-        budget.max_member_uncompressed_bytes for budget in budgets.values()
-    ) <= 256 * 1024**2
+    assert max(budget.max_member_uncompressed_bytes for budget in budgets.values()) <= 256 * 1024**2
     assert release_assets._MAX_CENTRAL_DIRECTORY_BYTES <= 16 * 1024**2
     assert release_assets._MAX_COMPRESSION_RATIO <= 200.0
 
@@ -475,11 +534,7 @@ def _rehash_asset(
     manifest = _read_json(manifest_path)
     assets = manifest["assets"]
     assert isinstance(assets, list)
-    record = next(
-        item
-        for item in assets
-        if isinstance(item, dict) and item["file"] == filename
-    )
+    record = next(item for item in assets if isinstance(item, dict) and item["file"] == filename)
     path = root / filename
     record["bytes"] = path.stat().st_size
     record["sha256"] = _sha256(path)
@@ -527,9 +582,7 @@ def _write_json(path: Path, payload: object) -> None:
 
 
 def _json_bytes(payload: object) -> bytes:
-    return (
-        json.dumps(payload, indent=2, sort_keys=True) + "\n"
-    ).encode("utf-8")
+    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def _sha256(path: Path) -> str:
