@@ -18,6 +18,7 @@ from embodied_skill_composer.construction.compiler import compile_house_design  
 from embodied_skill_composer.construction.public_demo_provenance import (  # noqa: E402
     BUNDLE_SCHEMA_VERSION,
     SourceIdentity,
+    _replace_directory,
     export_public_demo_bundle,
     verify_public_demo_export,
     verify_public_demo_regeneration_identity,
@@ -55,9 +56,7 @@ def export_public_demo(
 
     current_source = _current_source()
     if channel == "release" and source is not None and source != current_source:
-        raise ValueError(
-            "explicit release source identity does not match the current Git worktree"
-        )
+        raise ValueError("explicit release source identity does not match the current Git worktree")
     resolved_source = source or current_source
     if deterministic_bundle is not None:
         return export_public_demo_bundle(
@@ -81,9 +80,7 @@ def export_public_demo(
             Path(raw),
             regenerate_robot=regenerate_robot,
             reusable_robot=(
-                reusable_robot
-                if not regenerate_robot and reusable_robot.is_file()
-                else None
+                reusable_robot if not regenerate_robot and reusable_robot.is_file() else None
             ),
             source=resolved_source,
         )
@@ -97,12 +94,55 @@ def export_public_demo(
         )
 
 
+def package_deterministic_release_input(
+    output_dir: Path,
+    *,
+    regenerate_robot: bool = True,
+    source: SourceIdentity | None = None,
+) -> Path:
+    """Atomically stage the canonical deterministic release-input descriptor."""
+
+    current_source = _current_source()
+    if source is not None and source != current_source:
+        raise ValueError(
+            "explicit deterministic source identity does not match the current Git worktree"
+        )
+    resolved_source = source or current_source
+    if resolved_source.dirty:
+        raise ValueError("canonical deterministic evidence requires a clean Git worktree")
+    if not _is_lower_hex(resolved_source.commit, length=40):
+        raise ValueError("canonical deterministic source commit must be a lowercase Git SHA")
+    if not _is_lower_hex(resolved_source.tree_digest, length=64):
+        raise ValueError("canonical deterministic tree digest must be a lowercase SHA-256")
+
+    destination = output_dir.resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{destination.name}.staging-",
+        dir=destination.parent,
+    ) as raw:
+        staging = Path(raw) / "bundle"
+        staging.mkdir()
+        descriptor = _build_fixture_bundle(
+            staging,
+            regenerate_robot=regenerate_robot,
+            reusable_robot=None,
+            source=resolved_source,
+            evidence_status="canonical",
+            descriptor_name="deterministic-bundle.json",
+        )
+        _replace_directory(staging, destination)
+    return destination / descriptor.name
+
+
 def _build_fixture_bundle(
     root: Path,
     *,
     regenerate_robot: bool,
     reusable_robot: Path | None,
     source: SourceIdentity,
+    evidence_status: Literal["fixture", "canonical"] = "fixture",
+    descriptor_name: str = "fixture-bundle.json",
 ) -> Path:
     """Materialize the reviewed deterministic fixture without making research claims."""
 
@@ -110,16 +150,11 @@ def _build_fixture_bundle(
     design = load_house_design(design_path)
     plan = compile_house_design(design)
     schedules = compare_controllers(plan)
-    traces = {
-        name: build_execution_trace(plan, schedule)
-        for name, schedule in schedules.items()
-    }
+    traces = {name: build_execution_trace(plan, schedule) for name, schedule in schedules.items()}
     trace_dir = root / "traces"
     trace_dir.mkdir(parents=True, exist_ok=True)
     canonical_house = WORKSPACE / "workbench" / "public" / "demo" / "house.glb"
-    generated_house = (
-        WORKSPACE / "artifacts" / "construction_v2" / "cottage_v1" / "house.glb"
-    )
+    generated_house = WORKSPACE / "artifacts" / "construction_v2" / "cottage_v1" / "house.glb"
     house_source = canonical_house if canonical_house.is_file() else generated_house
     if not house_source.is_file():
         raise FileNotFoundError(
@@ -128,18 +163,11 @@ def _build_fixture_bundle(
         )
     shutil.copyfile(house_source, root / "house.glb")
     robot_path = root / "construction_robot.glb"
-    canonical_robot = (
-        WORKSPACE / "workbench" / "public" / "demo" / "construction_robot.glb"
-    )
-    robot_source = (
-        canonical_robot
-        if regenerate_robot or reusable_robot is None
-        else reusable_robot
-    )
+    canonical_robot = WORKSPACE / "workbench" / "public" / "demo" / "construction_robot.glb"
+    robot_source = canonical_robot if regenerate_robot or reusable_robot is None else reusable_robot
     if not robot_source.is_file():
         raise FileNotFoundError(
-            "The reviewed canonical construction robot asset is missing: "
-            f"{robot_source}"
+            f"The reviewed canonical construction robot asset is missing: {robot_source}"
         )
     shutil.copyfile(robot_source, robot_path)
 
@@ -149,12 +177,9 @@ def _build_fixture_bundle(
         "design": design.model_dump(mode="json"),
         "plan": plan.model_dump(mode="json"),
         "controllers": {
-            name: trace.metrics.model_dump(mode="json")
-            for name, trace in traces.items()
+            name: trace.metrics.model_dump(mode="json") for name, trace in traces.items()
         },
-        "optimized_improvement_percent": round(
-            100 * (1 - optimized / sequential), 1
-        ),
+        "optimized_improvement_percent": round(100 * (1 - optimized / sequential), 1),
         "geometry_asset_url": "house.glb",
         "robot_asset_url": "construction_robot.glb",
     }
@@ -204,13 +229,21 @@ def _build_fixture_bundle(
         ],
     )
     report = render_research_report(plan, traces)
-    report += (
-        "\n## Public Demo Provenance\n\n"
-        "This is a reviewed deterministic fixture preview. It contains no "
-        "canonical MAPPO/IPPO research result and no live Coppelia evidence. "
-        "The generated `release-status.json` and `provenance.json` make those "
-        "boundaries machine-readable.\n"
-    )
+    if evidence_status == "canonical":
+        report += (
+            "\n## Release Evidence Boundary\n\n"
+            "This is the canonical deterministic cottage baseline. Canonical "
+            "learned-policy and live Coppelia evidence are supplied by separate, "
+            "independently verified release-input descriptors.\n"
+        )
+    else:
+        report += (
+            "\n## Public Demo Provenance\n\n"
+            "This is a reviewed deterministic fixture preview. It contains no "
+            "canonical MAPPO/IPPO research result and no live Coppelia evidence. "
+            "The generated `release-status.json` and `provenance.json` make those "
+            "boundaries machine-readable.\n"
+        )
     (root / "report.md").write_text(
         report,
         encoding="utf-8",
@@ -243,7 +276,7 @@ def _build_fixture_bundle(
     manifest = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
         "kind": "deterministic",
-        "evidence_status": "fixture",
+        "evidence_status": evidence_status,
         "source": source.model_dump(mode="json"),
         "created_at": "2026-07-15T00:00:00Z",
         "configuration_digests": [_sha256(design_path)],
@@ -252,7 +285,7 @@ def _build_fixture_bundle(
         "matrix_id": None,
         "artifacts": artifacts,
     }
-    manifest_path = root / "fixture-bundle.json"
+    manifest_path = root / descriptor_name
     _write_json(manifest_path, manifest)
     return manifest_path
 
@@ -295,6 +328,10 @@ def _media_type(path: str) -> str:
     }.get(suffix, "application/octet-stream")
 
 
+def _is_lower_hex(value: str, *, length: int) -> bool:
+    return len(value) == length and all(character in "0123456789abcdef" for character in value)
+
+
 def _explicit_source(args: argparse.Namespace) -> SourceIdentity | None:
     values = (
         args.source_commit,
@@ -305,8 +342,7 @@ def _explicit_source(args: argparse.Namespace) -> SourceIdentity | None:
         return None
     if any(value is None for value in values):
         raise ValueError(
-            "--source-commit, --source-dirty, and --source-tree-digest "
-            "must be supplied together"
+            "--source-commit, --source-dirty, and --source-tree-digest must be supplied together"
         )
     return SourceIdentity(
         commit=cast(str, args.source_commit),
@@ -353,6 +389,14 @@ def main() -> None:
     parser.add_argument("--release-tag")
     parser.add_argument("--reuse-robot", action="store_true")
     parser.add_argument(
+        "--deterministic-input-only",
+        action="store_true",
+        help=(
+            "Atomically stage a clean canonical deterministic release-input "
+            "bundle and descriptor at --output."
+        ),
+    )
+    parser.add_argument(
         "--verify-only",
         action="store_true",
         help="Re-hash an existing export instead of writing it.",
@@ -371,6 +415,30 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    if args.deterministic_input_only:
+        incompatible = (
+            args.verify_only
+            or args.channel != "preview"
+            or args.deterministic_bundle is not None
+            or args.research_bundle is not None
+            or args.simulator_bundle is not None
+            or args.expected_channel is not None
+            or args.compare_output is not None
+            or args.release_version is not None
+            or args.release_tag is not None
+        )
+        if incompatible:
+            parser.error(
+                "--deterministic-input-only cannot be combined with export, "
+                "verification, or release-identity options"
+            )
+        descriptor = package_deterministic_release_input(
+            args.output,
+            regenerate_robot=not args.reuse_robot,
+            source=_explicit_source(args),
+        )
+        print(descriptor)
+        return
     if args.verify_only:
         verify_public_demo_export(
             args.output,
@@ -400,19 +468,14 @@ def main() -> None:
                 release_version = repository_identity.version
                 release_tag = repository_identity.tag
             elif release_version is None or release_tag is None:
-                parser.error(
-                    "--release-version and --release-tag must be supplied together"
-                )
+                parser.error("--release-version and --release-tag must be supplied together")
             else:
                 validate_release_identity(release_version, release_tag)
                 if (
                     release_version != repository_identity.version
                     or release_tag != repository_identity.tag
                 ):
-                    parser.error(
-                        "release version/tag do not match the repository "
-                        "package versions"
-                    )
+                    parser.error("release version/tag do not match the repository package versions")
         except ValueError as exc:
             parser.error(str(exc))
     provenance = export_public_demo(
