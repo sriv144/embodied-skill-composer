@@ -17,6 +17,7 @@ from embodied_skill_composer.construction.coppelia_phase5 import (
     _swept_payload_aabb3_clearance,
     _swept_payload_robot_clearance,
     _synchronize_safe_route_pair,
+    _with_exact_route_endpoints,
 )
 from embodied_skill_composer.construction.models import (
     BuildModule,
@@ -123,6 +124,52 @@ def test_route_time_scheduler_rejects_an_impossible_position_swap() -> None:
             },
             minimum_separation_m=0.4,
         )
+
+
+def test_exact_measured_starts_resolve_drifted_dispatch_cell_handoff() -> None:
+    measured_starts = {
+        "robot_3": Vec2(x=-23.511230728099562, y=0.8520755257775265),
+        "robot_4": Vec2(x=-23.4936447544956, y=1.5501889714899248),
+    }
+    raster_routes = {
+        "robot_3": [
+            Vec2(x=-23.5, y=1.0),
+            Vec2(x=-23.0, y=1.0),
+            Vec2(x=-22.5, y=1.0),
+            Vec2(x=-22.5, y=0.5),
+        ],
+        "robot_4": [
+            Vec2(x=-23.5, y=1.5),
+            Vec2(x=-23.0, y=1.5),
+            Vec2(x=-22.5, y=1.5),
+            Vec2(x=-22.5, y=2.0),
+        ],
+    }
+
+    with pytest.raises(RoutingError, match="start below"):
+        _synchronize_safe_route_pair(
+            raster_routes,
+            minimum_separation_m=0.64,
+        )
+
+    exact_routes = {
+        robot_id: _with_exact_route_endpoints(
+            route,
+            start=measured_starts[robot_id],
+            endpoint=route[-1],
+        )
+        for robot_id, route in raster_routes.items()
+    }
+    synchronized = _synchronize_safe_route_pair(
+        exact_routes,
+        minimum_separation_m=0.64,
+    )
+
+    assert synchronized["robot_3"][0] == measured_starts["robot_3"]
+    assert synchronized["robot_4"][0] == measured_starts["robot_4"]
+    assert synchronized["robot_3"][-1] == raster_routes["robot_3"][-1]
+    assert synchronized["robot_4"][-1] == raster_routes["robot_4"][-1]
+    assert len(synchronized["robot_3"]) == len(synchronized["robot_4"])
 
 
 def test_planned_robot_separation_absorbs_both_bases_tracking_error() -> None:

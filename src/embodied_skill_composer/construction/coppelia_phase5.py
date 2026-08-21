@@ -2558,9 +2558,10 @@ def _plan_rigid_phase5_job(
                 pickup_goals,
             )
             approach_routes = {
-                robot_id: _with_exact_endpoint(
+                robot_id: _with_exact_route_endpoints(
                     approach.world_paths[robot_id],
-                    pickup_goals[robot_id],
+                    start=starts[robot_id],
+                    endpoint=pickup_goals[robot_id],
                 )
                 for robot_id in sorted(starts)
             }
@@ -2696,9 +2697,10 @@ def _plan_phase5_dispatch_return(
             parking_goals,
         )
         exact_routes = {
-            robot_id: _with_exact_endpoint(
+            robot_id: _with_exact_route_endpoints(
                 route.world_paths[robot_id],
-                parking_goals[robot_id],
+                start=starts[robot_id],
+                endpoint=parking_goals[robot_id],
             )
             for robot_id in sorted(starts)
         }
@@ -7725,6 +7727,23 @@ def _with_exact_endpoint(path: list[Vec2], endpoint: Vec2) -> list[Vec2]:
     ) > 1e-9:
         result.append(endpoint.model_copy(deep=True))
     return result
+
+
+def _with_exact_route_endpoints(
+    path: list[Vec2],
+    *,
+    start: Vec2,
+    endpoint: Vec2,
+) -> list[Vec2]:
+    """Bind a raster route to the measured start and requested endpoint."""
+
+    result = [point.model_copy(deep=True) for point in path]
+    if not result or math.hypot(
+        result[0].x - start.x,
+        result[0].y - start.y,
+    ) > 1e-9:
+        result.insert(0, start.model_copy(deep=True))
+    return _with_exact_endpoint(result, endpoint)
 
 
 def _event_sort_key(item: dict[str, object]) -> tuple[float, str]:

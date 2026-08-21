@@ -229,6 +229,79 @@ def test_multi_route_uses_shared_index_and_holds_fast_endpoint() -> None:
     assert harness.executor.synchronized_formation_errors_m == []
 
 
+def test_multi_route_position_holds_non_route_enabled_robot() -> None:
+    harness = _route_harness(
+        {
+            "robot_1": Vec2(x=0.0, y=0.0),
+            "robot_2": Vec2(x=0.0, y=2.0),
+            "robot_idle": Vec2(x=0.0, y=4.0),
+        },
+        speeds={
+            "robot_1": 0.2,
+            "robot_2": 0.2,
+            "robot_idle": 0.2,
+        },
+    )
+
+    def disturb_idle_once(
+        executor: DynamicCoppeliaExecutor,
+        positions: dict[str, Vec2],
+    ) -> None:
+        if executor.physics_steps == 1:
+            positions["robot_idle"] = Vec2(x=0.0, y=3.7)
+
+    harness.after_step = disturb_idle_once
+    harness.executor.follow_routes(
+        {
+            "robot_1": [Vec2(x=0.0, y=0.0), Vec2(x=2.0, y=0.0)],
+            "robot_2": [Vec2(x=0.0, y=2.0), Vec2(x=2.0, y=2.0)],
+        }
+    )
+
+    assert harness.positions["robot_idle"].y == pytest.approx(4.0)
+    assert any(
+        command.robot_id == "robot_idle"
+        and command.source == "path_follower"
+        and command.moving
+        and command.target == Vec2(x=0.0, y=4.0)
+        for command in harness.commands
+    )
+    started = _events(
+        harness.executor,
+        "route_time_synchronization_started",
+    )[-1]
+    assert started["position_hold_robot_ids"] == ["robot_idle"]
+
+
+def test_multi_route_never_position_holds_disabled_robot() -> None:
+    harness = _route_harness(
+        {
+            "robot_1": Vec2(x=0.0, y=0.0),
+            "robot_2": Vec2(x=0.0, y=2.0),
+            "robot_disabled": Vec2(x=0.0, y=4.0),
+        }
+    )
+    harness.executor.disabled_robots.add("robot_disabled")
+
+    harness.executor.follow_routes(
+        {
+            "robot_1": [Vec2(x=0.0, y=0.0), Vec2(x=1.0, y=0.0)],
+            "robot_2": [Vec2(x=0.0, y=2.0), Vec2(x=1.0, y=2.0)],
+        }
+    )
+
+    assert all(
+        command.robot_id != "robot_disabled"
+        for command in harness.commands
+    )
+    started = _events(
+        harness.executor,
+        "route_time_synchronization_started",
+    )[-1]
+    assert started["stationary_robot_ids"] == ["robot_disabled"]
+    assert started["position_hold_robot_ids"] == []
+
+
 def test_route_time_allows_same_cell_at_different_indices() -> None:
     common = Vec2(x=0.0, y=0.0)
     harness = _route_harness(

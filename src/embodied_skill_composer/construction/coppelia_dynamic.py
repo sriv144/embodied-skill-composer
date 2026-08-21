@@ -670,6 +670,11 @@ class DynamicCoppeliaExecutor:
         stationary_points = {
             robot_id: point for robot_id, point in initial_points.items() if robot_id not in routes
         }
+        position_hold_points = {
+            robot_id: point
+            for robot_id, point in stationary_points.items()
+            if robot_id not in self.disabled_robots
+        }
         (
             minimum_planned_separation_m,
             limiting_planned_separation,
@@ -695,8 +700,10 @@ class DynamicCoppeliaExecutor:
                 "relative_formation_enforced": enforce_relative_formation,
                 "measured_start_to_first_target_included": True,
                 "stationary_robot_ids": sorted(stationary_points),
+                "position_hold_robot_ids": sorted(position_hold_points),
             }
         )
+        position_hold_moving: set[str] = set()
         for waypoint_index in range(horizon):
             targets = {
                 robot_id: routes[robot_id][min(waypoint_index, len(routes[robot_id]) - 1)]
@@ -811,7 +818,17 @@ class DynamicCoppeliaExecutor:
                     <= waypoint_tolerance_m
                     for robot_id in robot_ids
                 }
-                if all(reached.values()):
+                position_holds_reached = {
+                    robot_id: math.hypot(
+                        target.x - measured_enabled[robot_id].position.x,
+                        target.y - measured_enabled[robot_id].position.y,
+                    )
+                    <= waypoint_tolerance_m
+                    for robot_id, target in position_hold_points.items()
+                }
+                if all(reached.values()) and all(
+                    position_holds_reached.values()
+                ):
                     for robot_id in robot_ids:
                         self.command_body_velocity(
                             robot_id,
@@ -821,6 +838,16 @@ class DynamicCoppeliaExecutor:
                             source="formation_hold",
                             target=targets[robot_id],
                         )
+                    for robot_id in sorted(position_hold_moving):
+                        self.command_body_velocity(
+                            robot_id,
+                            0.0,
+                            0.0,
+                            0.0,
+                            source="formation_hold",
+                            target=position_hold_points[robot_id],
+                        )
+                    position_hold_moving.clear()
                     self.runtime_events.append(
                         {
                             "timestamp_s": self.simulation_time_s,
@@ -859,6 +886,38 @@ class DynamicCoppeliaExecutor:
                         0.0,
                         target=target,
                     )
+                for robot_id, target in position_hold_points.items():
+                    pose = measured_enabled[robot_id]
+                    if position_holds_reached[robot_id]:
+                        if robot_id in position_hold_moving:
+                            self.command_body_velocity(
+                                robot_id,
+                                0.0,
+                                0.0,
+                                0.0,
+                                source="formation_hold",
+                                target=target,
+                            )
+                            position_hold_moving.remove(robot_id)
+                        continue
+                    dx = target.x - pose.position.x
+                    dy = target.y - pose.position.y
+                    yaw = math.radians(pose.rotation_rpy_degrees.z)
+                    body_forward, body_lateral = world_error_to_youbot_body(
+                        dx,
+                        dy,
+                        yaw,
+                    )
+                    scale = self.config.position_gain
+                    self.command_body_velocity(
+                        robot_id,
+                        _clamp(body_forward * scale, -1.0, 1.0),
+                        _clamp(body_lateral * scale, -1.0, 1.0),
+                        0.0,
+                        source="path_follower",
+                        target=target,
+                    )
+                    position_hold_moving.add(robot_id)
                 steps_at_waypoint += 1
                 if steps_at_waypoint > self.config.max_steps_per_waypoint:
                     self._stop_enabled_route_motion(
@@ -871,7 +930,7 @@ class DynamicCoppeliaExecutor:
                 self._update_logical_payloads()
                 self._step_physics()
         self._update_logical_payloads()
-        for robot_id in robot_ids:
+        for robot_id in sorted({*robot_ids, *position_hold_points}):
             self.command_body_velocity(
                 robot_id,
                 0.0,
@@ -893,6 +952,7 @@ class DynamicCoppeliaExecutor:
                 "maximum_formation_error_m": (
                     max(route_formation_samples) if route_formation_samples else None
                 ),
+                "position_hold_robot_ids": sorted(position_hold_points),
             }
         )
 
