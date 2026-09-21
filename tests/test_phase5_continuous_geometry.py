@@ -212,6 +212,30 @@ def test_planned_robot_separation_absorbs_both_bases_tracking_error() -> None:
     assert measured_idle_clearance.required_clearance_m == pytest.approx(0.16)
 
 
+@pytest.mark.parametrize("obstacle_kind", ["staged_module", "installed_module", "site_obstacle"])
+def test_static_clearance_reserves_tracking_error_only_in_plan(obstacle_kind) -> None:
+    config = Phase5PhysicalYardConfig(
+        route_clearance_m=0.16,
+        route_tracking_error_m=0.12,
+    )
+    records = [
+        _minimum_record(
+            phase="approach",
+            source=source,
+            mover_kind="robot_base",
+            obstacle_kind=obstacle_kind,
+            values=[(0.22, "robot_0", "obstacle")],
+            config=config,
+        )
+        for source in ("planned", "measured")
+    ]
+    assert records[0].required_clearance_m == pytest.approx(0.28)
+    assert records[1].required_clearance_m == pytest.approx(0.16)
+    with pytest.raises(RoutingError):
+        _require_clearance_records([records[0]])
+    _require_clearance_records([records[1]])
+
+
 def test_payload_may_clear_finite_structure_vertically_but_not_a_robot() -> None:
     module = _roof_module().model_copy(
         update={

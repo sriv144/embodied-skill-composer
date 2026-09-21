@@ -1392,7 +1392,9 @@ def _phase5_route_grid(
     grid: SiteGrid = plan.site_grid.model_copy(deep=True)
     obstacles: set[tuple[int, int]] = set()
     base_world_clearance = (
-        config.robot_footprint_radius_m + config.route_clearance_m
+        config.robot_footprint_radius_m
+        + config.route_clearance_m
+        + config.route_tracking_error_m
     )
     for cell in plan.site_grid.obstacle_cells:
         obstacles.update(
@@ -2005,12 +2007,9 @@ def _minimum_record(
     config: Phase5PhysicalYardConfig,
 ) -> Phase5ClearanceMinimum:
     required_clearance = config.route_clearance_m
-    if (
-        source == "planned"
-        and mover_kind == "robot_base"
-        and obstacle_kind in {"idle_robot", "disabled_robot"}
-    ):
-        required_clearance += 2 * config.route_tracking_error_m
+    if source == "planned" and mover_kind == "robot_base":
+        tracking_bodies = 2 if obstacle_kind in {"idle_robot", "disabled_robot"} else 1
+        required_clearance += tracking_bodies * config.route_tracking_error_m
     if not values:
         return Phase5ClearanceMinimum(
             phase=phase,
@@ -7842,22 +7841,23 @@ def _jsonable(value: object) -> object:
 
 
 def _write_json(path: Path, payload: object) -> None:
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+        handle.write("\n")
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
-    path.write_text(
-        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
-        encoding="utf-8",
-    )
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
 
 
 def _sha256_json(payload: object) -> str:
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()
+    digest = hashlib.sha256()
+    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"))
+    for chunk in encoder.iterencode(payload):
+        digest.update(chunk.encode())
+    return digest.hexdigest()
 
 
 def _sha256_file(path: Path) -> str:

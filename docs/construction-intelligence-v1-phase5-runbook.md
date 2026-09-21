@@ -113,7 +113,9 @@ Both runs must show:
 - continuous planned and measured base-to-payload clearance of at least the robot
   footprint radius plus route clearance at every carry sample;
 - analytic continuous planned and measured world clearance for every approach,
-  carry, and return segment, including between recorded waypoints;
+  carry, and return segment, including between recorded waypoints; planned base
+  routes reserve one additional tracking-error margin against static modules and
+  site obstacles, while measured clearance must still meet the original threshold;
 - conservative full-RPY payload envelopes, a finite recorded logical transport
   height, and vertical separation from finite-height structure and obstacles;
 - no base or payload overflight of idle or disabled robot columns;
