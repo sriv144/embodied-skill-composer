@@ -6,17 +6,19 @@ import math
 import re
 import secrets
 from collections import Counter, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import combinations
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, TypeVar, cast
 from uuid import UUID
 from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+
 
 from embodied_skill_composer.construction.coppelia_dynamic import (
     DynamicCoppeliaConfig,
@@ -48,6 +50,7 @@ from embodied_skill_composer.construction.routing import (
 from embodied_skill_composer.construction.scheduler import schedule_build
 
 
+_ModelT = TypeVar("_ModelT", bound=BaseModel)
 Phase5Scenario = Literal["nominal", "unavailable_robot_recovery"]
 EvidenceKind = Literal["offline_harness", "live_coppelia"]
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
@@ -1521,6 +1524,8 @@ def _formation_offset_candidates(
                 normal + 45,
                 normal - 30,
                 normal + 30,
+                normal - 15,
+                normal + 15,
                 0,
                 45,
                 90,
@@ -1531,6 +1536,12 @@ def _formation_offset_candidates(
     maximum_increment = math.floor(
         config.maximum_formation_expansion_m
         / grid.resolution_m
+    )
+    expansions = sorted(
+        {
+            *(increment * grid.resolution_m for increment in range(maximum_increment + 1)),
+            config.maximum_formation_expansion_m,
+        }
     )
     for angle_degrees in angles:
         angle = math.radians(angle_degrees)
@@ -1554,8 +1565,8 @@ def _formation_offset_candidates(
             for yaw in yaws
         )
         minimum_offset = support + config.formation_clearance_m
-        for increment in range(maximum_increment + 1):
-            distance = minimum_offset + increment * grid.resolution_m
+        for expansion in expansions:
+            distance = minimum_offset + expansion
             candidates.append(
                 (distance, float(angle_degrees), unit_x, unit_y)
             )
@@ -3425,10 +3436,10 @@ def _finalize_live_runtime_attestation(
     session.command_count = len(executor.commands)
     session.telemetry_count = len(executor.telemetry)
     session.command_stream_sha256 = _sha256_json(
-        [item.model_dump(mode="json") for item in executor.commands]
+        executor.commands
     )
     session.telemetry_stream_sha256 = _sha256_json(
-        [item.model_dump(mode="json") for item in executor.telemetry]
+        executor.telemetry
     )
     session.installed_module_ids = sorted(executor.installed_modules)
     session.finalized = True
@@ -4693,10 +4704,10 @@ def _require_live_runtime_session(
         }
     )
     command_stream_sha256 = _sha256_json(
-        [item.model_dump(mode="json") for item in executor.commands]
+        executor.commands
     )
     telemetry_stream_sha256 = _sha256_json(
-        [item.model_dump(mode="json") for item in executor.telemetry]
+        executor.telemetry
     )
     if (
         session.scenario_id != scenario.scenario_id
@@ -4987,7 +4998,7 @@ def write_phase5_artifact_bundle(
     )
     _write_json(
         run_dir / "planned_vs_measured_replay.json",
-        [item.model_dump(mode="json") for item in result.replay],
+        result.replay,
     )
     _write_json(run_dir / "trace.json", result.trace)
     _write_json(
@@ -4996,11 +5007,11 @@ def write_phase5_artifact_bundle(
     )
     _write_jsonl(
         run_dir / "wheel_commands.jsonl",
-        [item.model_dump(mode="json") for item in executor.commands],
+        (item.model_dump(mode="json") for item in executor.commands),
     )
     _write_jsonl(
         run_dir / "measured_telemetry.jsonl",
-        [item.model_dump(mode="json") for item in executor.telemetry],
+        (item.model_dump(mode="json") for item in executor.telemetry),
     )
     (run_dir / "report.md").write_text(_phase5_report(result), encoding="utf-8")
     executor.save_scene(run_dir / "construction_intelligence.ttt")
@@ -5075,7 +5086,12 @@ def write_phase5_artifact_bundle(
         artifacts=artifacts,
     )
     _write_json(run_dir / "manifest.json", manifest.model_dump(mode="json"))
-    verified = verify_phase5_artifact_bundle(run_dir)
+    verified = _verify_phase5_artifact_bundle(
+        run_dir,
+        source_replay=result.replay,
+        source_commands=executor.commands,
+        source_telemetry=executor.telemetry,
+    )
     if verified != manifest:
         raise ValueError("written Phase 5 manifest did not round-trip verification")
     if live_runtime_session is not None:
@@ -5084,6 +5100,16 @@ def write_phase5_artifact_bundle(
 
 
 def verify_phase5_artifact_bundle(run_dir: Path) -> Phase5ProvenanceManifest:
+    return _verify_phase5_artifact_bundle(run_dir)
+
+
+def _verify_phase5_artifact_bundle(
+    run_dir: Path,
+    *,
+    source_replay: list[Phase5JobReplay] | None = None,
+    source_commands: list[RobotCommand] | None = None,
+    source_telemetry: list[RobotTelemetry] | None = None,
+) -> Phase5ProvenanceManifest:
     run_dir = run_dir.resolve()
     manifest_path = run_dir / "manifest.json"
     if not manifest_path.is_file():
@@ -5124,29 +5150,56 @@ def verify_phase5_artifact_bundle(run_dir: Path) -> Phase5ProvenanceManifest:
             "Phase 5 bundle inventory is not canonical "
             f"(missing={missing}, extra={extra})"
         )
-    _verify_phase5_bundle_contents(run_dir, manifest)
+    _verify_phase5_bundle_contents(
+        run_dir,
+        manifest,
+        source_replay=source_replay,
+        source_commands=source_commands,
+        source_telemetry=source_telemetry,
+    )
     return manifest
 
 
 def _verify_phase5_bundle_contents(
     run_dir: Path,
     manifest: Phase5ProvenanceManifest,
+    *,
+    source_replay: list[Phase5JobReplay] | None = None,
+    source_commands: list[RobotCommand] | None = None,
+    source_telemetry: list[RobotTelemetry] | None = None,
 ) -> None:
     scenario = ScenarioManifest.model_validate_json(
         (run_dir / "scenario.json").read_text(encoding="utf-8")
     )
-    replay = TypeAdapter(list[Phase5JobReplay]).validate_python(
-        _load_json_list(run_dir / "planned_vs_measured_replay.json")
-    )
     planned_jobs = TypeAdapter(list[Phase5PlannedJobRecord]).validate_python(
         _load_json_list(run_dir / "planned_jobs.json")
     )
-    commands = TypeAdapter(list[RobotCommand]).validate_python(
-        _load_jsonl(run_dir / "wheel_commands.jsonl")
+    commands = _load_jsonl_models(
+        run_dir / "wheel_commands.jsonl",
+        RobotCommand,
+        source_rows=source_commands,
     )
-    telemetry = TypeAdapter(list[RobotTelemetry]).validate_python(
-        _load_jsonl(run_dir / "measured_telemetry.jsonl")
+    telemetry = _load_jsonl_models(
+        run_dir / "measured_telemetry.jsonl",
+        RobotTelemetry,
+        source_rows=source_telemetry,
     )
+    telemetry_index = (
+        {_sha256_json(sample): sample for sample in telemetry}
+        if source_replay is None
+        else None
+    )
+    replay = _load_json_array_models(
+        run_dir / "planned_vs_measured_replay.json",
+        Phase5JobReplay,
+        source_rows=source_replay,
+        transform=(
+            partial(_intern_replay_telemetry, telemetry_index=telemetry_index)
+            if telemetry_index is not None
+            else None
+        ),
+    )
+    del telemetry_index
     trace = _load_json_list(run_dir / "trace.json")
     if not all(isinstance(item, dict) for item in trace):
         raise ValueError("Phase 5 trace entries must be JSON objects")
@@ -5154,7 +5207,7 @@ def _verify_phase5_bundle_contents(
     result = Phase5RunResult.model_validate(
         {
             **metrics_payload,
-            "replay": [item.model_dump(mode="json") for item in replay],
+            "replay": replay,
             "trace": trace,
         }
     )
@@ -5342,11 +5395,11 @@ def _verify_phase5_runtime_attestation(
             "runtime attestation is not bound to the canonical evidence files"
         )
     if attestation.command_stream_sha256 != _sha256_json(
-        [item.model_dump(mode="json") for item in commands]
+        commands
     ):
         raise ValueError("runtime attestation command stream differs")
     if attestation.telemetry_stream_sha256 != _sha256_json(
-        [item.model_dump(mode="json") for item in telemetry]
+        telemetry
     ):
         raise ValueError("runtime attestation telemetry stream differs")
     _verify_runtime_attestation_trace(
@@ -7760,27 +7813,172 @@ def _load_json_object(path: Path) -> dict[str, object]:
 
 
 def _load_json_list(path: Path) -> list[object]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, list):
-        raise ValueError(f"{path.name} must contain a JSON array")
-    return payload
+    return list(_iter_json_array(path))
+
+
+def _iter_json_array(path: Path, *, chunk_size: int = 64 * 1024) -> Iterable[object]:
+    """Decode one top-level array entry at a time, including nested/string data."""
+    if chunk_size <= 0:
+        raise ValueError("JSON array chunk size must be positive")
+    opened = closed = in_string = has_values = False
+    depth = 0
+    escape_at = -1
+    offset = 0
+    parts: list[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), ""):
+            if closed:
+                if chunk.strip(" \t\n\r"):
+                    raise ValueError(f"{path.name} has data after its JSON array")
+                continue
+            part_start = 0
+            for match in re.finditer(r'["\\{}\[\],]', chunk):
+                index = match.start()
+                character = match.group()
+                position = offset + index
+                if not opened:
+                    if character != "[" or chunk[:index].strip(" \t\n\r"):
+                        raise ValueError(f"{path.name} must contain a JSON array")
+                    opened = True
+                    depth = 1
+                    part_start = index + 1
+                    continue
+                if in_string:
+                    if position == escape_at:
+                        continue
+                    if character == "\\":
+                        escape_at = position + 1
+                    elif character == '"':
+                        in_string = False
+                    continue
+                if character == '"':
+                    in_string = True
+                elif depth == 1 and character in {",", "]"}:
+                    parts.append(chunk[part_start:index])
+                    value_text = "".join(parts)
+                    parts.clear()
+                    if value_text.strip(" \t\n\r"):
+                        yield json.loads(value_text)
+                        has_values = True
+                    elif character == "," or has_values:
+                        raise ValueError(f"{path.name} has an empty JSON array entry")
+                    del value_text
+                    part_start = index + 1
+                    if character == "]":
+                        closed = True
+                        if chunk[part_start:].strip(" \t\n\r"):
+                            raise ValueError(f"{path.name} has data after its JSON array")
+                        break
+                elif character in {"{", "["}:
+                    depth += 1
+                elif character in {"}", "]"}:
+                    depth -= 1
+                    if depth < 1:
+                        raise ValueError(f"{path.name} has an unmatched JSON delimiter")
+            if opened and not closed:
+                parts.append(chunk[part_start:])
+            elif not opened and chunk.strip(" \t\n\r"):
+                raise ValueError(f"{path.name} must contain a JSON array")
+            offset += len(chunk)
+    if not closed:
+        raise ValueError(f"{path.name} contains an incomplete JSON array")
+
+
+def _load_json_models(
+    path: Path,
+    values: Iterable[object],
+    model_type: type[_ModelT],
+    *,
+    source_rows: list[_ModelT] | None = None,
+    transform: Callable[[_ModelT], _ModelT] | None = None,
+) -> list[_ModelT]:
+    rows: list[_ModelT] = []
+    for index, value in enumerate(values):
+        parsed = model_type.model_validate(value)
+        if source_rows is None:
+            rows.append(transform(parsed) if transform is not None else parsed)
+        else:
+            # Every disk row is parsed and validated before reusing an identical
+            # live object. This bounds write-then-verify to one temporary row/job.
+            if (
+                index >= len(source_rows)
+                or parsed != source_rows[index]
+                or _sha256_json(parsed) != _sha256_json(source_rows[index])
+            ):
+                raise ValueError(f"{path.name}:{index + 1} differs from source evidence")
+            rows.append(source_rows[index])
+        del parsed, value
+    if source_rows is not None and len(rows) != len(source_rows):
+        raise ValueError(f"{path.name} row count differs from source evidence")
+    return rows
+
+
+def _load_json_array_models(
+    path: Path,
+    model_type: type[_ModelT],
+    *,
+    source_rows: list[_ModelT] | None = None,
+    transform: Callable[[_ModelT], _ModelT] | None = None,
+) -> list[_ModelT]:
+    return _load_json_models(
+        path,
+        _iter_json_array(path),
+        model_type,
+        source_rows=source_rows,
+        transform=transform,
+    )
+
+
+def _intern_replay_telemetry(
+    replay: Phase5JobReplay,
+    telemetry_index: Mapping[str, RobotTelemetry],
+) -> Phase5JobReplay:
+    for samples in [replay.measured_poses, *replay.measured_carry_samples.values()]:
+        _intern_telemetry_samples(samples, telemetry_index)
+    return replay
+
+
+def _intern_telemetry_samples(
+    samples: list[RobotTelemetry],
+    telemetry_index: Mapping[str, RobotTelemetry],
+) -> None:
+    for index, sample in enumerate(samples):
+        sample_digest = _sha256_json(sample)
+        candidate = telemetry_index.get(sample_digest)
+        if (
+            candidate is not None
+            and candidate == sample
+            and _sha256_json(candidate) == sample_digest
+        ):
+            samples[index] = candidate
 
 
 def _load_jsonl(path: Path) -> list[object]:
-    rows: list[object] = []
-    for line_number, line in enumerate(
-        path.read_text(encoding="utf-8").splitlines(),
-        start=1,
-    ):
-        if not line.strip():
-            raise ValueError(f"{path.name}:{line_number} is blank")
-        try:
-            rows.append(json.loads(line))
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"{path.name}:{line_number} is not valid JSON"
-            ) from exc
-    return rows
+    return list(_iter_jsonl(path))
+
+
+def _iter_jsonl(path: Path) -> Iterable[object]:
+    with path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                raise ValueError(f"{path.name}:{line_number} is blank")
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{path.name}:{line_number} is not valid JSON"
+                ) from exc
+
+
+def _load_jsonl_models(
+    path: Path,
+    model_type: type[_ModelT],
+    *,
+    source_rows: list[_ModelT] | None = None,
+) -> list[_ModelT]:
+    return _load_json_models(
+        path, _iter_jsonl(path), model_type, source_rows=source_rows
+    )
 
 
 def _timestamps_are_monotonic(
@@ -7842,11 +8040,17 @@ def _jsonable(value: object) -> object:
 
 def _write_json(path: Path, payload: object) -> None:
     with path.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
+        json.dump(
+            payload,
+            handle,
+            indent=2,
+            sort_keys=True,
+            default=_json_model_default,
+        )
         handle.write("\n")
 
 
-def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
+def _write_jsonl(path: Path, rows: Iterable[dict[str, object]]) -> None:
     with path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True) + "\n")
@@ -7854,10 +8058,20 @@ def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
 
 def _sha256_json(payload: object) -> str:
     digest = hashlib.sha256()
-    encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"))
+    encoder = json.JSONEncoder(
+        sort_keys=True,
+        separators=(",", ":"),
+        default=_json_model_default,
+    )
     for chunk in encoder.iterencode(payload):
         digest.update(chunk.encode())
     return digest.hexdigest()
+
+
+def _json_model_default(value: object) -> object:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def _sha256_file(path: Path) -> str:

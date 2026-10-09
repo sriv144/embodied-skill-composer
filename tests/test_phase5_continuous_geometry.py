@@ -8,6 +8,7 @@ from embodied_skill_composer.construction.coppelia_phase5 import (
     Phase5ClearanceMinimum,
     Phase5PhysicalYardConfig,
     _Aabb3,
+    _formation_offset_candidates,
     _minimum_record,
     _oriented_half_extents_xyz,
     _planned_robot_separation_m,
@@ -24,6 +25,7 @@ from embodied_skill_composer.construction.models import (
     Dimensions3D,
     ModuleType,
     Pose3D,
+    SiteGrid,
     Vec2,
     Vec3,
 )
@@ -234,6 +236,37 @@ def test_static_clearance_reserves_tracking_error_only_in_plan(obstacle_kind) ->
     with pytest.raises(RoutingError):
         _require_clearance_records([records[0]])
     _require_clearance_records([records[1]])
+
+
+def test_formation_search_includes_non_grid_aligned_expansion_limit() -> None:
+    module = _roof_module().model_copy(
+        update={
+            "dimensions": Dimensions3D(width=2, depth=1, height=0.2),
+            "staging_pose": Pose3D(position=Vec3(x=0, y=0, z=0)),
+            "target_pose": Pose3D(position=Vec3(x=0, y=0, z=0)),
+        }
+    )
+    config = Phase5PhysicalYardConfig(maximum_formation_expansion_m=4.0)
+    candidates = list(
+        _formation_offset_candidates(
+            module,
+            ["robot_0", "robot_1"],
+            grid=SiteGrid(width=100, height=100, resolution_m=0.6),
+            config=config,
+        )
+    )
+    vertical = [
+        offsets["robot_1"].y
+        for offsets in candidates
+        if abs(offsets["robot_1"].x) < 1e-9
+    ]
+    assert max(vertical) == pytest.approx(0.5 + config.formation_clearance_m + 4.0)
+    assert len(vertical) == len(set(vertical))
+    angles = {
+        round(math.degrees(math.atan2(offsets["robot_1"].y, offsets["robot_1"].x)))
+        for offsets in candidates
+    }
+    assert {75, 105} <= angles
 
 
 def test_payload_may_clear_finite_structure_vertically_but_not_a_robot() -> None:

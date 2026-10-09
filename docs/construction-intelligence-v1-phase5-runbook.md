@@ -122,7 +122,9 @@ Both runs must show:
 - exactly one attested logical lift and one final-target-only logical installation
   snap per module, both bound to zero-command and measured-settle proofs;
 - a recorded maximum formation offset that stays inside the configured finite
-  expansion bound;
+  expansion bound; the formation search includes that exact bound even when it
+  is not a multiple of grid spacing, and intermediate angles must pass the same
+  pickup, swept-route, installation, and return clearance checks;
 - one complete planned-versus-measured replay entry for every module;
 - a reusable saved `.ttt` scene and a hash-verifiable artifact bundle.
 
