@@ -27,20 +27,29 @@ const configuredMode: LabMode =
     ? "static"
     : "local";
 
-export function runtimeStatusFor(mode: LabMode): RuntimeStatus {
+export function runtimeStatusFor(
+  mode: LabMode,
+  channel: "preview" | "release" | null = null
+): RuntimeStatus {
   return Object.freeze(
     mode === "static"
       ? {
           mode,
+          channel,
           source: "versioned-static-demo",
           readOnly: true,
           interactive: false,
-          label: "Read-only public preview",
+          label: channel === "release"
+            ? "Read-only public release v1.0.0"
+            : channel === "preview"
+              ? "Read-only public preview"
+              : "Read-only static workbench",
           detail:
             "Versioned demo artifacts are loaded from this deployment. Compute and simulator controls are disabled."
         }
       : {
           mode,
+          channel: null,
           source: "loopback-api",
           readOnly: false,
           interactive: true,
@@ -51,7 +60,8 @@ export function runtimeStatusFor(mode: LabMode): RuntimeStatus {
   );
 }
 
-const runtimeStatus = runtimeStatusFor(configuredMode);
+let runtimeStatus = runtimeStatusFor(configuredMode);
+let runtimeInitialization: Promise<RuntimeStatus> | null = null;
 const passiveStaticArtifactSuffixes = new Set([
   ".csv",
   ".glb",
@@ -86,6 +96,90 @@ export class ApiRequestError extends Error {
 
 function demoUrl(path: string) {
   return `${base}demo/${path}`;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+async function sha256Text(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+export async function verifiedStaticRuntime(
+  provenanceValue: unknown,
+  statusText: string
+): Promise<RuntimeStatus> {
+  const provenance = record(provenanceValue);
+  const status = record(JSON.parse(statusText));
+  const channel = status?.channel;
+  if (
+    !provenance || !status ||
+    provenance.schema_version !== "construction-intelligence-public-demo-provenance-v1" ||
+    status.schema_version !== "construction-intelligence-public-status-v1" ||
+    (channel !== "preview" && channel !== "release") ||
+    provenance.channel !== channel ||
+    status.release_ready !== (channel === "release") ||
+    status.release_version !== provenance.release_version ||
+    status.release_tag !== provenance.release_tag
+  ) {
+    throw new Error("Static release channel metadata is missing or inconsistent.");
+  }
+  const integrityPayload = { ...provenance, manifest_payload_sha256: null };
+  const canonical = JSON.stringify(integrityPayload, (_key, value: unknown) => {
+    const object = record(value);
+    return object
+      ? Object.fromEntries(Object.keys(object).sort().map((key) => [key, object[key]]))
+      : value;
+  }, 2) + "\n";
+  if (provenance.manifest_payload_sha256 !== await sha256Text(canonical)) {
+    throw new Error("Static provenance manifest failed its integrity check.");
+  }
+  const artifacts = Array.isArray(provenance.artifacts) ? provenance.artifacts : [];
+  const matching = artifacts.map(record).filter((item) => item?.path === "release-status.json");
+  const bytes = new TextEncoder().encode(statusText);
+  if (matching.length !== 1 || matching[0]?.bytes !== bytes.byteLength) {
+    throw new Error("Static release status is absent from the provenance inventory.");
+  }
+  const observed = await sha256Text(statusText);
+  if (matching[0]?.sha256 !== observed) {
+    throw new Error("Static release status failed its provenance hash check.");
+  }
+  if (channel === "release") {
+    const evidence = record(status.evidence);
+    const source = record(provenance.source);
+    if (
+      status.release_version !== "1.0.0" || status.release_tag !== "v1.0.0" ||
+      status.claim_status !== "release_evidence" ||
+      !Array.isArray(status.limitations) || status.limitations.length !== 0 ||
+      evidence?.deterministic !== "canonical" || evidence.research !== "validated" ||
+      evidence.coppelia !== "validated" || source?.dirty !== false ||
+      typeof source.commit !== "string" || !/^[a-f0-9]{40}$/.test(source.commit) ||
+      typeof source.tree_digest !== "string" || !/^[a-f0-9]{64}$/.test(source.tree_digest)
+    ) {
+      throw new Error("Static release metadata does not attest complete canonical v1 evidence.");
+    }
+  } else if (status.release_version !== null || status.release_tag !== null) {
+    throw new Error("Static preview metadata cannot declare a release identity.");
+  }
+  return runtimeStatusFor("static", channel);
+}
+
+function initializeRuntime(): Promise<RuntimeStatus> {
+  if (runtimeStatus.mode === "local") return Promise.resolve(runtimeStatus);
+  runtimeInitialization ??= Promise.all([
+    fetchJson<unknown>(demoUrl("provenance.json")),
+    fetchText(demoUrl("release-status.json"))
+  ]).then(async ([provenance, statusText]) => {
+    runtimeStatus = await verifiedStaticRuntime(provenance, statusText);
+    return runtimeStatus;
+  });
+  return runtimeInitialization;
 }
 
 function errorDetail(payload: unknown): string | null {
@@ -222,7 +316,7 @@ async function runtimeJson<T>(localPath: string, staticPath: string): Promise<T>
 async function requireLocal<T>(path: string, init?: RequestInit): Promise<T> {
   if (runtimeStatus.readOnly) {
     throw new ApiRequestError(
-      "This control is disabled in the read-only public preview.",
+      "This control is disabled in the read-only static workbench.",
       path
     );
   }
@@ -257,7 +351,7 @@ export function formatApiError(reason: unknown): string {
 export function staticRecoveryTracePath(failureType: string): string {
   if (failureType !== "obstacle") {
     throw new ApiRequestError(
-      "The public preview ships only the obstacle recovery trace.",
+      "The public workbench ships only the obstacle recovery trace.",
       demoUrl("traces/recovery.json")
     );
   }
@@ -267,6 +361,7 @@ export function staticRecoveryTracePath(failureType: string): string {
 export const api = {
   mode: () => runtimeStatus.mode,
   runtime: () => runtimeStatus,
+  initializeRuntime,
 
   project: () =>
     runtimeJson<Project>("/api/project", "project.json").then(normalizeProject),

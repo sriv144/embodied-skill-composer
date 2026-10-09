@@ -44,8 +44,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    Promise.all([api.project(), api.trace("optimized")])
-      .then(([nextProject, nextTrace]) => {
+    Promise.all([api.initializeRuntime(), api.project(), api.trace("optimized")])
+      .then(([, nextProject, nextTrace]) => {
         setProject(nextProject);
         setTrace(nextTrace);
         setMode(api.mode());
@@ -75,6 +75,8 @@ export default function App() {
 
   if (error) return <StartupState error={error} />;
   if (!project || !trace) return <StartupState />;
+  const runtime = api.runtime();
+  const staticLabel = runtime.channel === "release" ? "Read-only release v1.0.0" : "Read-only preview";
 
   return (
     <div className={`app-shell app-shell-${view}`}>
@@ -97,12 +99,12 @@ export default function App() {
         </nav>
         <div
           className="rail-status"
-          title={mode === "local" ? "Local research lab" : "Read-only public preview"}
+          title={runtime.label}
           role="status"
           aria-live="polite"
         >
           <span aria-hidden="true" className={mode === "local" ? "status-dot" : "status-dot static"} />
-          {mode === "local" ? "local" : "preview"}
+          {mode === "local" ? "local" : runtime.channel}
         </div>
       </aside>
       <main id="main-content" className="main-shell" tabIndex={-1}>
@@ -111,7 +113,7 @@ export default function App() {
           <div className="topbar-meta">
             <span>{project.plan.modules.length} modules</span><span>{project.plan.robots.length} robots</span>
             <span className="solver-ready" role="status" aria-live="polite">
-              <Check aria-hidden="true" size={14} /> {mode === "local" ? "Lab connected" : "Read-only preview"}
+              <Check aria-hidden="true" size={14} /> {mode === "local" ? "Lab connected" : staticLabel}
             </span>
           </div>
         </header>

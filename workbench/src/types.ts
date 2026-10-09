@@ -108,6 +108,7 @@ export type LabMode = "local" | "static";
 
 export type RuntimeStatus = Readonly<{
   mode: LabMode;
+  channel: "preview" | "release" | null;
   source: "loopback-api" | "versioned-static-demo";
   readOnly: boolean;
   interactive: boolean;
