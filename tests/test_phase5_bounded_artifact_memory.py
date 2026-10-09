@@ -14,8 +14,11 @@ from embodied_skill_composer.construction.coppelia_phase5 import (
     _write_json,
     _write_jsonl,
 )
-from embodied_skill_composer.construction.intelligence_models import RobotTelemetry
-from embodied_skill_composer.construction.models import Pose3D, Vec3
+from embodied_skill_composer.construction.intelligence_models import (
+    RobotCommand,
+    RobotTelemetry,
+)
+from embodied_skill_composer.construction.models import Pose3D, Vec2, Vec3
 
 
 class EvidenceRow(BaseModel):
@@ -178,6 +181,51 @@ def test_source_reuse_distinguishes_signed_zero_in_canonical_evidence(tmp_path: 
     assert Measurement(value=0.0) == source[0]
     with pytest.raises(ValueError, match="differs from source evidence"):
         _load_json_array_models(path, Measurement, source_rows=source)
+
+
+@pytest.mark.parametrize("jsonl", [False, True])
+def test_command_roundtrip_preserves_declared_2d_wire_projection(
+    tmp_path: Path, jsonl: bool
+) -> None:
+    source = RobotCommand(
+        timestamp_s=0.0,
+        robot_id="robot_1",
+        linear_velocity_mps=0.0,
+        angular_velocity_rps=0.0,
+        wheel_target_velocity_rad_s=(0.0, 0.0, 0.0, 0.0),
+        target_position=Vec3(x=1.0, y=2.0, z=3.0),
+        source="path_follower",
+    )
+    path = tmp_path / ("commands.jsonl" if jsonl else "commands.json")
+    if jsonl:
+        _write_jsonl(path, [source.model_dump(mode="json")])
+        loaded = _load_jsonl_models(path, RobotCommand, source_rows=[source])
+    else:
+        _write_json(path, [source])
+        loaded = _load_json_array_models(path, RobotCommand, source_rows=[source])
+    assert type(source.target_position) is Vec3
+    assert type(loaded[0].target_position) is Vec2
+    assert loaded[0] is not source
+    assert loaded[0].model_dump(mode="json") == source.model_dump(mode="json")
+    assert _sha256_json(loaded[0]) == _sha256_json(source)
+
+
+def test_command_projection_still_rejects_modified_wire_coordinate(tmp_path: Path) -> None:
+    source = RobotCommand(
+        timestamp_s=0.0,
+        robot_id="robot_1",
+        linear_velocity_mps=0.0,
+        angular_velocity_rps=0.0,
+        wheel_target_velocity_rad_s=(0.0, 0.0, 0.0, 0.0),
+        target_position=Vec3(x=1.0, y=2.0, z=3.0),
+        source="path_follower",
+    )
+    modified = source.model_dump(mode="json")
+    modified["target_position"]["x"] += 0.05
+    path = tmp_path / "commands.jsonl"
+    _write_jsonl(path, [modified])
+    with pytest.raises(ValueError, match="differs from source evidence"):
+        _load_jsonl_models(path, RobotCommand, source_rows=[source])
 
 
 def _measurement(velocity: float, *, timestamp_s: float = 0.0) -> RobotTelemetry:

@@ -7900,13 +7900,27 @@ def _load_json_models(
         else:
             # Every disk row is parsed and validated before reusing an identical
             # live object. This bounds write-then-verify to one temporary row/job.
-            if (
-                index >= len(source_rows)
-                or parsed != source_rows[index]
-                or _sha256_json(parsed) != _sha256_json(source_rows[index])
-            ):
+            if index >= len(source_rows):
                 raise ValueError(f"{path.name}:{index + 1} differs from source evidence")
-            rows.append(source_rows[index])
+            source = source_rows[index]
+            if _sha256_json(parsed) != _sha256_json(source):
+                raise ValueError(f"{path.name}:{index + 1} differs from source evidence")
+            if parsed == source:
+                rows.append(source)
+            else:
+                # A Vec3 in a field declared Vec2 is serialized as {x, y}.
+                # Compare the validated wire projection, then retain the parsed
+                # model so hidden subclass fields cannot enter verification.
+                normalized_source = model_type.model_validate(
+                    source.model_dump(mode="json")
+                )
+                if parsed != normalized_source:
+                    raise ValueError(
+                        f"{path.name}:{index + 1} differs from source evidence"
+                    )
+                rows.append(parsed)
+                del normalized_source
+            del source
         del parsed, value
     if source_rows is not None and len(rows) != len(source_rows):
         raise ValueError(f"{path.name} row count differs from source evidence")
