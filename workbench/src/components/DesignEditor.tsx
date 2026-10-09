@@ -826,7 +826,7 @@ export function DesignEditor({
         </svg>
         <p className="design-editor-hint">
           {readOnly
-            ? "Public preview · editing and compilation are available in local mode."
+            ? "Read-only public workbench · editing and compilation are available in local mode."
             : drawStart
               ? "Choose the wall endpoint. The dominant direction locks its axis."
               : "Arrows move the selection by 0.25 m · hold Shift for 1 m · Delete removes."}

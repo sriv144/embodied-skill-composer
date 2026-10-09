@@ -98,7 +98,7 @@ export function SimulateView({
         </div>
         {staticPreview && (
           <p className="static-recovery-note" role="note">
-            This preview ships only the obstacle recovery trace.
+            This public workbench ships only the obstacle recovery trace.
           </p>
         )}
         <p className="recovery-note" role={recoveryError ? "alert" : "status"} aria-live={recoveryError ? "assertive" : "polite"} aria-atomic="true">{notice && <><RotateCcw aria-hidden="true" size={15} />{notice}</>}</p>

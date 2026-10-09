@@ -35,6 +35,7 @@ beforeEach(() => {
   controls.replace = controls.change = controls.recover = null;
   window.location.hash = "/design";
   vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+  vi.spyOn(api, "initializeRuntime").mockResolvedValue(runtimeStatusFor("local"));
   vi.spyOn(api, "mode").mockReturnValue("local");
   vi.spyOn(api, "runtime").mockReturnValue(runtimeStatusFor("local"));
   vi.spyOn(api, "project").mockResolvedValue(projectFixture());

@@ -43,7 +43,9 @@ jobs:
         run: python -m compileall -q src scripts
       - name: Release version consistency
         run: python scripts/check_release_version.py
-      - name: Public-demo provenance and deterministic regeneration
+      # Canonical release data is verified and hydrated from tagged release assets
+      # by release.yml/pages.yml. The committed tree deliberately stays a preview.
+      - name: Committed preview provenance and deterministic regeneration
         shell: bash
         run: |
           set -euo pipefail
