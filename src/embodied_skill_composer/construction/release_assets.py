@@ -480,6 +480,49 @@ def verify_release_assets(
     return manifest
 
 
+def stage_release_public_demo(asset_dir: Path, *, workspace: Path) -> ReleaseAssetManifest:
+    """Replace the build's preview only after verifying the complete tagged release.
+
+    The committed preview stays reproducible in source control. Pages consumes the
+    canonical archive at build time, so its source identity never depends on a
+    generated provenance file being committed into the Git tree that it hashes.
+    """
+
+    root = workspace.resolve()
+    destination = root / "workbench" / "public" / "demo"
+    assets = asset_dir.resolve()
+    if assets == destination or destination in assets.parents or assets in destination.parents:
+        raise ReleaseAssetError("Pages release assets must be outside the demo destination")
+    if not destination.resolve().is_relative_to(root) or any(
+        path.is_symlink() for path in (root / "workbench", destination.parent, destination)
+    ):
+        raise ReleaseAssetError("Pages demo destination must not follow a symbolic link")
+    manifest = verify_release_assets(
+        assets,
+        workspace=root,
+        expected_release_version="1.0.0",
+        expected_release_tag="v1.0.0",
+        require_tag_at_head=True,
+    )
+    public_record = next(record for record in manifest.assets if record.role == "public_demo")
+    public_zip = assets / public_record.file
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".demo.release-", dir=destination.parent) as raw:
+        staged = Path(raw) / "demo"
+        extract_verified_zip(public_zip, staged)
+        verify_public_demo_export(
+            staged,
+            expected_channel="release",
+            expected_source=manifest.source,
+            expected_release_version=manifest.release_version,
+            expected_release_tag=manifest.release_tag,
+        )
+        if file_sha256(public_zip) != public_record.sha256:
+            raise ReleaseAssetError("public demo archive changed during Pages staging")
+        _replace_directory(staged, destination)
+    return manifest
+
+
 def repository_source_identity(workspace: Path) -> SourceIdentity:
     """Return a clean 40-character Git commit and SHA-256 tree identity."""
 

@@ -23,6 +23,7 @@ from embodied_skill_composer.construction.release_assets import (
     RELEASE_IDENTITY_FILE,
     ReleaseAssetError,
     stage_release_assets,
+    stage_release_public_demo,
     verify_release_assets,
 )
 from embodied_skill_composer.construction.release_identity import (
@@ -30,8 +31,8 @@ from embodied_skill_composer.construction.release_identity import (
 )
 
 
-RELEASE_VERSION = "0.1.0"
-RELEASE_TAG = "v0.1.0"
+RELEASE_VERSION = "1.0.0"
+RELEASE_TAG = "v1.0.0"
 SOURCE = SourceIdentity(
     commit="a" * 40,
     dirty=False,
@@ -104,6 +105,79 @@ def test_release_assets_are_byte_deterministic_and_include_external_onnx_data(
         names = archive.namelist()
     assert sum(name.endswith("/actor.onnx") for name in names) == 20
     assert sum(name.endswith("/actor.onnx.data") for name in names) == 20
+
+
+def test_pages_staging_replaces_preview_with_exact_verified_archive(
+    packaged_assets: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = packaged_assets["workspace"]
+    destination = workspace / "workbench" / "public" / "demo"
+    destination.mkdir(parents=True)
+    (destination / "old-preview.json").write_text("preview", encoding="utf-8")
+    observed_tags: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        release_assets,
+        "require_tag_points_at_head",
+        lambda root, tag: observed_tags.append((root, tag)),
+    )
+
+    manifest = stage_release_public_demo(packaged_assets["first"], workspace=workspace)
+
+    assert manifest.source == SOURCE
+    assert observed_tags == [(workspace.resolve(), RELEASE_TAG)]
+    assert _directory_bytes(destination) == _zip_bytes(
+        packaged_assets["first"] / "construction-intelligence-v1-public-demo.zip"
+    )
+    assert not (destination / "old-preview.json").exists()
+
+
+@pytest.mark.parametrize("failure", ["tag", "missing_asset", "staged_provenance"])
+def test_pages_staging_preserves_preview_on_any_verification_failure(
+    packaged_assets: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    workspace = packaged_assets["workspace"]
+    destination = workspace / "workbench" / "public" / "demo"
+    destination.mkdir(parents=True)
+    (destination / "preview.json").write_text("untouched", encoding="utf-8")
+    before = _directory_bytes(destination)
+
+    def check_tag(_root: Path, _tag: str) -> None:
+        if failure == "tag":
+            raise ReleaseAssetError("tag mismatch")
+
+    monkeypatch.setattr(release_assets, "require_tag_points_at_head", check_tag)
+    if failure == "missing_asset":
+        (packaged_assets["first"] / "construction-intelligence-v1-selected-policies.zip").unlink()
+    elif failure == "staged_provenance":
+        original_verify = release_assets.verify_public_demo_export
+        calls = 0
+
+        def reject_staged(output: Path, **kwargs: Any) -> dict[str, object]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise PublicDemoExportError("staged native evidence changed")
+            return original_verify(output, **kwargs)
+
+        monkeypatch.setattr(release_assets, "verify_public_demo_export", reject_staged)
+
+    with pytest.raises((ReleaseAssetError, PublicDemoExportError)):
+        stage_release_public_demo(packaged_assets["first"], workspace=workspace)
+
+    assert _directory_bytes(destination) == before
+    assert not list(destination.parent.glob(".demo.release-*"))
+
+
+def test_pages_staging_rejects_assets_inside_destination_before_replacement(
+    packaged_assets: dict[str, Path],
+) -> None:
+    workspace = packaged_assets["workspace"]
+    destination = workspace / "workbench" / "public" / "demo"
+    with pytest.raises(ReleaseAssetError, match="outside the demo destination"):
+        stage_release_public_demo(destination / "assets", workspace=workspace)
 
 
 def test_release_staging_resolves_bundle_local_selected_checkpoint_sources(

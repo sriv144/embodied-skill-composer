@@ -676,7 +676,7 @@ export function ExperimentsView({
           ) : (
             <>
               <Ban aria-hidden="true" size={15} />
-              Read-only public preview
+              {runtime.label}
             </>
           )}
         </div>

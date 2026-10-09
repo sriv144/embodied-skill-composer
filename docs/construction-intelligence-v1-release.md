@@ -92,6 +92,12 @@ descriptor files. It then:
 Repeat the command into a second output directory and compare it when performing the final
 regeneration audit. Identical inputs must produce byte-identical files.
 
+The private `release-inputs/` and `output/` directories are ignored by Git. Do not copy the
+release-channel demo into the committed `workbench/public/demo` tree: that tree remains the
+reproducible preview tested by normal CI. Committing generated release provenance would change
+the very Git source identity recorded in it. Pages replaces the preview only in its disposable
+build checkout, after verification of all five canonical release assets.
+
 ## Verify locally
 
 Before creating the draft:
@@ -152,8 +158,37 @@ constraints, downloads the existing draft, requires the exact five-file inventor
 every identity, hash, archive, public-demo claim, selected checkpoint, and tag-to-HEAD relation.
 It passes only a SHA-256 fingerprint of that complete asset set to a fresh publication runner. The
 write-token job rechecks the tag, `main`, draft state, and downloaded asset-set fingerprint before
-running `gh release edit v1.0.0 --draft=false`. Both jobs require a non-prerelease draft and bind
+running `gh release edit v1.0.0 --draft=false`. Before publication, a separate reusable Pages
+acceptance job checks out the fixed tag, verifies the complete draft asset set, hydrates its exact
+canonical public-demo archive, and runs the static desktop/mobile journey and accessibility gates.
+Its downloaded asset-set fingerprint must equal the first verifier's fingerprint.
+Draft acceptance cannot deploy to Pages. Both verification and publication require a
+non-prerelease draft and bind
 its exact title and normalized body to the committed
 `construction-intelligence-v1-release-notes.md` file. Configure the
 `construction-intelligence-v1-release` GitHub environment with required reviewers and protect the
 `v1.0.0` tag. A failed, cancelled, changed, or unapproved run leaves the release unpublished.
+
+After publication, the workflow dispatches `pages.yml` on `main` with `channel=release`. Pages
+downloads the exact five assets, independently verifies the tag/source identity, policy matrix,
+research thresholds, native nominal/recovery evidence, release notes, and archive hashes, then
+atomically replaces its build's demo directory. Missing or invalid release evidence fails the
+build; it cannot substitute preview data. Normal Pages pushes also select the canonical v1
+release after it is public, so a later source update cannot silently restore the preview.
+
+The deployed smoke check requires HTTP 200 and byte-identical `release-status.json`,
+`provenance.json`, `research-summary.json`, and `coppelia-evidence.json`. Wait for that Pages
+run to pass before checking Phase 7. Retry deployment without publishing another release with:
+
+```powershell
+gh workflow run pages.yml --ref main --field channel=release
+```
+
+Before publication, normal Pages runs retain the preview. `channel=release` requires an existing
+published, non-prerelease v1.0.0; only the reusable verification call can consume a draft, with
+deployment disabled.
+
+The static workbench loads its channel identity once at startup, verifies the release-status
+bytes against the provenance hash, and uses that identity for preview/release labels. Missing,
+inconsistent, or changed metadata produces a visible startup error. Public demo files are
+byte-preserved by Git attributes, including on Windows checkouts.

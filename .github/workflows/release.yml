@@ -108,12 +108,26 @@ jobs:
           )"
           echo "asset_set_sha256=$asset_set_sha256" >> "$GITHUB_OUTPUT"
 
-  publish:
+  canonical_pages:
     needs: verify
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
+    with:
+      channel: release
+      deploy: false
+      allow_draft: true
+      expected_asset_set_sha256: ${{ needs.verify.outputs.asset_set_sha256 }}
+
+  publish:
+    needs: [verify, canonical_pages]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+      actions: write
     environment: construction-intelligence-v1-release
     steps:
       - name: Revalidate protected main, draft state, and verified assets
@@ -166,3 +180,8 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit "$RELEASE_TAG" --draft=false
+      - name: Deploy the published canonical workbench
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run pages.yml --ref main --field channel=release

@@ -19,6 +19,7 @@ workbench/coverage/
 workbench/playwright-report/
 workbench/test-results/
 output/
+release-inputs/
 *.tsbuildinfo
 .coverage
 .coverage.*
