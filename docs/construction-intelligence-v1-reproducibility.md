@@ -39,6 +39,15 @@ single-GPU queue. The public run states are `queued`, `running`, `cancel_request
 commit, configuration digest, latest checkpoint, and append-only events survive API restarts. Events are
 also mirrored to one JSONL file per run.
 
+The subprocess entry point starts its five-second claim heartbeat before importing the ML stack or
+validating a resume. Training and matrix-evaluation dependency initialization have a five-minute
+monotonic deadline; their started events are emitted only after initialization succeeds. If it expires,
+the worker records `worker_launch_failed`, stops renewing its lease, and cannot begin training; the
+dispatcher must fence and terminate the owned process before freeing its GPU slot. Claims and
+cancellation are checked again after initialization. This prevents slow cold imports from consuming
+the normal sixty-second stale-worker lease without making a hung import an immortal job. These
+startup changes do not alter frozen experiment source or relax checkpoint compatibility checks.
+
 ```powershell
 # Blocking: streams persisted events until the job is quiescent.
 .\.venv\Scripts\python.exe scripts\train_construction_intelligence.py --profile unit --yes

@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from collections.abc import Callable
+from importlib import import_module
 from pathlib import Path
-from threading import Event, Thread
-from typing import cast
+from threading import Event, Lock, Thread
+from typing import TYPE_CHECKING, cast
 
 from embodied_skill_composer.construction.lab_registry import (
     LabRegistry,
@@ -15,7 +17,42 @@ from embodied_skill_composer.construction.lab_registry import (
     _process_identity,
 )
 from embodied_skill_composer.construction.models import HouseDesign
-from embodied_skill_composer.construction.training import TrainingConfig, train_swarm_policy
+
+if TYPE_CHECKING:
+    from embodied_skill_composer.construction.training import TrainingArtifacts, TrainingConfig
+
+_HEARTBEAT_INTERVAL_SECONDS = 5.0
+_INITIALIZATION_TIMEOUT_SECONDS = 300.0
+
+
+def _load_training_config(payload: object) -> TrainingConfig:
+    # Import torch and its dependencies only after the worker owns a live heartbeat.
+    from embodied_skill_composer.construction.training import TrainingConfig
+
+    return TrainingConfig.model_validate(payload)
+
+
+def _load_evaluation_dependencies() -> None:
+    # Bound cold evaluation imports by the same startup deadline as training.
+    import_module("embodied_skill_composer.construction.experiment_execution")
+    import_module("embodied_skill_composer.construction.experiment_protocol")
+
+
+def train_swarm_policy(
+    design: HouseDesign,
+    config: TrainingConfig,
+    *,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> TrainingArtifacts:
+    from embodied_skill_composer.construction.training import train_swarm_policy as execute
+
+    return execute(
+        design,
+        config,
+        progress_callback=progress_callback,
+        cancel_check=cancel_check,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -39,33 +76,38 @@ def main() -> int:
         raise SystemExit(f"unsupported worker job kind: {run['kind']}")
 
     input_payload = cast(dict[str, object], run["input"])
-    design = HouseDesign.model_validate(input_payload.get("design"))
     attempt = _integer_field(run, "attempt")
-    training_config: TrainingConfig | None = None
-    if run_kind == "training":
-        training_config = TrainingConfig.model_validate(run["config"])
-        latest_checkpoint = run.get("latest_checkpoint")
-        if latest_checkpoint:
-            training_config.resume_checkpoint = Path(str(latest_checkpoint))
-            resume_provenance: dict[str, object] = {
-                "run_id": args.run_id,
-                "attempt": attempt,
-                "checkpoint": str(latest_checkpoint),
-            }
-            registry.record_resume_provenance(
-                args.run_id,
-                resume_provenance,
-                claim_token=args.claim_token,
-            )
-            training_config.resume_provenance = resume_provenance
 
     stop_heartbeat = Event()
     claim_lost = Event()
+    initialization_complete = Event()
+    initialization_lock = Lock()
+    initialization_deadline = time.monotonic() + _INITIALIZATION_TIMEOUT_SECONDS
     process_identity = _process_identity(os.getpid())
 
+    def expire_initialization() -> None:
+        claim_lost.set()
+        registry.append_event(
+            args.run_id,
+            {
+                "event": "worker_launch_failed",
+                "error": "worker initialization exceeded its bounded deadline",
+            },
+            claim_token=args.claim_token,
+        )
+
     def heartbeat() -> None:
-        while not stop_heartbeat.wait(timeout=5):
+        while not stop_heartbeat.wait(timeout=_HEARTBEAT_INTERVAL_SECONDS):
             try:
+                with initialization_lock:
+                    if (
+                        not initialization_complete.is_set()
+                        and time.monotonic() >= initialization_deadline
+                    ):
+                        expire_initialization()
+                        # Stop renewing this lease. The dispatcher fences and kills
+                        # a stuck owned process before releasing its GPU slot.
+                        return
                 registry.update_run(
                     args.run_id,
                     pid=os.getpid(),
@@ -85,22 +127,6 @@ def main() -> int:
         heartbeat=True,
         claim_token=args.claim_token,
     )
-    started_event: dict[str, object] = {
-        "event": (
-            "training_started"
-            if run_kind == "training"
-            else "matrix_evaluation_started"
-        ),
-        "mode": "subprocess",
-        "attempt": attempt,
-        "pid": os.getpid(),
-    }
-    if run_kind == "matrix_evaluation":
-        started_event["matrix_id"] = _string_field(
-            cast(dict[str, object], run["config"]),
-            "matrix_id",
-        )
-    registry.append_event(args.run_id, started_event, claim_token=args.claim_token)
     thread.start()
     try:
         def cancel_requested() -> bool:
@@ -110,6 +136,49 @@ def main() -> int:
                 raise LostRunClaimError(args.run_id)
             return registry.cancel_requested(args.run_id)
 
+        design = HouseDesign.model_validate(input_payload.get("design"))
+        training_config: TrainingConfig | None = None
+        if run_kind == "training":
+            training_config = _load_training_config(run["config"])
+            latest_checkpoint = run.get("latest_checkpoint")
+            if latest_checkpoint:
+                training_config.resume_checkpoint = Path(str(latest_checkpoint))
+                resume_provenance: dict[str, object] = {
+                    "run_id": args.run_id,
+                    "attempt": attempt,
+                    "checkpoint": str(latest_checkpoint),
+                }
+                registry.record_resume_provenance(
+                    args.run_id,
+                    resume_provenance,
+                    claim_token=args.claim_token,
+                )
+                training_config.resume_provenance = resume_provenance
+        else:
+            _load_evaluation_dependencies()
+        # A claim may have been fenced or cancelled during dependency loading.
+        with initialization_lock:
+            if not claim_lost.is_set() and time.monotonic() >= initialization_deadline:
+                expire_initialization()
+            if cancel_requested():
+                raise RuntimeError("cancelled before job startup")
+            initialization_complete.set()
+        started_event: dict[str, object] = {
+            "event": (
+                "training_started"
+                if run_kind == "training"
+                else "matrix_evaluation_started"
+            ),
+            "mode": "subprocess",
+            "attempt": attempt,
+            "pid": os.getpid(),
+        }
+        if run_kind == "matrix_evaluation":
+            started_event["matrix_id"] = _string_field(
+                cast(dict[str, object], run["config"]),
+                "matrix_id",
+            )
+        registry.append_event(args.run_id, started_event, claim_token=args.claim_token)
         if training_config is not None:
             return _execute_training(
                 registry,
