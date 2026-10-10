@@ -1585,7 +1585,9 @@ def _simulator_bundle(
                 maximum_wheel_speed=10.0,
                 effective_wheel_radius_m=0.2,
                 position_gain=5.0,
-                waypoint_tolerance_m=0.22,
+                # Carry/return endpoints must remain inside the yard's .12 m
+                # tracking envelope; .22 allowed an unreachable measured return.
+                waypoint_tolerance_m=0.05,
                 formation_tolerance_m=0.5,
                 install_tolerance_m=0.3,
                 safety_distance_m=0.05,
