@@ -1,6 +1,6 @@
 # Construction Intelligence v1 — Phase 6 Evidence
 
-Status: local acceptance passed; protected-branch review is pending.
+Status: implementation complete; final revalidation and protected-branch review are pending.
 
 ## Product journey
 
@@ -36,7 +36,7 @@ and never switches to fixture data.
 | Bundle size | Native SVG research charts replace the full ECharts bundle. Three.js is split by dependency depth; the largest minified production chunk is 308.14 kB and Vite emits no chunk-size warning. |
 | Frontend quality | ESLint, strict TypeScript, Vitest/Testing Library with coverage, Playwright local/static desktop/mobile flows, and serious/critical axe gates are required in CI. |
 
-## Local verification
+## Local acceptance baseline
 
 - ESLint: passed with zero warnings.
 - TypeScript: passed.
@@ -52,3 +52,23 @@ and never switches to fixture data.
 
 Phase 6 remains unchecked in the roadmap until its pull request passes all protected
 remote gates and is merged.
+
+## Final hardening — 2026-10-10
+
+The dependency lock was updated with compatible versions only. A fresh `npm ci` and
+`npm audit` reported zero vulnerabilities; ESLint, TypeScript, all 37 frontend unit
+tests, and both production builds passed. Unit line coverage was 60.00%; the largest
+production chunk remained 308.14 kB with no chunk-size warning.
+
+The separate public-provenance fixture now uses a 0.05 m tracking tolerance within
+the unchanged 0.12 m physical-yard reserve. Three focused tracking-margin tests passed.
+This fixture correction does not change robot geometry or any safety threshold.
+
+The API launcher accepts `--coppelia-evidence-root` alongside `--registry-path`, so
+verified evidence in independent execution workspaces need not be copied into the
+default log directory. Eight isolated CLI tests passed, including loopback binding,
+default behavior, custom paths, invalid roots, and incompatible reload rejection.
+
+Final full Python coverage, browser/accessibility revalidation, canonical research
+result integration, and protected remote checks remain pending. Earlier baseline
+passes do not substitute for those final gates.
