@@ -189,11 +189,14 @@ complete file set, and rerun local verification.
 The manual workflow is intentionally hard-coded to the one v1 release:
 
 ```powershell
-gh workflow run release.yml
+gh workflow run release.yml --ref v1.0.0
 ```
 
 `.github/workflows/release.yml` requires `v1.0.0` to resolve to the current protected `main`
-commit. Its read-only verification job installs dependencies from the hash-locked Linux
+commit. Dispatch from the tag so the publication job's deployment ref matches the release
+environment's tag-only policy; checking out the tag within a run dispatched from `main` does not
+change that deployment ref. The required environment reviewer must approve publication.
+The workflow's read-only verification job installs dependencies from the hash-locked Linux
 constraints, downloads the existing draft, requires the exact indexed inventory, and verifies
 every identity, hash, archive, public-demo claim, selected checkpoint, and tag-to-HEAD relation.
 It passes only a SHA-256 fingerprint of that complete asset set to a fresh publication runner. The
