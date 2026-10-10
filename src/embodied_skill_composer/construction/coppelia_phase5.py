@@ -3460,6 +3460,16 @@ def _finalize_live_runtime_attestation(
     return session
 
 
+def _require_phase5_tracking_margin(
+    executor_config: DynamicCoppeliaConfig,
+    yard_config: Phase5PhysicalYardConfig,
+) -> None:
+    if executor_config.waypoint_tolerance_m > yard_config.route_tracking_error_m + 1e-9:
+        raise ValueError(
+            "Phase 5 waypoint tolerance exceeds the physical-yard reserved tracking margin"
+        )
+
+
 class Phase5FullCottageRunner:
     """Deterministic full-cottage wheel-control evidence orchestration."""
 
@@ -3507,6 +3517,7 @@ class Phase5FullCottageRunner:
             raise ValueError(
                 "Phase 5 executor footprint does not match the physical-yard plan"
             )
+        _require_phase5_tracking_margin(executor.config, physical_yard.configuration)
         if (
             _planned_robot_separation_m(physical_yard.configuration) + 1e-9
             < executor.config.safety_distance_m
@@ -3587,6 +3598,12 @@ class Phase5FullCottageRunner:
             try:
                 self.executor.stop()
             except Exception as stop_error:
+                self.trace.append({
+                    "timestamp_s": self.executor.simulation_time_s,
+                    "event": "simulator_stop_failed",
+                    "error_type": type(stop_error).__name__,
+                    "error": str(stop_error),
+                })
                 if error is None:
                     error = stop_error
             if self.evidence_kind == "live_coppelia":
@@ -3595,6 +3612,12 @@ class Phase5FullCottageRunner:
                         _finalize_live_runtime_attestation(self.executor)
                     )
                 except Exception as attestation_error:
+                    self.trace.append({
+                        "timestamp_s": self.executor.simulation_time_s,
+                        "event": "live_runtime_attestation_failed",
+                        "error_type": type(attestation_error).__name__,
+                        "error": str(attestation_error),
+                    })
                     if error is None:
                         error = attestation_error
 

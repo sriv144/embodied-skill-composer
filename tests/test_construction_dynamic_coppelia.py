@@ -20,6 +20,8 @@ from embodied_skill_composer.construction.coppelia_dynamic import (
 )
 from embodied_skill_composer.construction.coppelia_phase5 import (
     Phase5FullCottageRunner,
+    Phase5PhysicalYardConfig,
+    _require_phase5_tracking_margin,
     prepare_phase5_physical_yard,
     verify_phase5_artifact_bundle,
     write_phase5_artifact_bundle,
@@ -427,6 +429,75 @@ class FakeDynamicClient:
         assert self.stepping
         self.sim.integrate(self.sim.time_step or 0.05)
         self.steps += 1
+
+
+@pytest.mark.parametrize("initial_stop", [False, True])
+def test_asynchronous_stop_waits_for_confirmed_terminal_state(plan, initial_stop):
+    class DelayedStopSim(FakeDynamicSim):
+        def __init__(self):
+            super().__init__()
+            self.state = 1
+            self.pending_polls = 0
+            self.observed_pending = 0
+
+        def stopSimulation(self):
+            self.pending_polls = 3
+
+        def getSimulationState(self):
+            if self.pending_polls:
+                self.pending_polls -= 1
+                self.observed_pending += 1
+                return 1
+            if self.observed_pending:
+                self.state = self.simulation_stopped
+            return self.state
+
+    executor = DynamicCoppeliaExecutor(plan)
+    executor.sim = DelayedStopSim()
+    executor.is_ready = True
+    executor.started = not initial_stop
+    if initial_stop:
+        executor._ensure_stopped()
+    else:
+        executor.stop()
+    assert executor.sim.observed_pending == 3
+    assert executor.sim.getSimulationState() == executor.sim.simulation_stopped
+    assert executor.started is False
+    assert not executor.commands
+
+
+def test_asynchronous_stop_timeout_does_not_claim_stopped(plan):
+    class NeverStopsSim(FakeDynamicSim):
+        def stopSimulation(self):
+            self.state = 1
+
+    executor = DynamicCoppeliaExecutor(
+        plan, config=DynamicCoppeliaConfig(simulation_stop_timeout_s=0.001),
+    )
+    executor.sim = NeverStopsSim()
+    executor.sim.state = 1
+    executor.is_ready = True
+    executor.started = True
+    with pytest.raises(DynamicCoppeliaError, match="shutdown deadline"):
+        executor.stop()
+    assert executor.started is True
+    assert executor.sim.getSimulationState() != executor.sim.simulation_stopped
+
+
+@pytest.mark.parametrize("tolerance", [0.05, 0.12])
+def test_phase5_tracking_margin_accepts_only_reserved_error(tolerance):
+    _require_phase5_tracking_margin(
+        DynamicCoppeliaConfig(waypoint_tolerance_m=tolerance),
+        Phase5PhysicalYardConfig(route_tracking_error_m=0.12),
+    )
+
+
+def test_phase5_tracking_margin_rejects_overwide_waypoint_tolerance():
+    with pytest.raises(ValueError, match="reserved tracking margin"):
+        _require_phase5_tracking_margin(
+            DynamicCoppeliaConfig(waypoint_tolerance_m=0.22),
+            Phase5PhysicalYardConfig(route_tracking_error_m=0.12),
+        )
 
 
 @pytest.fixture(scope="module")
@@ -1097,7 +1168,7 @@ def _phase5_executor(scenario):
         maximum_wheel_speed=10.0,
         effective_wheel_radius_m=0.2,
         position_gain=5.0,
-        waypoint_tolerance_m=0.22,
+        waypoint_tolerance_m=0.05,
         formation_tolerance_m=0.5,
         install_tolerance_m=0.3,
         safety_distance_m=0.05,
@@ -1227,7 +1298,7 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
         physical_yard=physical_yard,
     ).run("nominal")
 
-    assert result.status == "completed"
+    assert result.status == "completed", result.error
     assert not result.live_gate_passed
     assert result.evidence_kind == "offline_harness"
     assert len(result.installed_module_ids) == len(scenario.plan.modules)

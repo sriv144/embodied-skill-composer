@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -68,6 +69,7 @@ class DynamicCoppeliaConfig(BaseModel):
     safety_distance_m: float = Field(default=0.34, gt=0)
     planned_robot_footprint_radius_m: float = Field(default=0.12, gt=0, le=1.0)
     max_steps_per_waypoint: int = Field(default=500, ge=10)
+    simulation_stop_timeout_s: float = Field(default=15.0, gt=0, le=120)
     disabled_settle_max_steps: int = Field(default=100, ge=3, le=2_000)
     disabled_settle_consecutive_samples: int = Field(default=3, ge=2, le=20)
     settled_linear_speed_mps: float = Field(default=0.02, ge=0, le=0.5)
@@ -246,6 +248,7 @@ class DynamicCoppeliaExecutor:
                 continue
             self.command_body_velocity(robot_id, 0.0, 0.0, 0.0, source="formation_hold")
         self.sim.stopSimulation()
+        self._wait_until_stopped()
         self.started = False
 
     def command_body_velocity(
@@ -2986,6 +2989,18 @@ class DynamicCoppeliaExecutor:
     def _ensure_stopped(self) -> None:
         if self.sim.getSimulationState() != self.sim.simulation_stopped:
             self.sim.stopSimulation()
+            self._wait_until_stopped()
+
+    def _wait_until_stopped(self) -> None:
+        # stopSimulation only requests a stop; cleanup can span several passes.
+        # Do not attest or mutate a supposedly stopped scene before it confirms.
+        deadline = time.monotonic() + self.config.simulation_stop_timeout_s
+        while self.sim.getSimulationState() != self.sim.simulation_stopped:
+            if time.monotonic() >= deadline:
+                raise DynamicCoppeliaError(
+                    "simulator did not confirm its stopped state before the shutdown deadline"
+                )
+            time.sleep(0.01)
 
     def _require_ready(self) -> None:
         if not self.is_ready:

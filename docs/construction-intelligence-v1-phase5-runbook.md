@@ -143,6 +143,16 @@ The recovery run must additionally show:
 The process exits successfully only when every scenario-specific acceptance gate
 passes and the evidence kind is `live_coppelia`.
 
+Simulator shutdown is asynchronous. After zeroing the active bases' wheels, the
+executor waits for a measured `simulation_stopped` state before finalizing the
+runtime attestation or editing the stopped scene. This wait has a fifteen-second
+default deadline; a timeout fails the run rather than claiming a stopped state.
+Stop and attestation errors remain in the diagnostic trace even when execution
+has already failed for another reason.
+The runner rejects any waypoint tolerance larger than the physical yard's reserved
+route-tracking margin. Tests and live executors must use the same safety envelope;
+looser fake-controller tolerances cannot substitute for feasible measured routes.
+
 ## Evidence bundle schema
 
 Each successful or diagnostically useful connected run produces:
@@ -159,6 +169,14 @@ Each successful or diagnostically useful connected run produces:
 | `metrics.json` | Acceptance gates and run diagnostics |
 | `report.md` | Human-readable result and limitations |
 | `construction_intelligence.ttt` | Reusable saved live scene |
+
+If a connected attempt cannot produce a verified native bundle, the CLI preserves
+a separate `gate_failure.json` diagnostic record. It must not be treated as native
+evidence, does not claim a passed live gate, and cannot satisfy Phase 5 acceptance.
+A failed but runtime-attested native bundle remains available for diagnosis. Its
+failure record is stored in a sibling `<run-id>-diagnostics` directory so the exact
+native artifact inventory remains verifiable; earlier failures without a native
+manifest store the record directly in the run directory.
 
 The manifest schema is
 `construction_intelligence.coppelia_bundle.v1`. Every artifact except the manifest
