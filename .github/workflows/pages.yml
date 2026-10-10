@@ -34,6 +34,8 @@ on:
       - "scripts/stage_construction_pages.py"
       - "scripts/resolve_construction_pages.py"
       - "src/embodied_skill_composer/construction/release_assets.py"
+      - "src/embodied_skill_composer/construction/coppelia_archive.py"
+      - "src/embodied_skill_composer/construction/public_demo_provenance.py"
 
 permissions:
   contents: read

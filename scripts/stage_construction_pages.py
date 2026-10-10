@@ -19,7 +19,7 @@ from embodied_skill_composer.construction.release_assets import (  # noqa: E402
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Verify all five tagged v1.0.0 release assets and atomically replace "
+            "Verify the complete indexed v1.0.0 release asset set and atomically replace "
             "the Pages build's public demo with their canonical evidence."
         )
     )

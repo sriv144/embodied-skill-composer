@@ -51,6 +51,7 @@ def export_public_demo(
     source: SourceIdentity | None = None,
     release_version: str | None = None,
     release_tag: str | None = None,
+    coppelia_archive_index: Path | None = None,
 ) -> dict[str, object]:
     """Export a fixture preview or package explicit canonical evidence."""
 
@@ -68,6 +69,7 @@ def export_public_demo(
             channel=channel,
             release_version=release_version,
             release_tag=release_tag,
+            coppelia_archive_index=coppelia_archive_index,
         )
     if channel == "release":
         raise ValueError(
@@ -371,6 +373,7 @@ def main() -> None:
     parser.add_argument("--deterministic-bundle", type=Path)
     parser.add_argument("--research-bundle", type=Path)
     parser.add_argument("--simulator-bundle", type=Path)
+    parser.add_argument("--coppelia-archive-index", type=Path)
     parser.add_argument("--source-commit")
     dirty_group = parser.add_mutually_exclusive_group()
     dirty_group.add_argument(
@@ -422,6 +425,7 @@ def main() -> None:
             or args.deterministic_bundle is not None
             or args.research_bundle is not None
             or args.simulator_bundle is not None
+            or args.coppelia_archive_index is not None
             or args.expected_channel is not None
             or args.compare_output is not None
             or args.release_version is not None
@@ -488,6 +492,7 @@ def main() -> None:
         source=_explicit_source(args),
         release_version=release_version,
         release_tag=release_tag,
+        coppelia_archive_index=args.coppelia_archive_index,
     )
     print(
         json.dumps(
