@@ -111,6 +111,8 @@ def build_local_research_summary(registry: LabRegistry) -> dict[str, object]:
         else {}
     )
     completion = _matrix_completion_event(registry, matrix_id)
+    if completion is None and evaluation is not None:
+        completion = _cli_matrix_completion_artifacts(registry, matrix, evaluation)
     acceptance = completion.get("acceptance") if completion else None
     ablations = completion.get("ablations", []) if completion else []
     runs_value = matrix.get("runs")
@@ -274,6 +276,152 @@ def _matrix_completion_event(
             if payload.get("event") == "matrix_evaluation_completed":
                 return payload
     return None
+
+
+def _cli_matrix_completion_artifacts(
+    registry: LabRegistry,
+    matrix: dict[str, object],
+    evaluation: dict[str, object],
+) -> dict[str, object] | None:
+    """Verify CLI results without creating job events or evaluating policies again."""
+
+    # Keep the training stack out of absent/in-progress summaries. These helpers
+    # operate only on persisted evaluation and validation data, never policy rollouts.
+    from pydantic import TypeAdapter
+
+    from embodied_skill_composer.construction.evaluation import (
+        EvaluationGridEntry,
+        EvaluationSuite,
+        validate_evaluation_grid,
+    )
+    from embodied_skill_composer.construction.experiment_execution import (
+        BASELINE_CONTROLLERS,
+        MatrixSelectionEvidence,
+        PrimaryAcceptanceAudit,
+        audit_ablation_hypotheses,
+        audit_primary_acceptance,
+    )
+    from embodied_skill_composer.construction.experiment_protocol import (
+        AblationDecision,
+        ExperimentProtocol,
+        protocol_digest,
+    )
+
+    try:
+        matrix_id = str(matrix["id"])
+        protocol = ExperimentProtocol.model_validate(matrix["protocol"])
+        if protocol_digest(protocol) != matrix["protocol_digest"]:
+            raise ValueError("registered matrix protocol digest differs")
+        suite = EvaluationSuite.model_validate(evaluation["payload"])
+        root = Path(str(evaluation["artifact_dir"])).resolve()
+        if (
+            evaluation.get("matrix_id") != matrix_id
+            or evaluation.get("split") != protocol.evaluation.split
+            or suite.evaluation_id != evaluation["id"]
+            or suite.expected_split != protocol.evaluation.split
+            or suite.seeds != protocol.evaluation.scenario_seeds
+            or suite.controllers != protocol.evaluation.controllers
+            or EvaluationSuite.model_validate(_cli_evidence_json(root / "evaluation.json"))
+            != suite
+        ):
+            raise ValueError("registered evaluation identity or persisted payload differs")
+        policy_grid = [EvaluationGridEntry(controller=name) for name in BASELINE_CONTROLLERS]
+        policy_grid.extend(
+            EvaluationGridEntry(
+                controller=variant.algorithm,
+                experiment_id=protocol.experiment_id,
+                experiment_variant=variant.name,
+                training_seed=seed,
+            )
+            for variant in protocol.variants
+            for seed in protocol.training_seeds
+        )
+        grid = validate_evaluation_grid(
+            suite.episodes,
+            scenario_seeds=protocol.evaluation.scenario_seeds,
+            policy_grid=policy_grid,
+            failure_modes=protocol.evaluation.failure_modes,
+            expected_split=protocol.evaluation.split,
+        )
+        if suite.grid_validation != grid:
+            raise ValueError("persisted held-out grid validation differs")
+
+        # This is the CLI's documented evidence-root layout, including custom
+        # --evidence-root locations. No machine-wide search or registry mutation.
+        selection_path = root.parent.parent / "validation" / matrix_id / "matrix_selections.json"
+        selections = MatrixSelectionEvidence.model_validate(_cli_evidence_json(selection_path))
+        frozen = {
+            str(item["run_key"]): item["selection"]
+            for item in registry.list_policy_selections(matrix_id)
+        }
+        selected = {item.run_key: item.selected.model_dump(mode="json") for item in selections.selections}
+        runs = matrix["runs"]
+        if not isinstance(runs, list) or not all(isinstance(item, dict) for item in runs):
+            raise ValueError("matrix runs are invalid")
+        run_keys = {str(item["run_key"]) for item in runs}
+        if (
+            selections.matrix_id != matrix_id
+            or selections.protocol_digest != matrix["protocol_digest"]
+            or len(selections.selections) != 20
+            or len(run_keys) != 20
+            or set(selected) != run_keys
+            or selected != frozen
+        ):
+            raise ValueError("validation evidence differs from frozen matrix selections")
+        algorithms = {variant.name: variant.algorithm for variant in protocol.variants}
+        for item in selections.selections:
+            if (
+                item.matrix_id != matrix_id
+                or item.selected.experiment_id != protocol.experiment_id
+                or item.selected.training_seed not in protocol.training_seeds
+                or item.selected.scenario_seeds != protocol.selection.scenario_seeds
+                or item.selected.required_checkpoint_fractions != protocol.checkpoint_fractions
+                or sorted(candidate.result.checkpoint_fraction for candidate in item.candidates)
+                != protocol.checkpoint_fractions
+            ):
+                raise ValueError("validation checkpoint evidence is incomplete")
+            for candidate in item.candidates:
+                if (
+                    candidate.result.experiment_id != item.selected.experiment_id
+                    or candidate.result.experiment_variant != item.selected.experiment_variant
+                    or candidate.result.training_seed != item.selected.training_seed
+                    or candidate.result.scenario_seeds != protocol.selection.scenario_seeds
+                    or candidate.result.source_commit != item.selected.source_commit
+                    or candidate.result.configuration_digest != item.selected.configuration_digest
+                ):
+                    raise ValueError("validation checkpoint identity differs from its frozen selection")
+                validate_evaluation_grid(
+                    candidate.episodes,
+                    scenario_seeds=protocol.selection.scenario_seeds,
+                    policy_grid=[EvaluationGridEntry(
+                        controller=algorithms[item.selected.experiment_variant],
+                        experiment_id=item.selected.experiment_id,
+                        experiment_variant=item.selected.experiment_variant,
+                        training_seed=item.selected.training_seed,
+                    )],
+                    failure_modes=protocol.selection.failure_modes,
+                    expected_split=protocol.selection.split,
+                )
+        acceptance = PrimaryAcceptanceAudit.model_validate(_cli_evidence_json(root / "acceptance.json"))
+        ablations = TypeAdapter(list[AblationDecision]).validate_python(_cli_evidence_json(root / "ablations.json"))
+        if acceptance != audit_primary_acceptance(suite, protocol) or ablations != audit_ablation_hypotheses(
+            suite, protocol, selection_evidence=selections,
+        ):
+            raise ValueError("persisted acceptance or ablations differ from their evidence")
+        return {
+            "acceptance": acceptance.model_dump(mode="json"),
+            "ablations": [item.model_dump(mode="json") for item in ablations],
+        }
+    except (OSError, ValueError, KeyError, TypeError, IndexError):
+        return None
+
+
+def _cli_evidence_json(path: Path) -> object:
+    """Read only bounded regular artifacts, not redirected links or device files."""
+
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 32 * 1024**2:
+        raise ValueError("CLI evidence artifact is missing, linked, or oversized")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _learning_curves(
