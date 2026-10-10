@@ -1171,6 +1171,8 @@ def _phase5_executor(scenario):
         maximum_wheel_speed=10.0,
         effective_wheel_radius_m=0.2,
         position_gain=5.0,
+        # Keep measured carry/return endpoints inside the physical yard's
+        # reserved .12 m tracking envelope, including exact opening geometry.
         waypoint_tolerance_m=0.05,
         formation_tolerance_m=0.5,
         install_tolerance_m=0.3,

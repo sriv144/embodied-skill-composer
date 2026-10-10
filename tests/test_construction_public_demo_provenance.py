@@ -534,9 +534,11 @@ def test_release_ties_heldout_episodes_to_selected_checkpoint_lineage(
         )
 
 
+@pytest.mark.parametrize("compact", [False, True])
 def test_release_export_covers_every_emitted_artifact_and_round_trips(
     tmp_path: Path,
     attested_simulator_bundle_template: Path,
+    compact: bool,
 ) -> None:
     deterministic = _deterministic_bundle(
         tmp_path / "deterministic",
@@ -549,6 +551,7 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
         tmp_path / "simulator",
     )
     output = tmp_path / "public"
+    archive_index = _simulator_archive_index(simulator) if compact else None
 
     manifest = export_public_demo_bundle(
         output,
@@ -559,6 +562,7 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
         channel="release",
         release_version=RELEASE_VERSION,
         release_tag=RELEASE_TAG,
+        coppelia_archive_index=archive_index,
     )
     verified = verify_public_demo_export(
         output,
@@ -607,12 +611,87 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
             (
                 item["path"].startswith(f"evidence/coppelia/{scenario}/")
                 or item["path"] == f"evidence/coppelia/visualizations/{scenario}.mp4"
+                or compact and item["path"].startswith("construction-intelligence-v1-coppelia-evidence-part-")
             )
             and Path(item["path"]).suffix
             for item in references
         )
+    if compact:
+        from embodied_skill_composer.construction.coppelia_archive import load_coppelia_archive_index
+        from embodied_skill_composer.construction.release_assets import _verify_coppelia_release_evidence
+
+        _verify_coppelia_release_evidence(
+            archive_index.parent, load_coppelia_archive_index(archive_index), output,
+            tmp_path / "native-verification", disk_budget_bytes=1024**3,
+        )
+        missing_binding = dict(manifest)
+        missing_binding.pop("coppelia_archive")
+        missing_binding["manifest_payload_sha256"] = None
+        missing_binding["manifest_payload_sha256"] = hashlib.sha256(
+            (json.dumps(missing_binding, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        ).hexdigest()
+        _write_json(output / "provenance.json", missing_binding)
+        with pytest.raises(PublicDemoExportError, match="requires a provenance binding"):
+            verify_public_demo_export(output)
+        _write_json(output / "provenance.json", manifest)
+        assert not (output / "evidence/coppelia/nominal/planned_vs_measured_replay.json").exists()
+        assert not (output / "evidence/coppelia/recovery/measured_telemetry.jsonl").exists()
+        assert manifest["coppelia_archive"]["sha256"] == _sha256(archive_index)
+        assert (output / "evidence/coppelia/archive-index.json").read_bytes() == archive_index.read_bytes()
+        referenced_parts = {
+            reference["href"].rsplit("/", 1)[-1]
+            for scenario in ("nominal", "recovery")
+            for reference in coppelia_summary[scenario]["artifact_references"]
+            if reference["href"].startswith("https://github.com/")
+        }
+        assert referenced_parts == {part["file"] for part in _read_json(archive_index)["parts"]}
+        for scenario in ("nominal", "recovery"):
+            assert coppelia_summary[scenario]["manifest"] == _read_json(simulator.parent / scenario / "manifest.json")
+            assert coppelia_summary[scenario]["metrics"] == _read_json(simulator.parent / scenario / "metrics.json")
+        index = _read_json(archive_index)
+        index["descriptor_sha256"] = "f" * 64
+        _write_json(archive_index, index)
+        with pytest.raises(PublicDemoExportError, match="source or descriptor identity differs"):
+            export_public_demo_bundle(
+                tmp_path / "wrong-index", deterministic_bundle=deterministic,
+                research_bundle=research, simulator_bundle=simulator, source=SOURCE,
+                channel="release", release_version=RELEASE_VERSION, release_tag=RELEASE_TAG,
+                coppelia_archive_index=archive_index,
+            )
     assert len(_read_json(output / "experiment-matrices.json")) == 1
     assert len(_read_json(output / "policies.json")) == 20
+
+
+def _simulator_archive_index(descriptor_path: Path) -> Path:
+    """Exercise real byte-preserving shard creation against the native fixture."""
+    from embodied_skill_composer.construction.coppelia_archive import (
+        COPPELIA_ARCHIVE_INDEX_FILE,
+    )
+    from embodied_skill_composer.construction.release_assets import _stage_coppelia_release_evidence
+
+    destination = descriptor_path.parent / "release-archive"
+    _stage_coppelia_release_evidence(descriptor_path, destination)
+    return destination / COPPELIA_ARCHIVE_INDEX_FILE
+
+
+def test_public_archive_index_requires_binding_even_after_provenance_rehash(tmp_path: Path) -> None:
+    descriptor = _deterministic_bundle(tmp_path / "input", status="fixture", complete=False)
+    output = tmp_path / "public"
+    manifest = export_public_demo_bundle(output, deterministic_bundle=descriptor, source=SOURCE)
+    path = output / "evidence/coppelia/archive-index.json"
+    _write_json(path, {})
+    manifest["artifacts"].append({
+        "path": "evidence/coppelia/archive-index.json", "bytes": path.stat().st_size,
+        "sha256": _sha256(path), "source_kind": "simulator", "role": "archive_index",
+    })
+    manifest["artifact_count"] += 1
+    manifest["manifest_payload_sha256"] = None
+    manifest["manifest_payload_sha256"] = hashlib.sha256(
+        (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    ).hexdigest()
+    _write_json(output / "provenance.json", manifest)
+    with pytest.raises(PublicDemoExportError, match="requires a provenance binding"):
+        verify_public_demo_export(output)
 
 
 def test_coppelia_release_packager_renders_deterministic_measured_videos(
@@ -1616,7 +1695,11 @@ def _simulator_bundle(
             evidence_kind="live_coppelia",
             physical_yard=physical_yard,
         ).run(scenario)
-        assert live.status == "completed"
+        assert live.status == "completed", {
+            "error": live.error,
+            "acceptance": live.acceptance,
+            "metrics": live.metrics,
+        }
         assert live.live_gate_passed
         phase5_manifest = write_phase5_artifact_bundle(
             run_dir,

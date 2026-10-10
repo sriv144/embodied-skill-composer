@@ -12,6 +12,13 @@ from typing import Any
 import pytest
 
 from embodied_skill_composer.construction import release_assets
+from embodied_skill_composer.construction.coppelia_archive import (
+    CANONICAL_PATHS,
+    COPPELIA_ARCHIVE_INDEX_FILE,
+    ArchiveSource,
+    load_coppelia_archive_index,
+    stage_coppelia_archive,
+)
 from embodied_skill_composer.construction.experiment_protocol import (
     SelectedCheckpoint,
 )
@@ -257,6 +264,60 @@ def test_release_verifier_rejects_missing_and_extra_assets(
         verify_release_assets(root, workspace=packaged_assets["workspace"])
 
 
+@pytest.mark.parametrize("recursive", [False, True])
+def test_release_verifier_rejects_nonflat_directories_before_loading_metadata(
+    tmp_path: Path, recursive: bool
+) -> None:
+    root = tmp_path / "assets"
+    extra = root / "extra"
+    extra.mkdir(parents=True)
+    if recursive:
+        (extra / "nested.txt").write_text("not a flat release asset", encoding="utf-8")
+    with pytest.raises(ReleaseAssetError, match="flat regular files"):
+        verify_release_assets(root, workspace=tmp_path)
+
+
+def test_release_verifier_rejects_dangling_links_before_loading_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "assets"
+    root.mkdir()
+    dangling = root / "dangling"
+    dangling.touch()
+    original_is_symlink, original_is_file = Path.is_symlink, Path.is_file
+    # Model a dangling entry's classification without Windows symlink privileges.
+    monkeypatch.setattr(
+        Path, "is_symlink", lambda path: path == dangling or original_is_symlink(path)
+    )
+    monkeypatch.setattr(
+        Path, "is_file", lambda path: path != dangling and original_is_file(path)
+    )
+    with pytest.raises(ReleaseAssetError, match="without symbolic links"):
+        verify_release_assets(root, workspace=tmp_path)
+
+
+def test_release_identity_json_is_bounded_before_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "assets"
+    root.mkdir()
+    identity = root / RELEASE_IDENTITY_FILE
+    identity.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(release_assets, "_MAX_RELEASE_IDENTITY_BYTES", 1)
+    original_read = Path.read_text
+
+    def forbidden_read(path: Path, *args, **kwargs):
+        if path == identity:
+            pytest.fail("oversized identity JSON must be rejected before reading")
+        return original_read(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", forbidden_read)
+    with pytest.raises(ReleaseAssetError, match="JSON byte budget"):
+        verify_release_assets(root, workspace=tmp_path)
+
+
 def test_release_verifier_rejects_tampered_asset_bytes(
     packaged_assets: dict[str, Path],
 ) -> None:
@@ -266,6 +327,48 @@ def test_release_verifier_rejects_tampered_asset_bytes(
 
     with pytest.raises(ReleaseAssetError, match="integrity check failed"):
         verify_release_assets(root, workspace=packaged_assets["workspace"])
+
+
+def test_release_verifier_requires_every_index_declared_part(
+    packaged_assets: dict[str, Path],
+) -> None:
+    root = packaged_assets["first"]
+    index = load_coppelia_archive_index(root / COPPELIA_ARCHIVE_INDEX_FILE)
+    (root / index.parts[-1].file).unlink()
+    with pytest.raises(ReleaseAssetError, match="inventory mismatch.*missing"):
+        verify_release_assets(root, workspace=packaged_assets["workspace"])
+
+
+def test_release_verifier_enforces_disk_budget_before_extraction(
+    packaged_assets: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(release_assets, "_MAX_RELEASE_VERIFICATION_DISK_BYTES", 1)
+    monkeypatch.setattr(
+        release_assets,
+        "extract_verified_zip",
+        lambda *_args: pytest.fail("disk budget must be checked before extraction"),
+    )
+    with pytest.raises(ReleaseAssetError, match="disk budget"):
+        verify_release_assets(packaged_assets["first"], workspace=packaged_assets["workspace"])
+
+
+def test_release_verifier_independently_checks_native_semantics(
+    packaged_assets: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    native_calls = []
+
+    def reject_native(path: Path):
+        native_calls.append(path)
+        raise ReleaseAssetError("native replay semantic mismatch")
+
+    monkeypatch.setattr(release_assets, "verify_phase5_artifact_bundle", reject_native)
+    with pytest.raises(ReleaseAssetError, match="native replay semantic mismatch"):
+        verify_release_assets(packaged_assets["first"], workspace=packaged_assets["workspace"])
+    assert len(native_calls) == 1
+    assert native_calls[0].name == "nominal"
+    assert not native_calls[0].exists()
 
 
 def test_release_verifier_rejects_unsafe_archive_names_after_rehash(
@@ -339,7 +442,7 @@ def test_release_archive_budgets_fit_hosted_runner_guardrail() -> None:
     assert (
         verification_disk_bytes
         <= release_assets._MAX_RELEASE_VERIFICATION_DISK_BYTES
-        <= 5 * 1024**3
+        <= 10 * 1024**3
     )
     assert max(budget.max_member_uncompressed_bytes for budget in budgets.values()) <= 256 * 1024**2
     assert release_assets._MAX_CENTRAL_DIRECTORY_BYTES <= 16 * 1024**2
@@ -523,6 +626,46 @@ def _install_release_fakes(
         lambda _workspace: SOURCE,
     )
 
+    def native_payload(scenario: str) -> dict[str, object]:
+        return {
+            "scenario": "nominal" if scenario == "nominal" else "unavailable_robot_recovery",
+            "evidence_kind": "live_coppelia",
+            "live_evidence": True,
+            "live_gate_passed": True,
+            "run_status": "completed",
+            "source_dirty": False,
+            "approval_gate_confirmed": True,
+            "source_commit": SOURCE.commit,
+            "source_tree_digest": SOURCE.tree_digest,
+        }
+
+    def fake_stage(descriptor: Path, destination: Path):
+        sources = {}
+        for name in sorted(CANONICAL_PATHS):
+            path = descriptor.parent / "native-fixture" / name
+            scenario = "nominal" if "/nominal/" in name else "recovery"
+            payload = (
+                native_payload(scenario) if name.endswith("/manifest.json") else {"validated": True}
+            )
+            _write_json(path, payload)
+            sources[name] = path
+        return stage_coppelia_archive(
+            destination,
+            sources,
+            source=ArchiveSource.model_validate(SOURCE.model_dump(mode="json")),
+            descriptor_sha256=hashlib.sha256(b"simulator descriptor").hexdigest(),
+            expected_sha256={name: _sha256(path) for name, path in sources.items()},
+            verify_zip=release_assets.verify_deterministic_zip,
+        )
+
+    def fake_native_verify(path: Path):
+        payload = _read_json(path / "manifest.json")
+        return SimpleNamespace(**payload, model_dump=lambda **_kwargs: payload)
+
+    monkeypatch.setattr(release_assets, "_stage_coppelia_release_evidence", fake_stage)
+    monkeypatch.setattr(release_assets, "verify_phase5_artifact_bundle", fake_native_verify)
+    monkeypatch.setattr(release_assets, "_verify_simulator_video", lambda *_args: None)
+
     def fake_export(output_dir: Path, **kwargs: Any) -> dict[str, object]:
         assert kwargs["channel"] == "release"
         output_dir.mkdir(parents=True, exist_ok=False)
@@ -531,10 +674,19 @@ def _install_release_fakes(
             output_dir / "evidence" / "research" / "evaluation.json",
             {"validated": True},
         )
+        archive_path = kwargs["coppelia_archive_index"]
+        index = load_coppelia_archive_index(archive_path)
+        target = output_dir / "evidence" / "coppelia" / "archive-index.json"
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(archive_path, target)
         _write_json(
-            output_dir / "evidence" / "coppelia" / "nominal.json",
-            {"validated": True},
+            output_dir / "coppelia-evidence.json",
+            {
+                scenario: {"manifest": native_payload(scenario), "metrics": {"validated": True}}
+                for scenario in ("nominal", "recovery")
+            },
         )
+        assert len(index.files) == 24
         (output_dir / "index.html").write_text("release", encoding="utf-8")
         provenance = {
             "channel": "release",

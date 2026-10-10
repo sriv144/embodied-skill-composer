@@ -62,3 +62,15 @@ def test_release_workflow_rechecks_notes_and_non_prerelease_state() -> None:
     assert workflow.count("'.isPrerelease'") == 2
     assert "release_notes_sha256: ${{ steps.release_notes.outputs.release_notes_sha256 }}" in workflow
     assert "EXPECTED_RELEASE_NOTES_SHA256: ${{ needs.verify.outputs.release_notes_sha256 }}" in workflow
+
+
+def test_release_notes_describe_the_complete_indexed_native_asset_contract() -> None:
+    notes = (
+        WORKSPACE / "docs" / "construction-intelligence-v1-release-notes.md"
+    ).read_text(encoding="utf-8")
+
+    assert "construction-intelligence-v1-coppelia-evidence.json" in notes
+    assert "construction-intelligence-v1-coppelia-evidence-part-000001.zip" in notes
+    assert "construction-intelligence-v1-coppelia-evidence.zip" not in notes
+    assert "preserve every original native byte" in notes
+    assert "exactly five top-level assets" not in notes
