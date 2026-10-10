@@ -22,15 +22,25 @@ def main() -> None:
         type=Path,
         help="Optional isolated durable-run database (useful for acceptance tests).",
     )
+    parser.add_argument(
+        "--coppelia-evidence-root",
+        type=Path,
+        help="Existing directory containing native Phase 5 run bundles.",
+    )
     args = parser.parse_args()
     registry_path = args.registry_path.resolve() if args.registry_path else None
+    evidence_root = (
+        args.coppelia_evidence_root.resolve() if args.coppelia_evidence_root else None
+    )
+    if evidence_root is not None and not evidence_root.is_dir():
+        parser.error("--coppelia-evidence-root must be an existing directory")
+    if args.reload and (registry_path or evidence_root):
+        parser.error("--reload cannot be combined with custom registry or evidence paths")
     if registry_path:
         registry_path.parent.mkdir(parents=True, exist_ok=True)
-    if args.reload and registry_path:
-        parser.error("--reload cannot be combined with --registry-path")
     application = (
-        create_app(registry_path=registry_path)
-        if registry_path
+        create_app(registry_path=registry_path, coppelia_evidence_root=evidence_root)
+        if registry_path or evidence_root
         else "embodied_skill_composer.construction.api:app"
     )
     uvicorn.run(
