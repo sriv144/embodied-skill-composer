@@ -23,21 +23,31 @@ read-only browser workbench behind hash-verified evidence artifacts.
 
 ## Release assets
 
-The release contains exactly five top-level assets:
+The release contains five fixed metadata/archive assets plus the bounded Coppelia
+ZIP parts named by its native-evidence index:
 
 1. `construction-intelligence-v1-public-demo.zip` — the hash-pinned static workbench
    data and canonical public evidence surface.
 2. `construction-intelligence-v1-research-evidence.zip` — frozen protocol, run,
    selection, evaluation, aggregation, threshold, and ablation artifacts.
-3. `construction-intelligence-v1-coppelia-evidence.zip` — independently verified
-   native nominal/recovery bundles plus measured-replay videos.
+3. `construction-intelligence-v1-coppelia-evidence.json` — the exact original-file
+   inventory, source identity, chunk order, byte counts, and hashes for independently
+   verified nominal/recovery bundles and measured-replay videos. Its contiguous
+   `construction-intelligence-v1-coppelia-evidence-part-000001.zip` and subsequent
+   parts preserve every original native byte; reconstruct one scenario at a time
+   under the documented disk budget.
 4. `construction-intelligence-v1-selected-policies.zip` — selected checkpoints,
    manifests, ONNX actors, and any required external-data sidecars.
 5. `construction-intelligence-v1-release-assets.json` — source/tag identity, exact
-   asset inventory, byte counts, and SHA-256 digests.
+   logical asset inventory, byte counts, and SHA-256 digests. The Coppelia index
+   additionally binds the exact physical ZIP-part inventory.
 
 Every archive is deterministic, path-bounded, size-bounded, CRC-checked, and bound to
-the protected source commit and `v1.0.0` tag. The publication workflow verifies the
+the protected release source commit and `v1.0.0` tag. Native simulator source identity
+is retained separately in the hash-bound index and manifests. The public-demo ZIP
+keeps compact, byte-identical manifests, metrics, reports, scenes, and videos; raw
+replay, telemetry, commands, and traces remain downloadable through the indexed
+native ZIP parts. The publication workflow verifies the
 already-uploaded draft assets before making the release public; it does not rebuild or
 repair evidence in CI.
 

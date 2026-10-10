@@ -53,9 +53,18 @@ from embodied_skill_composer.construction.coppelia_phase5 import (
     Phase5ProvenanceManifest,
     verify_phase5_artifact_bundle,
 )
+from embodied_skill_composer.construction.coppelia_archive import (
+    COPPELIA_ARCHIVE_INDEX_FILE,
+    CoppeliaArchiveIndex,
+    load_coppelia_archive_index,
+)
 
 
 PROVENANCE_SCHEMA_VERSION = "construction-intelligence-public-demo-provenance-v1"
+COPPELIA_PUBLIC_INDEX_PATH = "evidence/coppelia/archive-index.json"
+RELEASE_ASSET_BASE_URL = "https://github.com/sriv144/embodied-skill-composer/releases/download/"
+_COMPACT_SIMULATOR_SUFFIXES = frozenset({"manifest", "metrics", "report", "scene", "video"})
+_MAX_COMPACT_SIMULATOR_FILE_BYTES = 32 * 1024**2
 BUNDLE_SCHEMA_VERSION = "construction-intelligence-public-demo-input-v1"
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _GIT_COMMIT_PATTERN = r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
@@ -257,6 +266,7 @@ def export_public_demo_bundle(
     simulator_bundle: Path | None = None,
     release_version: str | None = None,
     release_tag: str | None = None,
+    coppelia_archive_index: Path | None = None,
 ) -> dict[str, object]:
     """Build a deterministic public bundle from hash-pinned evidence descriptors."""
 
@@ -283,6 +293,11 @@ def export_public_demo_bundle(
         validated_research,
         validated_simulator,
     )
+    archive = None
+    if coppelia_archive_index is not None:
+        if channel != "release" or simulator is None:
+            raise PublicDemoExportError("Coppelia archive binding requires release simulator evidence")
+        archive = _validate_simulator_archive(coppelia_archive_index, simulator)
 
     destination = output_dir.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -330,12 +345,22 @@ def export_public_demo_bundle(
             ):
                 artifact_sources[name] = ("generated", "research_absence")
         if simulator is not None and validated_simulator is not None:
-            _copy_bundle(simulator, staging, artifact_sources)
+            _copy_bundle(
+                simulator, staging, artifact_sources,
+                compact_simulator=archive is not None,
+            )
+            if coppelia_archive_index is not None:
+                index_target = staging / COPPELIA_PUBLIC_INDEX_PATH
+                index_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(coppelia_archive_index, index_target)
+                artifact_sources[COPPELIA_PUBLIC_INDEX_PATH] = ("simulator", "archive_index")
             _write_simulator_view(
                 staging,
                 simulator,
                 validated_simulator,
                 artifact_sources,
+                archive=archive,
+                release_tag=release_tag,
             )
         else:
             _write_json(
@@ -380,6 +405,7 @@ def export_public_demo_bundle(
             artifact_sources=artifact_sources,
             release_version=release_version,
             release_tag=release_tag,
+            coppelia_archive_index=coppelia_archive_index,
         )
         _write_json(staging / _PROVENANCE_NAME, provenance)
         verify_public_demo_export(staging)
@@ -519,6 +545,7 @@ def verify_public_demo_export(
         release_version=release_version,
         release_tag=release_tag,
     )
+    _verify_public_archive_binding(root, payload)
     return payload
 
 
@@ -1569,12 +1596,99 @@ def _validate_export_claims(
         )
 
 
+def _validate_simulator_archive(path: Path, bundle: _LoadedBundle) -> CoppeliaArchiveIndex:
+    """Bind the compact view to the already fully validated native descriptor."""
+    try:
+        archive = load_coppelia_archive_index(path)
+    except ValueError as exc:
+        raise PublicDemoExportError(str(exc)) from exc
+    if (
+        archive.source.model_dump(mode="json") != bundle.manifest.source.model_dump(mode="json")
+        or archive.descriptor_sha256 != bundle.sha256
+    ):
+        raise PublicDemoExportError("Coppelia archive source or descriptor identity differs")
+    indexed = {item.path: item for item in archive.files}
+    files = {item.target: bundle.files[item.role] for item in bundle.manifest.artifacts}
+    for prefix in ("nominal", "recovery"):
+        files[f"evidence/coppelia/{prefix}/runtime_attestation.json"] = (
+            bundle.files[f"{prefix}_manifest"].parent / "runtime_attestation.json"
+        )
+    if set(files) != set(indexed):
+        raise PublicDemoExportError("Coppelia archive native inventory differs")
+    for target, native_path in files.items():
+        item = indexed[target]
+        if native_path.stat().st_size != item.bytes or _sha256_file(native_path) != item.sha256:
+            raise PublicDemoExportError(f"Coppelia archive native hash differs: {target}")
+    return archive
+
+
+def _verify_public_archive_binding(root: Path, payload: dict[str, object]) -> None:
+    binding = payload.get("coppelia_archive")
+    if binding is None:
+        index_path = root / COPPELIA_PUBLIC_INDEX_PATH
+        if index_path.exists() or index_path.is_symlink():
+            raise PublicDemoExportError("compact Coppelia archive index requires a provenance binding")
+        return
+    if (
+        not isinstance(binding, dict)
+        or payload.get("channel") != "release"
+        or binding.get("path") != COPPELIA_PUBLIC_INDEX_PATH
+        or binding.get("asset_file") != COPPELIA_ARCHIVE_INDEX_FILE
+        or binding.get("asset_base_url")
+        != f"{RELEASE_ASSET_BASE_URL}{payload.get('release_tag')}/"
+    ):
+        raise PublicDemoExportError("compact Coppelia archive binding is invalid")
+    index_path = root / COPPELIA_PUBLIC_INDEX_PATH
+    if binding.get("sha256") != _sha256_file(index_path):
+        raise PublicDemoExportError("compact Coppelia archive index hash differs")
+    try:
+        archive = load_coppelia_archive_index(index_path)
+    except ValueError as exc:
+        raise PublicDemoExportError(str(exc)) from exc
+    inputs = cast(list[dict[str, object]], payload["inputs"])
+    simulator = next((item for item in inputs if item.get("kind") == "simulator"), None)
+    if (
+        simulator is None
+        or simulator.get("manifest_sha256") != archive.descriptor_sha256
+        or simulator.get("source") != archive.source.model_dump(mode="json")
+    ):
+        raise PublicDemoExportError("compact Coppelia archive identity differs from provenance")
+    indexed = {item.path: item for item in archive.files}
+    expected = {
+        target for role, (target, _media) in _SIMULATOR_ARTIFACT_CONTRACTS.items()
+        if role.partition("_")[2] in _COMPACT_SIMULATOR_SUFFIXES
+    }
+    observed = {
+        path.relative_to(root).as_posix() for path in (root / "evidence/coppelia").rglob("*")
+        if path.is_file() and path != index_path
+    }
+    if observed != expected:
+        raise PublicDemoExportError("compact Coppelia public inventory differs")
+    for target in expected:
+        file = root / target
+        item = indexed[target]
+        if (
+            file.stat().st_size > _MAX_COMPACT_SIMULATOR_FILE_BYTES
+            or file.stat().st_size != item.bytes or _sha256_file(file) != item.sha256
+        ):
+            raise PublicDemoExportError(f"compact Coppelia native hash differs: {target}")
+
+
 def _copy_bundle(
     bundle: _LoadedBundle,
     staging: Path,
     artifact_sources: dict[str, tuple[str, str]],
+    *,
+    compact_simulator: bool = False,
 ) -> None:
     for artifact in bundle.manifest.artifacts:
+        if compact_simulator:
+            if artifact.role.partition("_")[2] not in _COMPACT_SIMULATOR_SUFFIXES:
+                continue
+            if bundle.files[artifact.role].stat().st_size > _MAX_COMPACT_SIMULATOR_FILE_BYTES:
+                raise PublicDemoExportError(
+                    f"compact simulator artifact exceeds the 32 MiB Pages budget: {artifact.role}"
+                )
         target = _safe_relative_path(artifact.target).as_posix()
         if target in artifact_sources:
             raise PublicDemoExportError(f"bundle target collision: {target}")
@@ -1688,6 +1802,9 @@ def _write_simulator_view(
     bundle: _LoadedBundle,
     evidence: _ValidatedSimulator,
     artifact_sources: dict[str, tuple[str, str]],
+    *,
+    archive: CoppeliaArchiveIndex | None = None,
+    release_tag: str | None = None,
 ) -> None:
     _write_json(
         staging / "coppelia-evidence.json",
@@ -1704,6 +1821,8 @@ def _write_simulator_view(
                 "artifact_references": _artifact_references_for_prefix(
                     bundle,
                     "nominal",
+                    archive=archive,
+                    release_tag=release_tag,
                 ),
             },
             "recovery": {
@@ -1712,6 +1831,8 @@ def _write_simulator_view(
                 "artifact_references": _artifact_references_for_prefix(
                     bundle,
                     "recovery",
+                    archive=archive,
+                    release_tag=release_tag,
                 ),
             },
             "limitation": (
@@ -1746,6 +1867,9 @@ def _artifact_references_for_roles(
 def _artifact_references_for_prefix(
     bundle: _LoadedBundle,
     prefix: Literal["nominal", "recovery"],
+    *,
+    archive: CoppeliaArchiveIndex | None = None,
+    release_tag: str | None = None,
 ) -> list[dict[str, str]]:
     labels = {
         "manifest": "Gate manifest",
@@ -1758,10 +1882,39 @@ def _artifact_references_for_prefix(
         "scene": "Reusable Coppelia scene",
         "video": "Measured evidence replay",
     }
-    return _artifact_references_for_roles(
+    references = _artifact_references_for_roles(
         bundle,
         {f"{prefix}_{role}": f"{prefix.title()} {label}" for role, label in labels.items()},
     )
+    if archive is None:
+        return references
+    retained_targets = {
+        item.target for item in bundle.manifest.artifacts
+        if item.role.partition("_")[2] in _COMPACT_SIMULATOR_SUFFIXES
+    }
+    for reference in references:
+        if reference["path"] not in retained_targets:
+            reference["href"] = COPPELIA_PUBLIC_INDEX_PATH
+            reference["label"] += " (native archive index)"
+            reference["media_type"] = "application/json"
+    parts = {
+        chunk.part for item in archive.files
+        if (
+            item.path.startswith(f"evidence/coppelia/{prefix}/")
+            or item.path == f"evidence/coppelia/visualizations/{prefix}.mp4"
+        )
+        for chunk in item.chunks
+    }
+    assert release_tag is not None
+    for position, part in enumerate(archive.parts, start=1):
+        if part.file in parts:
+            references.append({
+                "label": f"{prefix.title()} native evidence part {position} of {len(archive.parts)}",
+                "href": f"{RELEASE_ASSET_BASE_URL}{release_tag}/{part.file}",
+                "path": part.file,
+                "media_type": "application/zip",
+            })
+    return references
 
 
 def _research_validation_curves(
@@ -2016,6 +2169,7 @@ def _build_provenance(
     artifact_sources: dict[str, tuple[str, str]],
     release_version: str | None,
     release_tag: str | None,
+    coppelia_archive_index: Path | None = None,
 ) -> dict[str, object]:
     observed_paths = sorted(
         path.relative_to(staging).as_posix()
@@ -2084,6 +2238,13 @@ def _build_provenance(
         },
         "manifest_payload_sha256": None,
     }
+    if coppelia_archive_index is not None:
+        payload["coppelia_archive"] = {
+            "path": COPPELIA_PUBLIC_INDEX_PATH,
+            "asset_file": COPPELIA_ARCHIVE_INDEX_FILE,
+            "asset_base_url": f"{RELEASE_ASSET_BASE_URL}{release_tag}/",
+            "sha256": _sha256_file(coppelia_archive_index),
+        }
     payload["manifest_payload_sha256"] = _sha256_bytes(_json_bytes(payload))
     return payload
 

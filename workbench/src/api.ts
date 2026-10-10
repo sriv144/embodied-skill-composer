@@ -62,6 +62,12 @@ export function runtimeStatusFor(
 
 let runtimeStatus = runtimeStatusFor(configuredMode);
 let runtimeInitialization: Promise<RuntimeStatus> | null = null;
+let verifiedReleaseAssets: ReadonlySet<string> = new Set();
+const releaseAssetBaseUrl =
+  "https://github.com/sriv144/embodied-skill-composer/releases/download/v1.0.0/";
+const coppeliaArchivePath = "evidence/coppelia/archive-index.json";
+const coppeliaArchiveAsset = "construction-intelligence-v1-coppelia-evidence.json";
+const hashPattern = /^[a-f0-9]{64}$/;
 const passiveStaticArtifactSuffixes = new Set([
   ".csv",
   ".glb",
@@ -176,10 +182,130 @@ function initializeRuntime(): Promise<RuntimeStatus> {
     fetchJson<unknown>(demoUrl("provenance.json")),
     fetchText(demoUrl("release-status.json"))
   ]).then(async ([provenance, statusText]) => {
-    runtimeStatus = await verifiedStaticRuntime(provenance, statusText);
+    const verified = await verifiedStaticRuntime(provenance, statusText);
+    if (verified.channel === "release") {
+      const indexText = await fetchText(demoUrl(coppeliaArchivePath));
+      verifiedReleaseAssets = await verifiedReleaseAssetUrls(provenance, indexText);
+    }
+    runtimeStatus = verified;
     return runtimeStatus;
   });
   return runtimeInitialization;
+}
+
+export async function verifiedReleaseAssetUrls(
+  provenanceValue: unknown,
+  indexText: string
+): Promise<ReadonlySet<string>> {
+  const provenance = record(provenanceValue);
+  const binding = record(provenance?.coppelia_archive);
+  const index = record(JSON.parse(indexText));
+  const inputs = Array.isArray(provenance?.inputs) ? provenance.inputs.map(record) : [];
+  const simulator = inputs.filter((input) => input?.kind === "simulator");
+  const inventory = Array.isArray(provenance?.artifacts) ? provenance.artifacts.map(record) : [];
+  const indexInventory = inventory.filter((item) => item?.path === coppeliaArchivePath);
+  const digest = await sha256Text(indexText);
+  const bytes = new TextEncoder().encode(indexText).byteLength;
+  if (
+    provenance?.channel !== "release" || provenance.release_tag !== "v1.0.0" ||
+    binding?.path !== coppeliaArchivePath || binding.asset_file !== coppeliaArchiveAsset ||
+    binding.asset_base_url !== releaseAssetBaseUrl || binding.sha256 !== digest ||
+    indexInventory.length !== 1 || indexInventory[0]?.sha256 !== digest ||
+    indexInventory[0]?.bytes !== bytes || bytes > 4 * 1024 ** 2 ||
+    index?.schema_version !== "construction-intelligence-coppelia-archive-v1" ||
+    index.generated_at !== "1970-01-01T00:00:00Z" || simulator.length !== 1 ||
+    index.descriptor_sha256 !== simulator[0]?.manifest_sha256
+  ) {
+    throw new Error("Static release archive index is missing or not bound to provenance.");
+  }
+  const source = record(index.source);
+  const inputSource = record(simulator[0]?.source);
+  if (
+    !source || !inputSource || source.dirty !== false || inputSource.dirty !== false ||
+    source.commit !== inputSource.commit || source.tree_digest !== inputSource.tree_digest ||
+    typeof source.commit !== "string" || !/^[a-f0-9]{40}$/.test(source.commit) ||
+    typeof source.tree_digest !== "string" || !hashPattern.test(source.tree_digest)
+  ) {
+    throw new Error("Static release archive source identity is inconsistent.");
+  }
+  const parts = Array.isArray(index.parts) ? index.parts.map(record) : [];
+  const files = Array.isArray(index.files) ? index.files.map(record) : [];
+  const nativeNames = [
+    "manifest.json", "scenario.json", "planned_jobs.json", "planned_vs_measured_replay.json",
+    "wheel_commands.jsonl", "measured_telemetry.jsonl", "trace.json", "metrics.json",
+    "report.md", "construction_intelligence.ttt", "runtime_attestation.json"
+  ];
+  const paths = ["nominal", "recovery"].flatMap((scenario) => [
+    ...nativeNames.map((name) => `evidence/coppelia/${scenario}/${name}`),
+    `evidence/coppelia/visualizations/${scenario}.mp4`
+  ]).sort();
+  const positiveInteger = (value: unknown, maximum: number): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= maximum;
+  const validHash = (value: unknown): value is string =>
+    typeof value === "string" && hashPattern.test(value);
+  if (
+    !parts.length || parts.length > 256 || files.length !== paths.length ||
+    !positiveInteger(index.chunk_bytes, 128 * 1024 ** 2) ||
+    parts.some((part, position) => (
+      part?.file !== `construction-intelligence-v1-coppelia-evidence-part-${String(position + 1).padStart(6, "0")}.zip` ||
+      !positiveInteger(part.bytes, 384 * 1024 ** 2) || !validHash(part.sha256) ||
+      !positiveInteger(part.entry_count, 2)
+    )) ||
+    files.some((file, position) => (
+      file?.path !== paths[position] || !positiveInteger(file.bytes, 8 * 1024 ** 3) ||
+      !validHash(file.sha256) || !Array.isArray(file.chunks) || !file.chunks.length
+    ))
+  ) {
+    throw new Error("Static release archive inventory is invalid.");
+  }
+  let ordinal = 0;
+  let totalBytes = 0;
+  const scenarioBytes = { nominal: 0, recovery: 0 };
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    const size = file?.bytes as number;
+    const chunks = (file?.chunks as unknown[]).map(record);
+    const chunkBytes = index.chunk_bytes;
+    totalBytes += size;
+    const scenario = String(file?.path).startsWith("evidence/coppelia/nominal/") ||
+      file?.path === "evidence/coppelia/visualizations/nominal.mp4" ? "nominal" : "recovery";
+    scenarioBytes[scenario] += size;
+    if (chunks.length !== Math.ceil(size / chunkBytes)) {
+      throw new Error("Static release archive chunks are invalid.");
+    }
+    for (const [offset, chunk] of chunks.entries()) {
+      const part = parts[Math.floor(ordinal / 2)];
+      if (
+        !part || !chunk || chunk.part !== part.file || !validHash(chunk.sha256) ||
+        chunk.bytes !== Math.min(chunkBytes, size - offset * chunkBytes) ||
+        chunk.member !== `chunks/${String(file?.path)}/${String(offset + 1).padStart(6, "0")}.bin`
+      ) throw new Error("Static release archive chunks are invalid.");
+      counts.set(String(part.file), (counts.get(String(part.file)) ?? 0) + 1);
+      ordinal += 1;
+    }
+  }
+  if (
+    totalBytes > 16 * 1024 ** 3 ||
+    scenarioBytes.nominal > 8 * 1024 ** 3 || scenarioBytes.recovery > 8 * 1024 ** 3
+  ) throw new Error("Static release archive exceeds its native byte budget.");
+  if (parts.some((part) => counts.get(String(part?.file)) !== part?.entry_count)) {
+    throw new Error("Static release archive part coverage is invalid.");
+  }
+  // Part names come only from the verified contiguous inventory, never from href fields.
+  return new Set([
+    releaseAssetBaseUrl + coppeliaArchiveAsset,
+    ...parts.map((part) => releaseAssetBaseUrl + String(part?.file))
+  ]);
+}
+
+export function safeReleaseArtifactUrl(path: string, allowed: ReadonlySet<string>): string | null {
+  if (
+    !path.startsWith(releaseAssetBaseUrl) || !allowed.has(path) ||
+    !/^construction-intelligence-v1-coppelia-evidence(?:\.json|-part-\d{6}\.zip)$/.test(
+      path.slice(releaseAssetBaseUrl.length)
+    )
+  ) return null;
+  return path;
 }
 
 function errorDetail(payload: unknown): string | null {
@@ -559,6 +685,8 @@ export const api = {
   artifactHref: (path: string | null | undefined) => {
     if (!path) return null;
     if (runtimeStatus.mode === "static") {
+      const releaseUrl = safeReleaseArtifactUrl(path, verifiedReleaseAssets);
+      if (releaseUrl) return releaseUrl;
       const relative = safeStaticArtifactPath(path.replace(/^demo\//, ""));
       return relative ? demoUrl(relative) : null;
     }

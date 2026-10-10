@@ -149,7 +149,8 @@ nominal and unavailable-robot recovery manifests, metrics, measured-telemetry re
 individual file links. It sets `ready: true` only when both native live gates pass and both MP4
 files decode successfully.
 
-Every public link is a safe path below the exported bundle. Research and simulator descriptors
+Public evidence links are safe paths below the exported bundle, or exact versioned GitHub asset
+URLs from the verified Coppelia archive index. Research and simulator descriptors
 must match the exact v1 role-to-target and media-type contracts: JSON, JSONL, CSV, Markdown, MP4,
 and the binary Coppelia scene are allowed, while HTML, SVG, XML, JavaScript, CSS, and other
 same-origin active content cannot be published under an evidence link. MP4 files are generated
@@ -194,7 +195,22 @@ uploaded as an unstructured directory. `scripts/package_construction_release.py`
 the canonical research evidence, Coppelia evidence, and all 20 validation-selected checkpoint and
 ONNX exports. The packager independently verifies the release-channel public demo before creating
 any ZIP, includes every ONNX external-data sidecar, uses sorted fixed-metadata ZIP entries, and
-writes the five-file checksums/identity contract consumed by the manual draft-release workflow.
+writes the indexed checksums/identity contract consumed by the manual draft-release workflow.
+
+Canonical release packaging passes `--coppelia-archive-index` to the exporter. It still validates
+both complete native bundles before writing anything. Pages receives only unchanged native gate
+manifests, metrics, reports, reusable scenes, and replay videos (at most 32 MiB per retained file),
+plus the byte-identical archive index at `evidence/coppelia/archive-index.json`. Raw replay,
+telemetry, wheel-command, trace, scenario, and job files remain in bounded release shards, not in
+the Pages directory. The index records all original byte counts and hashes, ordered chunk hashes,
+and each shard's hash. The provenance binds the index to the simulator descriptor and clean native
+source identity; the public manifests and metrics are identical to the independently validated
+native files. Full release verification reconstructs and revalidates native evidence separately.
+
+Static release startup loads this hash-pinned local index once. Download links are permitted only
+for its contiguous shard filenames at the exact repository's `v1.0.0` release URL; unknown assets,
+other hosts/tags, query strings, fragments, encoded traversal, and unverified URLs are rejected.
+Missing or corrupt index metadata fails visibly and cannot fall back to preview data.
 
 See [Construction Intelligence v1 release assets](construction-intelligence-v1-release.md) for the
 exact local staging, draft creation, verification, and publication sequence.
