@@ -56,6 +56,33 @@ describe("ResultsView evidence", () => {
     ).toBeInTheDocument();
     await waitFor(() => expect(api.researchSummary).toHaveBeenCalledTimes(1));
   });
+
+  it("labels historical terminal and truncated rollouts without claiming completion", async () => {
+    vi.spyOn(api, "researchSummary").mockResolvedValue(researchSummary());
+    vi.spyOn(api, "coppeliaHealth").mockResolvedValue({ reachable: false, host: "127.0.0.1", port: 23000, detail: "offline", controller: "dynamic_base_logical_payload" });
+    vi.spyOn(api, "coppeliaEvidence").mockResolvedValue(coppeliaSummary());
+    render(<ResultsView project={project()} policies={[]} />);
+
+    expect(await screen.findByRole("img", { name: /Terminal or truncated rollout fraction/ })).toBeInTheDocument();
+    expect(screen.getByText(/they are not construction completion/)).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Rollout completion/ })).not.toBeInTheDocument();
+  });
+
+  it("plots actual module fraction rather than the terminal fraction when recorded", async () => {
+    const summary = researchSummary();
+    summary.learning_curves![0].points = [
+      { transitions: 100, rollout_terminal_fraction: 1, rollout_structure_completion_rate: 0.2 },
+      { transitions: 200, rollout_terminal_fraction: 1, rollout_structure_completion_rate: 0.4 }
+    ];
+    vi.spyOn(api, "researchSummary").mockResolvedValue(summary);
+    vi.spyOn(api, "coppeliaHealth").mockResolvedValue({ reachable: false, host: "127.0.0.1", port: 23000, detail: "offline", controller: "dynamic_base_logical_payload" });
+    vi.spyOn(api, "coppeliaEvidence").mockResolvedValue(coppeliaSummary());
+    render(<ResultsView project={project()} policies={[]} />);
+
+    const chart = await screen.findByRole("img", { name: /Installed-module fraction over transitions/ });
+    expect(chart.querySelector("path")).toHaveAttribute("d", "M327.00,186.40 L604.00,144.80");
+    expect(screen.getByText(/rollout endings are not used as completion/)).toBeInTheDocument();
+  });
 });
 
 function researchSummary(): ResearchSummary {

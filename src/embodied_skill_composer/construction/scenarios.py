@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from math import hypot
 from random import Random
 
@@ -152,6 +153,11 @@ def _randomize_yard_and_fleet(plan: BuildPlan, rng: Random) -> None:
 
 
 def _sample_obstacle_cells(plan: BuildPlan, count: int, rng: Random) -> list[tuple[int, int]]:
+    if count < 0:
+        raise ValueError("obstacle count cannot be negative")
+    # Keep the original permutation and RNG consumption so the subsequent
+    # failure occurrence/type remain unchanged for a seed. Apply the stronger
+    # interaction-cell exclusions after shuffling, not to its input population.
     excluded: set[tuple[int, int]] = set()
     for robot in plan.robots:
         excluded.add(_world_to_cell(robot.start_pose.position, plan.site_grid))
@@ -166,7 +172,77 @@ def _sample_obstacle_cells(plan: BuildPlan, count: int, rng: Random) -> list[tup
         if (x, y) not in excluded
     ]
     rng.shuffle(candidates)
-    return sorted(candidates[:count])
+    required = _required_interaction_cells(plan)
+    candidates = [cell for cell in candidates if cell not in required]
+    if count > len(candidates):
+        raise ValueError(
+            f"requested {count} obstacles but only {len(candidates)} eligible cells exist"
+        )
+    selected: set[tuple[int, int]] = set()
+    if count == 0:
+        return []
+    for candidate in candidates:
+        if not _required_cells_connected(plan.site_grid, required, selected | {candidate}):
+            continue
+        selected.add(candidate)
+        if len(selected) == count:
+            return sorted(selected)
+    raise ValueError(f"cannot place {count} obstacles while keeping required endpoints connected")
+
+
+def _required_interaction_cells(plan: BuildPlan) -> set[tuple[int, int]]:
+    """Cells used by temporal carrier centers and all possible base endpoints.
+
+    The temporal environment's two-base formation is y +/- 0.35 m at both
+    pickup and installation. Installation endpoints become the next route's
+    starts, so reserving staging or target centers alone is insufficient.
+    Keep this lightweight: scenario generation must not import the optional
+    PettingZoo environment. Contract tests compare these offsets to its helper.
+    """
+    required = {
+        _world_to_cell(robot.start_pose.position, plan.site_grid)
+        for robot in plan.robots
+    }
+    for module in plan.modules:
+        offsets = (0.0,) if module.required_team_size == 1 else (0.0, -0.35, 0.35)
+        for pose in (module.staging_pose, module.target_pose):
+            required.update(
+                _world_to_cell(
+                    Vec2(x=pose.position.x, y=pose.position.y + offset),
+                    plan.site_grid,
+                )
+                for offset in offsets
+            )
+    return required
+
+
+def _required_cells_connected(
+    grid: SiteGrid,
+    required: set[tuple[int, int]],
+    obstacles: set[tuple[int, int]],
+) -> bool:
+    """Check static endpoint reachability without changing router semantics."""
+    if not required:
+        return True
+    if required & obstacles:
+        return False
+    start = min(required)
+    remaining = required - {start}
+    frontier = deque([start])
+    visited = {start}
+    while frontier and remaining:
+        x, y = frontier.popleft()
+        for neighbor in ((x + 1, y), (x, y + 1), (x - 1, y), (x, y - 1)):
+            if (
+                0 <= neighbor[0] < grid.width
+                and 0 <= neighbor[1] < grid.height
+                and neighbor not in obstacles
+                and neighbor not in visited
+            ):
+                visited.add(neighbor)
+                remaining.discard(neighbor)
+                frontier.append(neighbor)
+    return not remaining
 
 
 def _sample_failures(
@@ -189,13 +265,20 @@ def _sample_failures(
         common["module_id"] = rng.choice(plan.modules).module_id
     else:
         occupied = set(plan.site_grid.obstacle_cells)
+        required = _required_interaction_cells(plan)
         candidates = [
             (x, y)
             for x in range(3, plan.site_grid.width - 3)
             for y in range(3, plan.site_grid.height - 3)
-            if (x, y) not in occupied
+            if (x, y) not in occupied and (x, y) not in required
         ]
-        common["obstacle_cell"] = rng.choice(candidates)
+        rng.shuffle(candidates)
+        for candidate in candidates:
+            if _required_cells_connected(plan.site_grid, required, occupied | {candidate}):
+                common["obstacle_cell"] = candidate
+                break
+        else:
+            raise ValueError("no feasible cell is available for the obstacle failure")
     return [ConstructionFailure.model_validate(common)]
 
 

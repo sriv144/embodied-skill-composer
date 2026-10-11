@@ -318,12 +318,16 @@ function EvidenceStatus({ summary }: { summary: ResearchSummary | null }) {
 
 function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
   const titleId = useId();
-  const visible = series.filter(
+  const primary = series.filter((item) => item.experiment_variant?.endsWith("_full"));
+  const hasModuleCompletion = primary.some((item) =>
+    item.points.some((point) => Number.isFinite(point.rollout_structure_completion_rate))
+  );
+  const metric = hasModuleCompletion
+    ? "rollout_structure_completion_rate"
+    : "rollout_terminal_fraction";
+  const visible = primary.filter(
     (item) =>
-      item.experiment_variant?.endsWith("_full") &&
-      item.points.some((point) =>
-        Number.isFinite(point.rollout_terminal_fraction)
-      )
+      item.points.some((point) => Number.isFinite(point[metric]))
   );
   if (visible.length === 0) {
     return (
@@ -370,6 +374,11 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
         <p className="eyebrow">Training evidence</p>
         <h3 id="learning-curves-title">Primary learning curves</h3>
       </div>
+      <p className="muted-line">
+        {hasModuleCompletion
+          ? "Installed-module fraction; rollout endings are not used as completion. Historical points without this metric are omitted."
+          : "Historical rollout endings include terminations and truncations; they are not construction completion."}
+      </p>
       <svg
         className="evidence-chart"
         viewBox={`0 0 ${width} ${height}`}
@@ -377,8 +386,8 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
         aria-labelledby={titleId}
       >
         <title id={titleId}>
-          Rollout completion over transitions for {visible.length} MAPPO and
-          IPPO primary seed runs
+          {hasModuleCompletion ? "Installed-module fraction" : "Terminal or truncated rollout fraction"}
+          {" "}over transitions for {visible.length} MAPPO and IPPO primary seed runs
         </title>
         {[0, 0.5, 1].map((fraction) => {
           const y = top + (1 - fraction) * (height - top - bottom);
@@ -399,7 +408,7 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
         })}
         {visible.map((item, index) => {
           const points = item.points.filter((point) =>
-            Number.isFinite(point.rollout_terminal_fraction)
+            Number.isFinite(point[metric])
           );
           const path = points
             .map((point, pointIndex) => {
@@ -409,7 +418,7 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
                   (width - left - right);
               const completion = Math.max(
                 0,
-                Math.min(1, point.rollout_terminal_fraction ?? 0)
+                Math.min(1, point[metric] ?? 0)
               );
               const y =
                 top + (1 - completion) * (height - top - bottom);

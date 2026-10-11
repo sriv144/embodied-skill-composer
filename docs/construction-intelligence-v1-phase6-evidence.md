@@ -1,6 +1,6 @@
 # Construction Intelligence v1 — Phase 6 Evidence
 
-Status: implementation complete; final revalidation and protected-branch review are pending.
+Status: implementation and current remote checks pass; protected-branch review and merge are pending.
 
 ## Product journey
 
@@ -52,6 +52,17 @@ and never switches to fixture data.
 
 Phase 6 remains unchecked in the roadmap until its pull request passes all protected
 remote gates and is merged.
+
+## Current remote verification — 2026-10-11
+
+PR [#23](https://github.com/sriv144/embodied-skill-composer/pull/23), commit
+`9e1ef8c064b59093c6d68c2119dba71aff8b30d1`, passed both push and pull-request Python,
+workbench, and secret-scanning checks. The pull-request run
+[38098616207](https://github.com/sriv144/embodied-skill-composer/actions/runs/38098616207)
+records 674 Python tests passed, three approval-gated tests skipped, 82.87% combined
+statement/branch coverage, 37 Vitest tests, and six Playwright tests. This replaces the
+older local test totals above as the current remote baseline; it does not satisfy the
+separate live Coppelia or learned-policy research gates.
 
 ## Final hardening — 2026-10-10
 
