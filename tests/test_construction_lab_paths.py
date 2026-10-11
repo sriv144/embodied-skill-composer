@@ -611,7 +611,14 @@ def test_lab_service_default_evaluation_and_failure_paths(
     def write_artifacts(suite: object, output_root: Path) -> FakeArtifacts:
         assert suite == "suite"
         captured["output_root"] = output_root
-        return FakeArtifacts(tmp_path / "default-evaluation")
+        artifacts = FakeArtifacts(tmp_path / "default-evaluation")
+        (artifacts.run_dir / "evaluation.json").write_text(
+            evaluation_module.EvaluationSuite(
+                evaluation_id="default-evaluation", seeds=[900, 901],
+                controllers=["mappo"], episodes=[], summaries=[],
+            ).model_dump_json(), encoding="utf-8",
+        )
+        return artifacts
 
     monkeypatch.setattr(policy_module, "load_policy_checkpoint", load_checkpoint)
     monkeypatch.setattr(evaluation_module, "run_evaluation_suite", run_suite)
@@ -635,6 +642,10 @@ def test_lab_service_default_evaluation_and_failure_paths(
         assert captured["checkpoint"] == Path("fixture.pt")
         assert captured["policies"] == {"mappo": "loaded-policy"}
         assert captured["include_failure_suite"] is True
+        record = registry.list_evaluations()[0]
+        assert record["id"] == "default-evaluation"
+        assert record["matrix_id"] is None
+        assert record["split"] == "diagnostic"
 
         def failing_evaluation(_design: object, _config: object) -> FakeArtifacts:
             raise RuntimeError("evaluation fixture failed")
@@ -656,6 +667,54 @@ def test_lab_service_default_evaluation_and_failure_paths(
         )
     finally:
         service.shutdown()
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_standalone_evaluation_registry_and_artifact_api_are_diagnostic(
+    tmp_path: Path, valid: bool,
+) -> None:
+    database = tmp_path / "diagnostic.sqlite"
+
+    def diagnostic_runner(_design: object, _config: object) -> FakeArtifacts:
+        artifacts = FakeArtifacts(tmp_path / "diagnostic-artifacts")
+        suite = evaluation_module.EvaluationSuite(
+            evaluation_id="diagnostic-800", seeds=[800],
+            controllers=["sequential"], episodes=[], summaries=[],
+        )
+        (artifacts.run_dir / "evaluation.json").write_text(
+            suite.model_dump_json() if valid else "{}", encoding="utf-8",
+        )
+        return artifacts
+
+    app = create_app(
+        registry_path=database, training_runner=_unused_training_runner,
+        evaluation_runner=diagnostic_runner,
+    )
+    with TestClient(app) as client:
+        response = client.post("/api/lab/evaluations", json={
+            "seeds": [800], "controllers": ["sequential"],
+            "include_failures": False,
+        })
+        assert response.status_code == 202
+        registry = LabRegistry(database)
+        run = _wait_for_status(
+            registry, response.json()["run_id"], {"completed" if valid else "failed"},
+        )
+        records = client.get("/api/lab/evaluations").json()
+        if not valid:
+            assert run["error"]
+            assert records == []
+            return
+        assert len(records) == 1
+        assert records[0]["matrix_id"] is None
+        assert records[0]["split"] == "diagnostic"
+        assert records[0]["payload"]["seeds"] == [800]
+        artifacts = client.get("/api/lab/evaluations/diagnostic-800/artifacts").json()
+        reference = next(item for item in artifacts if item["path"] == "evaluation.json")
+        downloaded = client.get(reference["href"])
+        assert downloaded.status_code == 200
+        assert downloaded.json() == records[0]["payload"]
+        assert client.get("/api/lab/evidence/research-summary").json()["claim_allowed"] is False
 
 
 def test_research_launch_rejects_dirty_source_before_queueing(

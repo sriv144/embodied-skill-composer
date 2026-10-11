@@ -126,17 +126,42 @@ export default async function globalSetup(): Promise<void> {
 }
 
 function seedAcceptanceRegistry(): void {
+  // Executed by browser acceptance (CI), never a fabricated empty-input resume.
+  // Stop after a real 50% CPU checkpoint; the browser resumes the other half.
   const script = [
     "from pathlib import Path",
     "from embodied_skill_composer.construction.lab_registry import LabRegistry",
+    "from embodied_skill_composer.construction.runtime import load_house_design",
+    "from embodied_skill_composer.construction.training import TrainingConfig, train_swarm_policy",
     `registry = LabRegistry(Path(${JSON.stringify(databasePath)}))`,
-    "registry.create_run(",
-    "    'training',",
-    "    {'seed': 7},",
-    "    status='interrupted',",
-    "    input_payload={},",
-    "    run_id='e2e-resumable-run',",
-    ")"
+    `root = Path(${JSON.stringify(workspaceRoot)})`,
+    `output = Path(${JSON.stringify(artifactDir)}) / 'training'`,
+    "design = load_house_design(root / 'configs/construction/cottage_v1.yaml')",
+    "class FixtureInterrupted(Exception): pass",
+    "for seed, project in enumerate(('local-desktop', 'local-mobile'), start=7):",
+    "    config = TrainingConfig.for_profile('unit', seed=seed)",
+    "    config.output_root = output.resolve()",
+    "    config.checkpoint_fractions = [0.5, 1.0]",
+    "    saved = {}",
+    "    def stop_at_checkpoint(event):",
+    "        if event['event'] == 'checkpoint_saved' and event['transitions'] == 32:",
+    "            saved.update(event)",
+    "            raise FixtureInterrupted()",
+    "    try:",
+    "        train_swarm_policy(design, config, progress_callback=stop_at_checkpoint)",
+    "    except FixtureInterrupted:",
+    "        pass",
+    "    else:",
+    "        raise RuntimeError('The real unit job did not stop at its 32-transition checkpoint')",
+    "    checkpoint = Path(saved['checkpoint_path'])",
+    "    assert checkpoint.is_file() and checkpoint.stat().st_size > 0",
+    "    run_id = registry.create_run(",
+    "        'training', config.model_dump(mode='json'), status='interrupted',",
+    "        input_payload={'design': design.model_dump(mode='json')},",
+    "        config_digest=config.configuration_digest, source_commit=config.source_commit,",
+    "        run_id=f'e2e-resumable-{project}',",
+    "    )",
+    "    registry.update_run(run_id, progress=0.5, latest_checkpoint=str(checkpoint))"
   ].join("\n");
   const result = spawnSync(python, ["-c", script], {
     cwd: workspaceRoot,

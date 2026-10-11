@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { BarChart3, BrainCircuit, Building2, Check, FlaskConical, Layers3, LoaderCircle, PlaySquare } from "lucide-react";
 import { api } from "./api";
@@ -23,6 +23,7 @@ export default function App() {
   const reduceMotion = useReducedMotion();
   const [project, setProject] = useState<Project | null>(null);
   const [trace, setTrace] = useState<Trace | null>(null);
+  const [traceRevision, setTraceRevision] = useState(0);
   const [view, setView] = useState<View>(readView());
   const [controller, setController] = useState("optimized");
   const [mode, setMode] = useState<LabMode>(api.mode());
@@ -30,6 +31,37 @@ export default function App() {
   const [policies, setPolicies] = useState<LabPolicy[]>([]);
   const [coppelia, setCoppelia] = useState<CoppeliaHealth | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
+  const replayRequest = useRef(0);
+  const selectedController = useRef("optimized");
+
+  const refreshReplay = useCallback(async (nextController: string) => {
+    const request = ++replayRequest.current;
+    // A trace belongs to one design/controller revision. Never display the old
+    // replay while a replacement is loading, or accept an older request later.
+    setTrace(null);
+    try {
+      const nextTrace = await api.trace(nextController);
+      if (request === replayRequest.current) {
+        setTrace(nextTrace);
+        setTraceRevision(request);
+      }
+    } catch (reason) {
+      if (request === replayRequest.current) setError(String(reason));
+    }
+  }, []);
+
+  const changeController = useCallback((nextController: string) => {
+    selectedController.current = nextController;
+    setController(nextController);
+    void refreshReplay(nextController);
+  }, [refreshReplay]);
+
+  const replaceProject = useCallback((updated: Project) => {
+    setProject(updated);
+    setProjectNotice("Approved design compiled into a new build plan.");
+    void refreshReplay(selectedController.current);
+  }, [refreshReplay]);
 
   const refreshLab = useCallback(async () => {
     const [nextRuns, nextPolicies, health] = await Promise.all([
@@ -44,19 +76,23 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const request = ++replayRequest.current;
     Promise.all([api.project(), api.trace("optimized")])
       .then(([nextProject, nextTrace]) => {
+        if (request !== replayRequest.current) return;
         setProject(nextProject);
         setTrace(nextTrace);
+        setTraceRevision(request);
         setMode(api.mode());
+        return refreshLab();
       })
-      .then(refreshLab)
-      .catch((reason) => setError(String(reason)));
+      .catch((reason) => {
+        if (request === replayRequest.current) setError(String(reason));
+      });
+    return () => {
+      replayRequest.current += 1;
+    };
   }, [refreshLab]);
-
-  useEffect(() => {
-    api.trace(controller).then(setTrace).catch((reason) => setError(String(reason)));
-  }, [controller]);
 
   useEffect(() => {
     const update = () => setView(readView());
@@ -115,6 +151,7 @@ export default function App() {
             </span>
           </div>
         </header>
+        {projectNotice && <p className="notice-line" role="status" aria-live="polite">{projectNotice}</p>}
         <motion.section
           key={view}
           className="view-stage"
@@ -124,9 +161,9 @@ export default function App() {
           transition={{ duration: reduceMotion ? 0 : 0.2 }}
         >
           <Suspense fallback={<div className="view-loading" role="status" aria-live="polite"><LoaderCircle aria-hidden="true" className="spin" size={24} /><span className="sr-only">Loading view</span></div>}>
-            {view === "design" && <DesignView project={project} mode={mode} onProject={(updated) => { setProject(updated); api.trace(controller).then(setTrace); }} />}
-            {view === "brain" && <BrainView project={project} trace={trace} controller={controller} policies={policies} onController={setController} />}
-            {view === "simulate" && <SimulateView project={project} trace={trace} controller={controller} coppelia={coppelia} onController={setController} onTrace={setTrace} />}
+            {view === "design" && <DesignView project={project} mode={mode} onProject={replaceProject} />}
+            {view === "brain" && <BrainView project={project} trace={trace} controller={controller} policies={policies} onController={changeController} />}
+            {view === "simulate" && <SimulateView project={project} trace={trace} controller={controller} coppelia={coppelia} onController={changeController} onTrace={(nextTrace) => { if (traceRevision === replayRequest.current) setTrace(nextTrace); }} />}
             {view === "experiments" && <ExperimentsView mode={mode} runs={runs} policies={policies} coppelia={coppelia} onRefresh={() => refreshLab().catch((reason) => setError(String(reason)))} />}
             {view === "results" && <ResultsView project={project} policies={policies} />}
           </Suspense>

@@ -1,6 +1,7 @@
 # Construction Intelligence v1 — Phase 6 Evidence
 
-Status: implementation complete; final revalidation and protected-branch review are pending.
+Status: the previous implementation checkpoint passed remote checks. Final hardening below requires
+fresh browser/remote acceptance; protected-branch review and merge are pending.
 
 ## Product journey
 
@@ -18,6 +19,30 @@ The workbench now exercises the same `HouseDesign` contract from design through 
 Every geometry edit revokes approval. Invalid or unapproved designs cannot compile.
 The public static bundle is explicitly read-only. A local API failure renders an error
 and never switches to fixture data.
+
+## Acceptance-audit hardening — 2026-10-11
+
+Replay refresh now clears the previous design/controller trace, ignores out-of-order responses,
+and surfaces failures visibly. Compilation success is announced from the parent so replay loading
+cannot silently remove its status. Recovery operations announce success/failure accessibly.
+
+Completed standalone evaluations are registered with `matrix_id=null` and the explicit
+`diagnostic` split, and Results exposes their real summaries and bounded downloadable artifacts.
+These records cannot substitute for frozen research acceptance. Validation checkpoint completion
+uses its own typed metric/chart, separate from training rollout endings and installed-module
+fractions; chart headings and accessible section IDs are unique.
+
+The new local browser flow uses real full CPU resume checkpoints interrupted at 32 of 64
+transitions, resumes through the workbench, verifies `training_resumed` and completion events,
+policy/ONNX artifacts and provenance, evaluates validation seed 800, then downloads the actual
+report from its Results record. It runs for desktop and mobile; it does not train a research
+matrix or use held-out data for selection. This stronger browser proof is implemented and
+typechecked but **has not yet passed browser execution**.
+
+Focused verification in the isolated hardening checkout: ESLint and TypeScript passed; 54
+Vitest tests across ten files passed; 19 backend lab-path tests passed; owned Python Ruff/mypy
+and diff checks passed. These are scoped checks, not a replacement for full remote CI,
+production builds, browser/accessibility acceptance, or protected review.
 
 ## Acceptance coverage
 

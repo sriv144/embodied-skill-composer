@@ -231,8 +231,10 @@ export type DesignValidationResult = {
 
 export type LearningCurvePoint = {
   transitions: number;
+  validation_completion_rate?: number;
   mean_episode_return?: number;
   rollout_terminal_fraction?: number;
+  rollout_structure_completion_rate?: number;
   loss_objective?: number;
   loss_critic?: number;
   loss_entropy?: number;
@@ -244,6 +246,7 @@ export type LearningCurveSeries = {
   experiment_variant: string;
   training_seed: number;
   status: LabRunStatus;
+  curve_kind?: "training_update_diagnostics" | "validation_checkpoint_completion";
   points: LearningCurvePoint[];
 };
 

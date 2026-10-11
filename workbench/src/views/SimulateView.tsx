@@ -24,6 +24,7 @@ export function SimulateView({
   const [time, setTime] = useState(0);
   const [playing, setPlaying] = useState(true);
   const [notice, setNotice] = useState<string | null>(null);
+  const [recoveryError, setRecoveryError] = useState(false);
   const [recovering, setRecovering] = useState(false);
   useEffect(() => setTime(0), [controller]);
   useEffect(() => {
@@ -40,11 +41,14 @@ export function SimulateView({
   const inject = async (type: string, label: string) => {
     setPlaying(false);
     setRecovering(true);
+    setRecoveryError(false);
+    setNotice("Applying recovery event.");
     try {
       const recovered = await api.disrupt(controller, type, Math.min(time, trace.metrics.makespan_s - 1));
       onTrace(recovered);
       setNotice(label);
     } catch (reason) {
+      setRecoveryError(true);
       setNotice(String(reason));
     } finally {
       setRecovering(false);
@@ -97,7 +101,7 @@ export function SimulateView({
             This preview ships only the obstacle recovery trace.
           </p>
         )}
-        {notice && <p className="recovery-note"><RotateCcw size={15} />{notice}</p>}
+        <p className="recovery-note" role={recoveryError ? "alert" : "status"} aria-live={recoveryError ? "assertive" : "polite"} aria-atomic="true">{notice && <><RotateCcw aria-hidden="true" size={15} />{notice}</>}</p>
         <div className="fidelity-note"><strong>{coppelia?.reachable ? "Coppelia online" : "Trace playback"}</strong><span>{coppelia?.detail ?? "Checking simulator health"}</span></div>
       </aside>
     </div>

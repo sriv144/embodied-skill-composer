@@ -476,6 +476,22 @@ class LabService:
                 )
             else:
                 evaluation_artifacts = runner(design, config)
+            evaluation_json = evaluation_artifacts.run_dir / "evaluation.json"
+            if runner is None or evaluation_json.is_file():
+                from embodied_skill_composer.construction.evaluation import EvaluationSuite
+
+                completed_suite = EvaluationSuite.model_validate_json(
+                    evaluation_json.read_text(encoding="utf-8")
+                )
+                # A standalone job is diagnostic, even if it includes test seeds.
+                # Only the frozen matrix path can register release acceptance.
+                self.registry.upsert_evaluation(
+                    completed_suite.evaluation_id,
+                    matrix_id=None,
+                    split="diagnostic",
+                    payload=completed_suite.model_dump(mode="json"),
+                    artifact_dir=str(evaluation_artifacts.run_dir),
+                )
             self.registry.finalize_run(
                 run_id,
                 status="completed",

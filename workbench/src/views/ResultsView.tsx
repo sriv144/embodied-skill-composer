@@ -13,12 +13,14 @@ import { downloadText } from "../components/WorkbenchControls";
 import "./results-evidence.css";
 import type {
   AblationDecision,
+  ArtifactReference,
   CoppeliaEvidenceRun,
   CoppeliaEvidenceSummary,
   CoppeliaHealth,
   ControllerEvaluation,
   LearningCurveSeries,
   LabPolicy,
+  LabEvaluation,
   PrimaryAcceptanceAudit,
   Project,
   ResearchSummary
@@ -229,6 +231,8 @@ export function ResultsView({
 
         <AblationEvidence decisions={ablations} />
 
+        {runtime.mode === "local" && <LocalEvaluations />}
+
         <section className="policy-table" aria-labelledby="coppelia-title">
           <div>
             <p className="eyebrow">Simulator evidence</p>
@@ -297,6 +301,69 @@ export function ResultsView({
   );
 }
 
+function LocalEvaluations() {
+  const [evaluations, setEvaluations] = useState<LabEvaluation[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const records = await api.evaluations();
+        if (!cancelled) {
+          setEvaluations(records.filter((item) => item.matrix_id === null).slice(0, 5));
+          setError(null);
+        }
+      } catch (reason) {
+        if (!cancelled) setError(formatApiError(reason));
+      }
+    };
+    void load();
+    const interval = window.setInterval(() => void load(), 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+  return (
+    <section className="policy-table" aria-labelledby="local-evaluations-title">
+      <div>
+        <p className="eyebrow">Local diagnostics · not release evidence</p>
+        <h3 id="local-evaluations-title">Local evaluation records</h3>
+      </div>
+      <p className="muted-line">Single-run and unit evaluations do not satisfy the frozen research matrix or change its acceptance gates.</p>
+      {error && <p role="alert">Local evaluations unavailable: {error}</p>}
+      {!error && evaluations.length === 0 && <p className="muted-line">No completed local evaluation is registered.</p>}
+      {evaluations.map((evaluation) => (
+        <article key={evaluation.id} aria-label={`Local evaluation ${evaluation.id}`}>
+          <h4>{evaluation.id}</h4>
+          <p>Scenario seeds: {evaluation.payload.seeds.join(", ")} · {evaluation.payload.episodes.length} episodes · {evaluation.split}</p>
+          {evaluation.payload.summaries.map((summary) => (
+            <p key={`${summary.controller}-${summary.failure_enabled}`}>
+              {summary.controller.toUpperCase()} · {summary.failure_enabled ? "failure suite" : "no failures"} · {summary.episode_count} episodes · {formatPercent(summary.metrics.structure_completion_rate.mean)} completion
+            </p>
+          ))}
+          <LocalEvaluationLinks evaluationId={evaluation.id} />
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function LocalEvaluationLinks({ evaluationId }: { evaluationId: string }) {
+  const [references, setReferences] = useState<ArtifactReference[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    api.evaluationArtifacts(evaluationId).then((items) => {
+      if (!cancelled) setReferences(items);
+    }).catch((reason) => {
+      if (!cancelled) setError(formatApiError(reason));
+    });
+    return () => { cancelled = true; };
+  }, [evaluationId]);
+  return error ? <p role="alert">Local artifact links unavailable: {error}</p> : <EvidenceReferences references={references} />;
+}
+
 function EvidenceStatus({ summary }: { summary: ResearchSummary | null }) {
   if (!summary) {
     return <p className="muted-line">Loading the evidence summary…</p>;
@@ -317,20 +384,34 @@ function EvidenceStatus({ summary }: { summary: ResearchSummary | null }) {
 }
 
 function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
+  const validation = series.filter((item) => item.curve_kind === "validation_checkpoint_completion");
+  const training = series.filter((item) => item.curve_kind !== "validation_checkpoint_completion");
+  return <>
+    {validation.length > 0 && <LearningCurveChart series={validation} validation />}
+    {(training.length > 0 || validation.length === 0) && <LearningCurveChart series={training} />}
+  </>;
+}
+
+function LearningCurveChart({ series, validation = false }: { series: LearningCurveSeries[]; validation?: boolean }) {
   const titleId = useId();
-  const visible = series.filter(
+  const headingId = `${titleId}-heading`;
+  const primary = series.filter((item) => item.experiment_variant?.endsWith("_full"));
+  const hasModuleCompletion = primary.some((item) =>
+    item.points.some((point) => Number.isFinite(point.rollout_structure_completion_rate))
+  );
+  const metric = validation ? "validation_completion_rate" : hasModuleCompletion
+    ? "rollout_structure_completion_rate"
+    : "rollout_terminal_fraction";
+  const visible = primary.filter(
     (item) =>
-      item.experiment_variant?.endsWith("_full") &&
-      item.points.some((point) =>
-        Number.isFinite(point.rollout_terminal_fraction)
-      )
+      item.points.some((point) => Number.isFinite(point[metric]))
   );
   if (visible.length === 0) {
     return (
-      <section className="policy-table" aria-labelledby="learning-curves-title">
+      <section className="policy-table" aria-labelledby={headingId}>
         <div>
           <p className="eyebrow">Training evidence</p>
-          <h3 id="learning-curves-title">Learning curves</h3>
+          <h3 id={headingId}>Learning curves</h3>
         </div>
         <p className="muted-line">
           No canonical or active primary-run learning curves are available in
@@ -365,11 +446,18 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
   ];
 
   return (
-    <section className="policy-table" aria-labelledby="learning-curves-title">
+    <section className="policy-table" aria-labelledby={headingId}>
       <div>
-        <p className="eyebrow">Training evidence</p>
-        <h3 id="learning-curves-title">Primary learning curves</h3>
+        <p className="eyebrow">{validation ? "Validation evidence" : "Training evidence"}</p>
+        <h3 id={headingId}>{validation ? "Validation checkpoint completion" : "Primary learning curves"}</h3>
       </div>
+      <p className="muted-line">
+        {validation
+          ? "Deterministic validation completion at saved checkpoints; not training rollout endings or held-out release acceptance."
+          : hasModuleCompletion
+          ? "Installed-module fraction; rollout endings are not used as completion. Historical points without this metric are omitted."
+          : "Historical rollout endings include terminations and truncations; they are not construction completion."}
+      </p>
       <svg
         className="evidence-chart"
         viewBox={`0 0 ${width} ${height}`}
@@ -377,8 +465,8 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
         aria-labelledby={titleId}
       >
         <title id={titleId}>
-          Rollout completion over transitions for {visible.length} MAPPO and
-          IPPO primary seed runs
+          {validation ? "Validation checkpoint completion" : hasModuleCompletion ? "Installed-module fraction" : "Terminal or truncated rollout fraction"}
+          {" "}over transitions for {visible.length} MAPPO and IPPO primary seed runs
         </title>
         {[0, 0.5, 1].map((fraction) => {
           const y = top + (1 - fraction) * (height - top - bottom);
@@ -399,7 +487,7 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
         })}
         {visible.map((item, index) => {
           const points = item.points.filter((point) =>
-            Number.isFinite(point.rollout_terminal_fraction)
+            Number.isFinite(point[metric])
           );
           const path = points
             .map((point, pointIndex) => {
@@ -409,7 +497,7 @@ function LearningCurves({ series }: { series: LearningCurveSeries[] }) {
                   (width - left - right);
               const completion = Math.max(
                 0,
-                Math.min(1, point.rollout_terminal_fraction ?? 0)
+                Math.min(1, point[metric] ?? 0)
               );
               const y =
                 top + (1 - completion) * (height - top - bottom);

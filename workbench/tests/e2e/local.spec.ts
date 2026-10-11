@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { ArtifactReference, LabEvaluation, LabPolicy, LabRun, MatrixLaunchResponse, RunEventEnvelope } from "../../src/types";
 import {
   expectDocumentScrollsToBottom,
   expectNoHorizontalOverflow,
@@ -41,7 +42,7 @@ async function pressRepeated(
 test("local design-to-results flow proves editing, durable controls, and evidence", async ({
   page
 }, testInfo) => {
-  test.setTimeout(120_000);
+  test.setTimeout(240_000);
   const cspViolations = watchForCspViolations(page);
   const documentResponse = await page.goto("/#/design");
   expectHardenedDocumentHeaders(documentResponse);
@@ -171,18 +172,70 @@ test("local design-to-results flow proves editing, durable controls, and evidenc
     page.getByRole("heading", { name: "Durable experiment registry" })
   ).toBeVisible();
   await expect(page.getByText("Local lab controls enabled")).toBeVisible();
-  if (testInfo.project.name === "local-desktop") {
-    await page.getByRole("button", { name: "Single", exact: true }).click();
-    const resume = page.getByRole("button", {
-      name: "Resume e2e-resumable-run"
-    });
+  const resumeId = `e2e-resumable-${testInfo.project.name}`;
+  await page.getByRole("button", { name: "Single", exact: true }).click();
+  const beforeResume = await (await page.request.get(`/api/lab/runs/${resumeId}`)).json() as LabRun;
+  expect(beforeResume.config.device).toBe("cpu");
+  expect(beforeResume.config.profile).toBe("unit");
+  expect(beforeResume.latest_checkpoint).toBeTruthy();
+  // A retry can reuse a genuinely completed job, but never an unexecuted fixture.
+  if (beforeResume.status !== "completed") {
+    expect(beforeResume.status).toBe("interrupted");
+    expect(beforeResume.progress).toBe(0.5);
+    const resume = page.getByRole("button", { name: `Resume ${resumeId}` });
     await expect(resume).toBeVisible();
     await resume.click();
     await expect(
-      page.getByText("Run e2e-resumable-run is resuming.")
+      page.getByText(`Run ${resumeId} is resuming.`)
     ).toBeVisible();
-    await page.getByRole("button", { name: "Matrix", exact: true }).click();
   }
+  await expect.poll(async () => {
+    const run = await (await page.request.get(`/api/lab/runs/${resumeId}`)).json() as LabRun;
+    expect(run.status, run.error ?? "CPU resume must not fail").not.toBe("failed");
+    return run.status;
+  }, { timeout: 90_000, intervals: [500, 1_000, 2_000] }).toBe("completed");
+  await expect(page.getByRole("progressbar", { name: `${resumeId} progress` })).toHaveAttribute("aria-valuenow", "100");
+  const events = await (await page.request.get(`/api/lab/runs/${resumeId}/events`)).json() as RunEventEnvelope[];
+  expect(events.some((event) => event.payload.event === "training_resumed" && event.payload.transitions === 32)).toBe(true);
+  expect(events.some((event) => event.payload.event === "training_completed")).toBe(true);
+  const artifacts = await (await page.request.get(`/api/lab/runs/${resumeId}/artifacts`)).json() as ArtifactReference[];
+  const manifestReference = artifacts.find((item) => item.path === "policy_manifest.json");
+  expect(manifestReference).toBeTruthy();
+  expect(artifacts.some((item) => item.path === "actor.onnx")).toBe(true);
+  const manifestResponse = await page.request.get(manifestReference!.href);
+  expect(manifestResponse.ok()).toBe(true);
+  const manifest = await manifestResponse.json();
+  expect(manifest.transition_count).toBe(64);
+  expect(manifest.resume_provenance.run_id).toBe(resumeId);
+  expect(manifest.configuration_digest).toMatch(/^[a-f0-9]{64}$/);
+  const policies = await (await page.request.get("/api/lab/policies")).json() as LabPolicy[];
+  expect(policies.some((item) => item.id === manifest.policy_id)).toBe(true);
+  await expect(page.getByText(manifest.policy_id, { exact: true })).toBeVisible();
+
+  // Diagnostic validation seed only: this is not held-out model selection or a release gate.
+  const launchEvaluation = await page.request.post("/api/lab/evaluations", { data: {
+    seeds: [800], controllers: [manifest.controller], policy_ids: { [manifest.controller]: manifest.policy_id }, include_failures: false
+  } });
+  expect(launchEvaluation.status()).toBe(202);
+  const { run_id: evaluationRunId } = await launchEvaluation.json();
+  await expect.poll(async () => {
+    const run = await (await page.request.get(`/api/lab/runs/${evaluationRunId}`)).json() as LabRun;
+    expect(run.status, run.error ?? "CPU diagnostic evaluation must not fail").not.toBe("failed");
+    return run.status;
+  }, { timeout: 90_000, intervals: [500, 1_000, 2_000] }).toBe("completed");
+  const evaluationRunArtifacts = await (await page.request.get(`/api/lab/runs/${evaluationRunId}/artifacts`)).json() as ArtifactReference[];
+  const suiteReference = evaluationRunArtifacts.find((item) => item.path === "evaluation.json");
+  expect(suiteReference).toBeTruthy();
+  const suite = await (await page.request.get(suiteReference!.href)).json();
+  expect(suite.seeds).toEqual([800]);
+  expect(suite.controllers).toEqual([manifest.controller]);
+  expect(suite.episodes).toHaveLength(1);
+  expect(suite.episodes[0].split).toBe("validation");
+  const records = await (await page.request.get("/api/lab/evaluations")).json() as LabEvaluation[];
+  const record = records.find((item) => item.id === suite.evaluation_id);
+  expect(record?.matrix_id).toBeNull();
+  expect(record?.split).toBe("diagnostic");
+  await page.getByRole("button", { name: "Matrix", exact: true }).click();
 
   let observedRunSockets = 0;
   let receivedRunFrames = 0;
@@ -202,7 +255,9 @@ test("local design-to-results flow proves editing, durable controls, and evidenc
   await page
     .getByRole("checkbox", { name: "Approve serial matrix compute" })
     .check();
+  const matrixResponse = page.waitForResponse((response) => response.url().endsWith("/api/lab/experiment-matrices") && response.request().method() === "POST");
   await page.getByRole("button", { name: "Queue matrix" }).click();
+  const matrix = await (await matrixResponse).json() as MatrixLaunchResponse;
   await expect(
     page
       .getByRole("status")
@@ -232,6 +287,13 @@ test("local design-to-results flow proves editing, durable controls, and evidenc
   ).toBeVisible();
   await auditPrimaryView(page);
 
+  // Bound CI compute: controls/socket proof does not require training all 20 jobs.
+  await Promise.all(matrix.run_ids.map((runId) => page.request.post(`/api/lab/runs/${runId}/cancel`)));
+  await expect.poll(async () => {
+    const runs = await Promise.all(matrix.run_ids.map(async (runId) => (await (await page.request.get(`/api/lab/runs/${runId}`)).json()) as LabRun));
+    return runs.every((run) => ["completed", "cancelled", "failed", "interrupted"].includes(run.status));
+  }, { timeout: 30_000 }).toBe(true);
+
   await page.getByRole("button", { name: "Results" }).click();
   await expect(
     page.getByRole("heading", { name: "Makespan comparison" })
@@ -248,6 +310,15 @@ test("local design-to-results flow proves editing, durable controls, and evidenc
   await expect(page.getByText("Nominal gate", { exact: true })).toBeVisible();
   await expect(page.getByText("Recovery gate", { exact: true })).toBeVisible();
   await expect(page.getByText("logical transport")).toBeVisible();
+  const localRecord = page.getByRole("article", { name: `Local evaluation ${suite.evaluation_id}` });
+  await expect(localRecord).toBeVisible();
+  await expect(localRecord).toContainText("Scenario seeds: 800 · 1 episodes · diagnostic");
+  await expect(page.getByText(/unit evaluations do not satisfy the frozen research matrix/)).toBeVisible();
+  const reportLink = localRecord.getByRole("link", { name: /report/i });
+  await expect(reportLink).toBeVisible();
+  const downloadedReport = await page.request.get((await reportLink.getAttribute("href"))!);
+  expect(downloadedReport.ok()).toBe(true);
+  expect(await downloadedReport.text()).toContain(suite.evaluation_id);
 
   if ((page.viewportSize()?.width ?? 0) <= 720) {
     await expectDocumentScrollsToBottom(page);
@@ -259,6 +330,21 @@ test("local design-to-results flow proves editing, durable controls, and evidenc
   }
   await auditPrimaryView(page);
   expect(cspViolations).toEqual([]);
+});
+
+test("a failed post-compile trace refresh is visible and cannot leave the previous replay", async ({ page }) => {
+  await page.goto("/#/design");
+  const compile = page.getByRole("button", { name: "Compile build plan" });
+  await expect(compile).toBeEnabled();
+  await page.route("**/api/traces/*", (route) => route.abort("failed"));
+  const rebuilt = page.waitForResponse((response) => response.url().endsWith("/api/design/rebuild") && response.request().method() === "POST");
+  await compile.click();
+  expect((await rebuilt).ok()).toBe(true);
+  const alert = page.getByRole("alert");
+  await expect(alert.getByRole("heading", { name: "Workbench unavailable" })).toBeVisible();
+  await expect(alert).toContainText(/Could not reach|Failed to fetch/i);
+  await expect(page.getByRole("heading", { name: "Decision epoch" })).toHaveCount(0);
+  await expect(page.getByText("Read-only public preview")).toHaveCount(0);
 });
 
 test("local API failure is shown and never replaced by preview data", async ({
