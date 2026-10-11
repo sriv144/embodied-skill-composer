@@ -87,6 +87,7 @@ source = ["embodied_skill_composer"]
 omit = ["src/embodied_skill_composer/construction/phase3_verification.py"]
 
 [tool.coverage.report]
+# Combined statement/branch floor; the independent line gate is configured below.
 fail_under = 82.19
 precision = 2
 show_missing = true
@@ -96,6 +97,14 @@ exclude_also = [
     "if __name__ == .__main__.:",
     "raise NotImplementedError",
 ]
+
+[tool.construction_intelligence.coverage]
+# ceil(100 * 16033 / 18252, 2 decimals), from verified post-cleanup PR #25 CI.
+line_fail_under = 87.85
+baseline_source_commit = "bd06db9a0443d4719be8d4aca34db882128d617e"
+baseline_workflow_run = 38111292762
+baseline_lines_covered = 16033
+baseline_lines_valid = 18252
 
 [tool.mypy]
 python_version = "3.11"
