@@ -69,6 +69,11 @@ class TrainingConfig(BaseModel):
     entropy_coefficient: float = Field(default=0.01, ge=0)
     max_grad_norm: float = Field(default=1.0, gt=0)
     include_training_failures: bool = True
+    failure_curriculum_mode: Literal["constant", "linear"] = "constant"
+    failure_curriculum_start_probability: float = Field(default=0.0, ge=0, le=1)
+    failure_curriculum_final_probability: float = Field(default=0.35, ge=0, le=1)
+    failure_curriculum_ramp_fraction: float = Field(default=0.5, gt=0, le=1)
+    failure_curriculum_reference_transitions: int | None = Field(default=None, gt=0)
     device: Literal["auto", "cpu", "cuda"] = "auto"
     output_root: Path = Path("logs/construction_intelligence/training")
     checkpoint_fractions: list[float] = Field(default_factory=lambda: [1.0])
@@ -87,6 +92,11 @@ class TrainingConfig(BaseModel):
             self.training_seed = self.seed
         if self.training_seed != self.seed:
             raise ValueError("training_seed must match seed")
+        if (
+            self.failure_curriculum_mode == "linear"
+            and self.failure_curriculum_start_probability > self.failure_curriculum_final_probability
+        ):
+            raise ValueError("linear failure curriculum probability must not decrease")
         fractions = sorted(set(self.checkpoint_fractions))
         if not fractions or fractions[-1] != 1.0:
             fractions.append(1.0)
@@ -160,9 +170,85 @@ class RolloutStep:
 
 @dataclass
 class RolloutEpisode:
+    """One collected trajectory, which may stop before the environment ends.
+
+    ``completed`` means every construction module was installed, not merely that
+    the environment terminated or reached its decision/time limit.
+    """
+
     steps: list[RolloutStep]
     bootstrap_values: Tensor
     completed: bool
+    structure_completion_rate: float = 0.0
+    terminated: bool = False
+    truncated: bool = False
+    failure_probability: float = 0.0
+    has_scheduled_failure: bool = False
+
+
+def _training_failure_probability(config: TrainingConfig, transitions: int) -> float:
+    """Use the durable agent-transition counter, never wall time or update count.
+
+    The default constant mode retains the historical single-run mixture. Frozen
+    protocol 1.1.0 explicitly opts into a linear ramp; the no-failure ablation
+    overrides either mode to zero. An explicit reference budget lets a short pilot
+    follow the full run's curriculum prefix. Resuming at the same counter is deterministic.
+    """
+
+    if transitions < 0:
+        raise ValueError("training transition counter must not be negative")
+    if not config.include_training_failures:
+        return 0.0
+    if config.failure_curriculum_mode == "constant":
+        return config.failure_curriculum_final_probability
+    reference_transitions = config.failure_curriculum_reference_transitions or config.transitions
+    progress = min(transitions / (reference_transitions * config.failure_curriculum_ramp_fraction), 1.0)
+    return config.failure_curriculum_start_probability + progress * (
+        config.failure_curriculum_final_probability - config.failure_curriculum_start_probability
+    )
+
+
+def _rollout_diagnostics(episodes: list[RolloutEpisode]) -> dict[str, float | int]:
+    """Describe collected trajectories without presenting time limits as success.
+
+    Completion fractions include partial trajectories cut off by the collector's
+    decision budget. They are training diagnostics, not full-episode validation
+    estimates. The legacy terminal fraction remains termination OR truncation.
+    Failure-scenario fraction counts scheduled failures, which need not have
+    triggered before a partial trajectory reaches the collector cutoff.
+    """
+
+    if not episodes:
+        raise ValueError("rollout diagnostics require at least one trajectory")
+    return {
+        "rollout_episode_count": len(episodes),
+        "rollout_terminal_fraction": float(np.mean([
+            episode.terminated or episode.truncated for episode in episodes
+        ])),
+        "rollout_termination_fraction": float(np.mean([
+            episode.terminated for episode in episodes
+        ])),
+        "rollout_truncation_fraction": float(np.mean([
+            episode.truncated for episode in episodes
+        ])),
+        "rollout_collector_cutoff_fraction": float(np.mean([
+            not (episode.terminated or episode.truncated) for episode in episodes
+        ])),
+        "rollout_success_fraction": float(np.mean([
+            episode.completed for episode in episodes
+        ])),
+        "rollout_structure_completion_rate": float(np.mean([
+            episode.structure_completion_rate for episode in episodes
+        ])),
+        "rollout_failure_probability_mean": float(np.mean([
+            episode.failure_probability for episode in episodes
+        ])),
+        "rollout_failure_probability_min": min(episode.failure_probability for episode in episodes),
+        "rollout_failure_probability_max": max(episode.failure_probability for episode in episodes),
+        "rollout_failure_scenario_fraction": float(np.mean([
+            episode.has_scheduled_failure for episode in episodes
+        ])),
+    }
 
 
 def train_swarm_policy(
@@ -401,6 +487,7 @@ def train_swarm_policy(
                 config,
                 decision_target=decision_target,
                 episode_cursor=episode_cursor,
+                start_transitions=transitions,
                 device=device,
                 cancel_check=cancel_check,
             )
@@ -421,18 +508,17 @@ def train_swarm_policy(
             decisions = int(batch.batch_size[0])
             transitions += decisions * FLEET_SIZE
             updates += 1
-            completion = float(np.mean([episode.completed for episode in episodes]))
             mean_return = float(
                 np.mean([sum(step.reward for step in episode.steps) for episode in episodes])
             )
-            row = {
+            row: dict[str, float | int] = {
                 "update": updates,
                 "transitions": min(transitions, config.transitions),
                 "loss_objective": losses["loss_objective"],
                 "loss_critic": losses["loss_critic"],
                 "loss_entropy": losses["loss_entropy"],
                 "mean_episode_return": mean_return,
-                "rollout_terminal_fraction": completion,
+                **_rollout_diagnostics(episodes),
             }
             curve_rows.append(row)
             for key, value in row.items():
@@ -601,24 +687,33 @@ def collect_policy_rollouts(
     episode_cursor: int,
     device: torch.device | str,
     cancel_check=None,
+    start_transitions: int = 0,
 ) -> tuple[list[RolloutEpisode], int]:
+    if start_transitions < 0:
+        raise ValueError("training transition counter must not be negative")
     episodes: list[RolloutEpisode] = []
     decisions = 0
     while decisions < decision_target:
         if cancel_check and cancel_check():
             raise RuntimeError("training cancelled")
         scenario_seed = (config.seed + episode_cursor) % 800
+        failure_probability = _training_failure_probability(
+            config, start_transitions + decisions * FLEET_SIZE,
+        )
         scenario = generate_cottage_scenario(
             scenario_seed,
             base_design,
             config=CottageScenarioConfig(
                 include_failures=config.include_training_failures,
+                failure_probability=failure_probability,
                 obstacle_count_range=(0, 4),
             ),
         )
         env = TemporalConstructionCoordinationEnv(scenario)
         observations, _ = env.reset(seed=scenario_seed)
         trajectory: list[RolloutStep] = []
+        terminated = False
+        truncated = False
         while env.agents and decisions < decision_target:
             if cancel_check and cancel_check():
                 raise RuntimeError("training cancelled")
@@ -645,7 +740,9 @@ def collect_policy_rollouts(
                 for index, agent in enumerate(env.possible_agents)
             }
             next_observations, rewards, terminations, truncations, _ = env.step(actions)
-            done = all(terminations.values()) or all(truncations.values())
+            terminated = bool(terminations) and all(terminations.values())
+            truncated = bool(truncations) and all(truncations.values())
+            done = terminated or truncated
             trajectory.append(
                 RolloutStep(
                     observations={key: value.detach() for key, value in tensors.items()},
@@ -682,7 +779,12 @@ def collect_policy_rollouts(
             RolloutEpisode(
                 steps=trajectory,
                 bootstrap_values=bootstrap_values,
-                completed=bool(trajectory and trajectory[-1].done),
+                completed=bool(env.modules) and len(env.completed) == len(env.modules),
+                structure_completion_rate=len(env.completed) / max(len(env.modules), 1),
+                terminated=terminated,
+                truncated=truncated,
+                failure_probability=failure_probability,
+                has_scheduled_failure=bool(scenario.failures),
             )
         )
         episode_cursor += 1
@@ -1214,7 +1316,12 @@ def design_digest(design: HouseDesign) -> str:
 
 
 def _write_curve(path: Path, rows: list[dict[str, float | int]]) -> None:
-    fieldnames = list(rows[0]) if rows else ["update", "transitions"]
+    # Resumed histories can contain older rows without the new diagnostics.
+    # Leave those cells blank (unknown); never fabricate historical completion.
+    fieldnames = (
+        list(dict.fromkeys(key for row in rows for key in row))
+        if rows else ["update", "transitions"]
+    )
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()

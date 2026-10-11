@@ -235,7 +235,16 @@ export type LearningCurvePoint = {
   validation_completion_rate?: number;
   mean_episode_return?: number;
   rollout_terminal_fraction?: number;
+  rollout_episode_count?: number;
+  rollout_termination_fraction?: number;
+  rollout_truncation_fraction?: number;
+  rollout_collector_cutoff_fraction?: number;
+  rollout_success_fraction?: number;
   rollout_structure_completion_rate?: number;
+  rollout_failure_probability_mean?: number;
+  rollout_failure_probability_min?: number;
+  rollout_failure_probability_max?: number;
+  rollout_failure_scenario_fraction?: number;
   loss_objective?: number;
   loss_critic?: number;
   loss_entropy?: number;
@@ -551,6 +560,16 @@ export type RunEventPayload =
       loss_entropy: number;
       mean_episode_return: number;
       rollout_terminal_fraction: number;
+      rollout_episode_count?: number | null;
+      rollout_termination_fraction?: number | null;
+      rollout_truncation_fraction?: number | null;
+      rollout_collector_cutoff_fraction?: number | null;
+      rollout_success_fraction?: number | null;
+      rollout_structure_completion_rate?: number | null;
+      rollout_failure_probability_mean?: number | null;
+      rollout_failure_probability_min?: number | null;
+      rollout_failure_probability_max?: number | null;
+      rollout_failure_scenario_fraction?: number | null;
     }
   | { event: "training_completed" | "evaluation_completed"; artifacts: Record<string, unknown> }
   | { event: "evaluation_started" }

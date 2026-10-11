@@ -73,6 +73,7 @@ data.
 | Document | Purpose |
 | --- | --- |
 | [Completion roadmap](roadmap.md) | Authoritative phase status, evidence links, and remaining gates |
+| [Covered and remaining work](construction-intelligence-v1-completion-status.md) | Concise verified-completion, pending-acceptance, and release-critical breakdown |
 | [Architecture](construction-intelligence-v1-architecture.md) | Design-to-evidence data flow, component ownership, and runtime boundaries |
 | [Research protocol](construction-intelligence-v1-protocol.md) | Frozen matrix, seed isolation, checkpoint selection, evaluation, and acceptance rules |
 | [Reproducibility](construction-intelligence-v1-reproducibility.md) | Environments, quality gates, fingerprints, durable jobs, and strict resume behavior |

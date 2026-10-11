@@ -83,5 +83,57 @@ Host and WebSocket-origin checks protect that single-user boundary. GitHub Pages
 ## Required Python gates
 
 The protected Python check verifies lock drift, dependency integrity, byte compilation, Ruff,
-full-source mypy, and the pytest suite with branch measurement enabled. Coverage.py reports the combined
-statement/branch total; the required release floor is 82.19%.
+full-source mypy, and the pytest suite with branch measurement enabled. It enforces two independent
+coverage gates:
+
+- **Line coverage >=87.85%**, computed from integer `lines-covered / lines-valid` in `coverage.xml` by
+  `scripts/check_line_coverage.py`. The canonical floor is
+  `tool.construction_intelligence.coverage.line_fail_under` in `pyproject.toml`. The checker compares the
+  exact ratio, not the rounded XML `line-rate` or a displayed percentage, and rejects invalid counters,
+  zero denominators, and invalid/non-finite floor values.
+- **Combined statement/branch coverage >=82.19%**, retained as Coverage.py's separate `fail_under` gate.
+  This combined percentage must not be presented as line coverage.
+
+Run both checks locally after generating the report:
+
+```powershell
+python -m pytest -q --cov=embodied_skill_composer --cov-report=term-missing --cov-report=xml
+python scripts/check_line_coverage.py --coverage-xml coverage.xml
+```
+
+CI uploads `coverage.xml` as the `python-coverage` artifact for 90 days, including when tests or either
+coverage gate fail and a report exists. The artifact's workflow run identifies the tested commit.
+
+### Current verified line-baseline provenance
+
+The successful PR #25 Linux run
+[38111292762](https://github.com/sriv144/embodied-skill-composer/actions/runs/38111292762), at source commit
+`bd06db9a0443d4719be8d4aca34db882128d617e`, reports 18,252 executable statements and 2,219 missed
+statements: **16,033/18,252 =87.84242822704361% line coverage**. Its complete Python gate passed with
+1,222 tests passed, three skipped, full-source mypy over 136 files, and **85.25% combined** coverage.
+
+This is the current successfully measured post-cleanup line baseline. The required line floor is the
+higher of 80%, the preserved historical baseline below, and this current measured baseline, rounded
+upward to two decimal places: **87.85%**. The baseline source commit, workflow run, and exact integer
+counts are recorded alongside the canonical floor in `pyproject.toml`; subsequent measurements must
+not lower it. This current verified measurement establishes the floor without claiming to reconstruct
+a missing historical Windows measurement.
+
+### Preserved historical line-baseline provenance
+
+The preserved successful Phase-2 PR #20 Linux runs
+[29483361158](https://github.com/sriv144/embodied-skill-composer/actions/runs/29483361158) and
+[29483359164](https://github.com/sriv144/embodied-skill-composer/actions/runs/29483359164) both report
+9,465 executable statements and 1,523 missed statements: **7,942/9,465 =83.90913893291072% line coverage**.
+Their source commit is `059985c88405d01673c02585596647d702264685`; its `src`, `scripts`, dependency definitions,
+and coverage configuration match the clean post-cleanup commit
+`5d30174c1dcaa701cde5b3f00d344b92813f47bd`. This preserved observed post-cleanup baseline rounds upward
+to **83.91%**, below the current verified **87.85%** floor.
+
+Those remote runs passed 212 tests and skipped three, with **81.58% combined** coverage. The separately
+documented local clean-commit result of 213 passed/two skipped and **82.19% combined** coverage did not
+preserve its line counts or XML report. Its exact historical local line baseline cannot be recovered
+from that combined percentage and is not claimed to equal either 83.91% or 87.85%. A future isolated run
+of the archived commit would be a documented reconstruction under its recorded environment, not the
+missing historical measurement. The enforced floor is bound to the current verified remote measurement
+above, not an unverifiable historical Windows value.

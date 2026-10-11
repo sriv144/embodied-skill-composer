@@ -27,6 +27,7 @@ from tests.test_construction_public_demo_provenance import (
     _research_bundle,
 )
 from scripts.package_construction_research_evidence import _snapshot_registry
+from tests.construction_training_curve_fixtures import attach_training_curve_sources
 
 
 class _StaticRegistry:
@@ -183,6 +184,7 @@ def _canonical_inputs(
         config["seed"] = config["training_seed"]
         config["source_tree_digest"] = SOURCE.tree_digest
         config["output_root"] = rf"C:\Users\fixture\training\{run['run_key']}"
+    matrix["runs"] = attach_training_curve_sources(root / "curve-sources", runs)
 
     selection_path = root / "selections.json"
     selections = _read_object(selection_path)

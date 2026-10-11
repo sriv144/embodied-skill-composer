@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from embodied_skill_composer.construction import release_assets
+from embodied_skill_composer.construction import public_demo_provenance, release_assets
 from embodied_skill_composer.construction.coppelia_archive import (
     CANONICAL_PATHS,
     COPPELIA_ARCHIVE_INDEX_FILE,
@@ -112,6 +112,110 @@ def test_release_assets_are_byte_deterministic_and_include_external_onnx_data(
         names = archive.namelist()
     assert sum(name.endswith("/actor.onnx") for name in names) == 20
     assert sum(name.endswith("/actor.onnx.data") for name in names) == 20
+
+
+def test_release_staging_regenerates_from_original_inputs_before_archiving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    selections = _selection_fixture(tmp_path / "checkpoints")
+    _install_release_fakes(monkeypatch, selections)
+    descriptors = {
+        "deterministic_bundle": tmp_path / "deterministic.json",
+        "research_bundle": tmp_path / "research.json",
+        "simulator_bundle": tmp_path / "simulator.json",
+    }
+    exports: list[tuple[Path, dict[str, Any]]] = []
+    comparisons: list[tuple[Path, Path]] = []
+    original_export = release_assets.export_public_demo_bundle
+    original_compare = public_demo_provenance.verify_public_demo_regeneration_identity
+
+    def observe_export(output_dir: Path, **kwargs: Any) -> dict[str, object]:
+        assert not output_dir.exists()
+        exports.append((output_dir, kwargs))
+        return original_export(output_dir, **kwargs)
+
+    def observe_comparison(reference: Path, regenerated: Path) -> dict[str, object]:
+        assert len(exports) == 2
+        assert not (reference.parent / "selected-policies").exists()
+        comparisons.append((reference, regenerated))
+        return original_compare(reference, regenerated)
+
+    monkeypatch.setattr(release_assets, "export_public_demo_bundle", observe_export)
+    monkeypatch.setattr(
+        public_demo_provenance,
+        "verify_public_demo_regeneration_identity",
+        observe_comparison,
+    )
+    destination = tmp_path / "release"
+    stage_release_assets(
+        destination,
+        workspace=workspace,
+        release_version=RELEASE_VERSION,
+        release_tag=RELEASE_TAG,
+        **descriptors,
+    )
+
+    assert len(exports) == 2
+    assert exports[0][0] != exports[1][0]
+    assert exports[0][1] == exports[1][1]
+    assert all(exports[0][1][name] == path for name, path in descriptors.items())
+    assert comparisons == [(exports[0][0], exports[1][0])]
+    assert (destination / RELEASE_IDENTITY_FILE).is_file()
+    assert not list(tmp_path.glob(".release-stage-*"))
+
+
+@pytest.mark.parametrize("failure", ["mismatch", "regeneration_export"])
+def test_release_staging_preserves_existing_output_when_regeneration_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    selections = _selection_fixture(tmp_path / "checkpoints")
+    _install_release_fakes(monkeypatch, selections)
+    destination = tmp_path / "release"
+    destination.mkdir()
+    (destination / "existing.bin").write_bytes(b"preserve previous release")
+    before = _directory_bytes(destination)
+    original_export = release_assets.export_public_demo_bundle
+    calls = 0
+
+    def unstable_export(output_dir: Path, **kwargs: Any) -> dict[str, object]:
+        nonlocal calls
+        calls += 1
+        if calls == 2 and failure == "regeneration_export":
+            output_dir.mkdir()
+            (output_dir / "partial.bin").write_bytes(b"partial regeneration")
+            raise OSError("regeneration input unavailable")
+        payload = original_export(output_dir, **kwargs)
+        if calls == 2:
+            (output_dir / "index.html").write_text("changed release", encoding="utf-8")
+        return payload
+
+    def policy_stage_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("policy export must follow the regeneration gate")
+
+    monkeypatch.setattr(release_assets, "export_public_demo_bundle", unstable_export)
+    monkeypatch.setattr(release_assets, "_stage_selected_policies", policy_stage_must_not_run)
+    expected = "regeneration identity mismatch" if failure == "mismatch" else "input unavailable"
+    with pytest.raises(ReleaseAssetError, match=expected):
+        stage_release_assets(
+            destination,
+            workspace=workspace,
+            deterministic_bundle=tmp_path / "deterministic.json",
+            research_bundle=tmp_path / "research.json",
+            simulator_bundle=tmp_path / "simulator.json",
+            release_version=RELEASE_VERSION,
+            release_tag=RELEASE_TAG,
+        )
+
+    assert calls == 2
+    assert _directory_bytes(destination) == before
+    assert not list(tmp_path.glob(".release-stage-*"))
 
 
 def test_pages_staging_replaces_preview_with_exact_verified_archive(
@@ -744,6 +848,17 @@ def _install_release_fakes(
 
     monkeypatch.setattr(release_assets, "export_public_demo_bundle", fake_export)
     monkeypatch.setattr(release_assets, "verify_public_demo_export", fake_verify)
+
+    def fake_regeneration_identity(reference: Path, regenerated: Path) -> dict[str, object]:
+        if _directory_bytes(reference) != _directory_bytes(regenerated):
+            raise PublicDemoExportError("public-demo regeneration identity mismatch")
+        return _read_json(regenerated / "provenance.json")
+
+    monkeypatch.setattr(
+        public_demo_provenance,
+        "verify_public_demo_regeneration_identity",
+        fake_regeneration_identity,
+    )
     monkeypatch.setattr(release_assets, "load_policy_checkpoint_metadata", fake_metadata)
     monkeypatch.setattr(release_assets, "load_policy_checkpoint", fake_load)
     monkeypatch.setattr(release_assets, "export_actor_onnx", fake_onnx)

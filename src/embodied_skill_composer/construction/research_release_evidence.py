@@ -29,6 +29,7 @@ from embodied_skill_composer.construction.public_demo_provenance import (
     verify_research_release_evidence,
 )
 from embodied_skill_composer.construction.training import TrainingConfig
+from embodied_skill_composer.construction.research_training_curves import stage_training_curves
 
 
 _ARTIFACTS: dict[str, tuple[str, str, str]] = {
@@ -141,6 +142,10 @@ def package_research_release_evidence(
             staging / "release_completeness.json",
         )
 
+        try:
+            training_artifacts = stage_training_curves(staging, matrix)
+        except (OSError, ValueError) as exc:
+            raise PublicDemoExportError(f"training curve evidence is invalid: {exc}") from exc
         artifacts = [
             BundleArtifact(
                 role=role,
@@ -149,7 +154,7 @@ def package_research_release_evidence(
                 sha256=file_sha256(staging / file_name),
                 media_type=media_type,
             )
-            for role, (file_name, target, media_type) in _ARTIFACTS.items()
+            for role, (file_name, target, media_type) in {**_ARTIFACTS, **training_artifacts}.items()
         ]
         manifest = EvidenceBundleManifest(
             schema_version="construction-intelligence-public-demo-input-v1",

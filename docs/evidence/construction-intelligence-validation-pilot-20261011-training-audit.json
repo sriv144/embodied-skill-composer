@@ -1,0 +1,59 @@
+{
+  "schema_version": "construction-intelligence-validation-pilot-training-audit-v1",
+  "verified_at": "2026-10-11T13:10:00Z",
+  "matrix_id": "validation-pilot-2eba09c3fdff-978196b893d7",
+  "protocol_digest": "978196b893d789f8365ec068095ec256e64679632f11f5e5a327e8bfe555d2db",
+  "source_commit": "2eba09c3fdff9babc15c7615ca6a437f8a9704cf",
+  "completed_training_runs": 3,
+  "planned_training_runs": 4,
+  "runs": [
+    {
+      "run_key": "ippo-ppo2-seed7",
+      "run_directory_name": "20261011T041256Z-ippo-research-s7",
+      "configuration_digest": "84f8e49bbbb96bfda851d544d321e69dd3e286f3f8c2a9b06cb187986363a3bf",
+      "policy_sha256": "ccd7a753516ef0ef36eac3239d2a53589f1652da45fe1e9fdeae357cd47d9633",
+      "transitions": 150000,
+      "updates": 20,
+      "checkpoint_pairs_present": 5,
+      "onnx_and_external_data_present": true
+    },
+    {
+      "run_key": "ippo-ppo6-seed7",
+      "run_directory_name": "20261011T044104Z-ippo-research-s7",
+      "configuration_digest": "7a438f76125fc64ec252296216c01b7c925c360299b4a849ca20176ead7fc80e",
+      "policy_sha256": "069d01ffab499d667702edcc68347cd638ee05ae0df747d57ec5e310ab0cc7e4",
+      "transitions": 150000,
+      "updates": 20,
+      "checkpoint_pairs_present": 5,
+      "onnx_and_external_data_present": true,
+      "resume_attempt": 2,
+      "training_resumed_event": {
+        "transitions": 0,
+        "updates": 0,
+        "episode_cursor": 0
+      }
+    },
+    {
+      "run_key": "mappo-ppo2-seed7",
+      "run_directory_name": "20261011T122823Z-mappo-research-s7",
+      "configuration_digest": "af59a636420e50df6df2be86d5829d510deb0f8f025c835c3b18f7c8b7e4adb9",
+      "policy_sha256": "e6225dab55587a6cca3c20bb6ea012746d33389d8bb934e35423e4b427fbca65",
+      "transitions": 150000,
+      "updates": 20,
+      "checkpoint_pairs_present": 5,
+      "onnx_and_external_data_present": true
+    }
+  ],
+  "verification_scope": [
+    "Final policy bytes match the source manifest SHA-256.",
+    "Configuration digest matches the source configuration and policy manifest.",
+    "All five policy/resume checkpoint pairs and ONNX files are present.",
+    "CSV rows satisfy bounded numeric columns and the complete configured update/transition schedule."
+  ],
+  "not_claimed": [
+    "This file is a training-artifact audit, not a validation or held-out evaluation.",
+    "Checkpoint presence does not independently prove checkpoint deserialization or exact resume equivalence.",
+    "Rollout completion diagnostics are not acceptance results.",
+    "No corrected full research matrix or release eligibility is claimed."
+  ]
+}

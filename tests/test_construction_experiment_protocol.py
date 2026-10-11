@@ -105,6 +105,59 @@ def test_loader_rejects_unknown_fields_and_split_leakage(tmp_path: Path) -> None
         load_experiment_protocol(leaked)
 
 
+def test_archived_protocol_retains_original_fingerprint_and_boundaries() -> None:
+    archived = load_experiment_protocol(
+        DEFAULT_EXPERIMENT_PROTOCOL_PATH.parent
+        / "archive"
+        / "construction_intelligence_v1-1.0.0.yaml"
+    )
+    current = load_experiment_protocol()
+
+    assert archived.protocol_version == "1.0.0"
+    assert protocol_digest(archived) == (
+        "79e5444bb108573a9ce1597493e4556cf4fd7ba59607f81e7fe2826b0e74c707"
+    )
+    assert current.protocol_version == "1.1.0"
+    assert protocol_digest(current) != protocol_digest(archived)
+    for field in (
+        "training_seeds",
+        "checkpoint_fractions",
+        "scenario_splits",
+        "selection",
+        "evaluation",
+        "acceptance",
+        "ablations",
+    ):
+        assert getattr(current, field) == getattr(archived, field)
+    old_runs = expand_experiment_matrix(archived, "research")
+    new_runs = expand_experiment_matrix(current, "research")
+    assert len(old_runs) == len(new_runs) == 20
+    assert all(old.transitions == new.transitions == 1_500_000 for old, new in zip(old_runs, new_runs, strict=True))
+    assert all(
+        old.protocol_run_digest != new.protocol_run_digest
+        for old, new in zip(old_runs, new_runs, strict=True)
+    )
+    assert all("failure_curriculum_mode" not in old.training_config_payload() for old in old_runs)
+    for run in new_runs:
+        payload = run.training_config_payload()
+        assert payload["failure_curriculum_mode"] == "linear"
+        assert payload["failure_curriculum_start_probability"] == 0.0
+        assert payload["failure_curriculum_final_probability"] == 0.35
+        assert payload["failure_curriculum_ramp_fraction"] == 0.5
+    assert next(
+        run for run in new_runs if run.experiment_variant == "mappo_no_failure_curriculum"
+    ).training_config_payload()["include_training_failures"] is False
+
+
+def test_loader_rejects_unregistered_protocol_revision(tmp_path: Path) -> None:
+    payload = yaml.safe_load(DEFAULT_EXPERIMENT_PROTOCOL_PATH.read_text(encoding="utf-8"))
+    payload["protocol_version"] = "9.0.0"
+    unsupported = tmp_path / "unsupported.yaml"
+    unsupported.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    with pytest.raises(ValidationError, match="protocol_version"):
+        load_experiment_protocol(unsupported)
+
+
 @pytest.mark.parametrize("profile", ["unit", "smoke", "research"])
 def test_every_profile_expands_to_exact_twenty_run_matrix(profile: str) -> None:
     protocol = load_experiment_protocol()

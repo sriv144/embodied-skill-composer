@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "failed_attempt_diagnostic_not_live_acceptance",
+  "release_eligible": false,
+  "source_commit": "e0e5ca91c1a3c98da67b9a9f70abcfae3ccff60b",
+  "attempt_tag": "e0e5ca9-oct11-r1",
+  "scenario": "nominal",
+  "started_at": "2026-10-11T00:18:40Z",
+  "application_error": {
+    "event_id": 1000,
+    "at": "2026-10-11T02:33:33.3448964Z",
+    "process": "coppeliaSim.exe",
+    "owned_pid": 26532,
+    "exception_code": "0xc0000374",
+    "faulting_module": "ntdll.dll",
+    "fault_offset": "0x117eb5"
+  },
+  "windows_error_reporting": {
+    "event_id": 1001,
+    "classification": "APPCRASH",
+    "report_id": "e5d8e6a3-1253-41bc-9056-02cc378484a7",
+    "event_times": ["2026-10-11T02:33:35.7849084Z", "2026-10-11T02:33:37.3588490Z"]
+  },
+  "supervisor": {
+    "state": "failed",
+    "at": "2026-10-11T02:33:38.571727Z",
+    "error": "CoppeliaSim exited while nominal execution was pending",
+    "owned_runner_stopped": true,
+    "recovery_launched": false
+  },
+  "local_crash_dump": {
+    "filename": "coppeliaSim.exe.26532.dmp",
+    "bytes": 13182498,
+    "sha256": "e4e5c1d01f247c3e1aa4c9ac1795eedba0455ae2855ab5c13f12bff43441ddb9",
+    "uploaded": false,
+    "contents_analyzed": false
+  },
+  "prior_matching_signature": {
+    "at": "2026-10-09T14:35:18.6871026Z",
+    "pid": 32516,
+    "exception_code": "0xc0000374",
+    "faulting_module": "ntdll.dll",
+    "fault_offset": "0x117eb5",
+    "report_id": "8a88aef9-da65-4491-8947-1708432337f0"
+  },
+  "completed_native_bundle": false,
+  "live_gate_passed": false,
+  "interpretation": "Repeated native heap-corruption crash signature. The corrupting component and causal mechanism are not identified. No evidence establishes resource exhaustion or user closure.",
+  "limitations": "Launcher logs were empty; consoleMsgsToFile was disabled. No debugger was installed. WER archive access was denied and permissions were not changed. This diagnostic does not satisfy Phase 5."
+}

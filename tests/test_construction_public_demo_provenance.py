@@ -36,6 +36,9 @@ from embodied_skill_composer.construction.evaluation import (
     summarize_evaluations,
 )
 from embodied_skill_composer.construction.experiment_execution import (
+    MatrixSelectionEvidence,
+    RunSelectionEvidence,
+    audit_ablation_hypotheses,
     audit_primary_acceptance,
 )
 from embodied_skill_composer.construction.experiment_protocol import (
@@ -593,6 +596,10 @@ def test_release_export_covers_every_emitted_artifact_and_round_trips(
     assert research_summary["per_training_seed"]
     assert research_summary["per_scenario_seed"]
     assert len(research_summary["learning_curves"]) == 20
+    assert all(curve["curve_kind"] == "validation_checkpoint_completion"
+               and all("validation_completion_rate" in point and "rollout_terminal_fraction" not in point
+                       for point in curve["points"])
+               for curve in research_summary["learning_curves"])
     assert research_summary["acceptance"]["passed"] is True
     assert len(research_summary["ablations"]) == 2
     research_references = research_summary["artifact_references"]
@@ -1320,6 +1327,10 @@ def _research_bundle(root: Path) -> Path:
                     "evidence_path": (f"evidence/{run_key}/validation_selection.json"),
                 }
             )
+    from tests.construction_training_curve_fixtures import attach_training_curve_sources
+    from embodied_skill_composer.construction.research_training_curves import stage_training_curves
+
+    private_runs = attach_training_curve_sources(root.parent / f"{root.name}-training-sources", runs)
     matrix = {
         "id": MATRIX_ID,
         "protocol_digest": PROTOCOL_DIGEST,
@@ -1358,20 +1369,20 @@ def _research_bundle(root: Path) -> Path:
     _write_json(
         root / "ablations.json",
         [
-            {
-                "hypothesis": hypothesis,
-                "supported": False,
-                "completion_gain": 0.0,
-                "transitions_to_95_reduction": 0.0,
-                "failure_completion_gain": 0.0,
-                "no_failure_completion_delta": 0.0,
-                "completion_boundary_met": False,
-                "transition_boundary_met": False,
-                "failure_boundary_met": False,
-                "no_failure_safety_boundary_met": True,
-                "interpretation": "Complete evidence does not support the hypothesis.",
-            }
-            for hypothesis in ("behavior_cloning", "failure_curriculum")
+            item.model_dump(mode="json")
+            for item in audit_ablation_hypotheses(
+                typed_suite,
+                PROTOCOL,
+                selection_evidence=MatrixSelectionEvidence(
+                    matrix_id=MATRIX_ID,
+                    protocol_digest=PROTOCOL_DIGEST,
+                    selections=[
+                        RunSelectionEvidence.model_validate({"matrix_id": MATRIX_ID, **selection})
+                        for selection in selections
+                    ],
+                    evidence_path=root / "selections.json",
+                ),
+            )
         ],
     )
     _write_json(
@@ -1412,6 +1423,10 @@ def _research_bundle(root: Path) -> Path:
         "release_completeness": "evidence/research/release_completeness.json",
     }
     source_paths = {role: target.rsplit("/", 1)[-1] for role, target in role_targets.items()}
+    curve_artifacts = stage_training_curves(root, {**matrix, "runs": private_runs})
+    for role, (source_path, target, _media_type) in curve_artifacts.items():
+        role_targets[role] = target
+        source_paths[role] = source_path
     return _write_bundle(
         root,
         kind="research",
