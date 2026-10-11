@@ -6,7 +6,6 @@ from collections.abc import Iterable
 from functools import lru_cache
 from math import isclose, isfinite
 from pathlib import Path
-from statistics import mean
 from typing import TYPE_CHECKING, cast
 from urllib.parse import quote
 
@@ -451,13 +450,15 @@ def _cli_matrix_completion_artifacts(
                 if not (
                     isclose(
                         candidate.result.mean_completion_rate,
-                        mean(episode.structure_completion_rate for episode in candidate.episodes),
+                        _cli_validation_mean(
+                            [episode.structure_completion_rate for episode in candidate.episodes]
+                        ),
                         rel_tol=0,
                         abs_tol=1e-12,
                     )
                     and isclose(
                         candidate.result.mean_makespan_s,
-                        mean(episode.makespan_s for episode in candidate.episodes),
+                        _cli_validation_mean([episode.makespan_s for episode in candidate.episodes]),
                         rel_tol=0,
                         abs_tol=1e-12,
                     )
@@ -521,6 +522,14 @@ def _cli_matrix_completion_artifacts(
         }
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         return None
+
+
+def _cli_validation_mean(values: list[float]) -> float:
+    # Match the frozen evaluator's summation, not statistics.mean: legitimate
+    # makespans can differ by multiple picoseconds solely from float rounding.
+    import numpy as np
+
+    return float(np.mean(values))
 
 
 def _require_cli_episode_checkpoint(
