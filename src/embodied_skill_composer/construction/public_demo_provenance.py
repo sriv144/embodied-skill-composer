@@ -58,6 +58,12 @@ from embodied_skill_composer.construction.coppelia_archive import (
     CoppeliaArchiveIndex,
     load_coppelia_archive_index,
 )
+from embodied_skill_composer.construction.research_training_curves import (
+    CURVE_PREFIX,
+    INDEX_ROLE,
+    curve_contract,
+    verify_training_curves,
+)
 
 
 PROVENANCE_SCHEMA_VERSION = "construction-intelligence-public-demo-provenance-v1"
@@ -620,6 +626,11 @@ def _validate_public_artifact_contract(
         return
     for artifact in manifest.artifacts:
         expected = contracts.get(artifact.role)
+        if expected is None and manifest.kind == "research":
+            try:
+                expected = curve_contract(artifact.role)
+            except ValueError as exc:
+                raise PublicDemoExportError(str(exc)) from exc
         if expected is None:
             raise PublicDemoExportError(
                 f"{manifest.kind} artifact role is not public-safe: {artifact.role}"
@@ -635,7 +646,9 @@ def _validate_public_artifact_contract(
 def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
     manifest = bundle.manifest
     roles = set(bundle.files)
-    if roles != _RESEARCH_ROLES:
+    curve_roles = {role for role in roles if role.startswith(CURVE_PREFIX)}
+    base_roles = roles - curve_roles - {INDEX_ROLE}
+    if base_roles != _RESEARCH_ROLES or bool(curve_roles) != (INDEX_ROLE in roles):
         raise PublicDemoExportError(
             f"research bundle roles must be exactly {sorted(_RESEARCH_ROLES)}; got {sorted(roles)}"
         )
@@ -694,6 +707,11 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             or _contains_absolute_path(config)
         ):
             raise PublicDemoExportError(f"research matrix contains machine-local paths: {run_key}")
+    if INDEX_ROLE in roles:
+        try:
+            verify_training_curves(bundle.files, run_configs, matrix_id=str(manifest.matrix_id))
+        except (OSError, ValueError) as exc:
+            raise PublicDemoExportError(f"training curve evidence is invalid: {exc}") from exc
     expected_run_identities = {
         (variant, seed)
         for variant in (
@@ -1581,6 +1599,8 @@ def _validate_export_claims(
         raise PublicDemoExportError(
             "release deterministic bundle does not contain every required artifact"
         )
+    if INDEX_ROLE not in research.files:
+        raise PublicDemoExportError("new release staging requires all twenty per-update training curves")
     deterministic_targets = {item.role: item.target for item in deterministic.manifest.artifacts}
     if deterministic_targets != _RELEASE_DETERMINISTIC_TARGETS:
         raise PublicDemoExportError(
@@ -1759,6 +1779,7 @@ def _write_research_views(
                 "ablations": "Ablation decisions",
                 "reproducibility_audit": "Reproducibility audit",
                 "release_completeness": "Release completeness",
+                "training_curves": "Per-update training curves and diagnostic semantics",
             },
         ),
         "reproducibility_audit": evidence.reproducibility_audit,
@@ -1951,7 +1972,7 @@ def _research_validation_curves(
                 points.append(
                     {
                         "transitions": transitions,
-                        "rollout_terminal_fraction": float(completion),
+                        "validation_completion_rate": float(completion),
                     }
                 )
         if not points:
