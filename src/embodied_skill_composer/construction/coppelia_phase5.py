@@ -2221,6 +2221,63 @@ def _require_clearance_records(
         )
 
 
+def _phase5_carry_handoff_tolerance(
+    plan: BuildPlan,
+    *,
+    module: BuildModule,
+    terminal_positions: Mapping[str, Vec2],
+    installed_module_ids: set[str],
+    robot_positions: Mapping[str, Vec2],
+    disabled_robot_ids: set[str],
+    waypoint_tolerance_m: float,
+    config: Phase5PhysicalYardConfig,
+) -> float:
+    """Bound enabled bases' error without consuming the next leg's reserve.
+
+    Surface distance is 1-Lipschitz. Half the endpoint clearance slack covers
+    both a moving base's error and an enabled idle base's hold error. The same
+    two-body bound protects the planned active-pair separation. This is a bound
+    at the synchronized completion barrier, not a guarantee against passive
+    drift during carry or settling: the fresh measured-start return preflight
+    remains authoritative, including disabled bases that are not position-held.
+    """
+    if not math.isfinite(waypoint_tolerance_m) or waypoint_tolerance_m <= 0:
+        raise DynamicCoppeliaError(
+            "carry handoff waypoint tolerance must be finite and positive"
+        )
+    if len(terminal_positions) != config.phase5_team_size:
+        raise DynamicCoppeliaError("carry handoff requires exactly two terminal bases")
+    records = _base_world_clearance_minima(
+        plan,
+        phase="return",
+        source="planned",
+        routes={robot_id: [point] for robot_id, point in terminal_positions.items()},
+        active_module_id=module.module_id,
+        installed_module_ids={*installed_module_ids, module.module_id},
+        robot_positions=robot_positions,
+        active_robot_ids=set(terminal_positions),
+        disabled_robot_ids=disabled_robot_ids,
+        active_module_is_payload=False,
+        config=config,
+    )
+    _require_clearance_records(records)
+    slacks = [
+        record.minimum_surface_clearance_m - record.required_clearance_m
+        for record in records
+        if record.minimum_surface_clearance_m is not None
+    ]
+    left, right = terminal_positions.values()
+    slacks.append(
+        math.hypot(left.x - right.x, left.y - right.y)
+        - _planned_robot_separation_m(config)
+    )
+    if any(not math.isfinite(slack) or slack <= 0 for slack in slacks):
+        raise DynamicCoppeliaError(
+            "carry handoff lacks positive clearance slack above the planned return reserve"
+        )
+    return min(waypoint_tolerance_m, 0.05, min(slacks) / 2)
+
+
 def _validate_rigid_carrier_route(
     plan: BuildPlan,
     *,
@@ -2735,7 +2792,7 @@ def _plan_phase5_dispatch_return(
         _require_clearance_records(clearance_records)
     except (RoutingError, RuntimeError, ValueError) as exc:
         raise DynamicCoppeliaError(
-            f"dispatch return is unreachable after {module.module_id}"
+            f"dispatch return is unreachable after {module.module_id}: {exc}"
         ) from exc
     return route, parking_goals, clearance_records
 
@@ -3989,6 +4046,19 @@ class Phase5FullCottageRunner:
             carrier_route=carry_route,
             base_routes=assigned_carry_routes,
         )
+        carry_handoff_tolerance_m = _phase5_carry_handoff_tolerance(
+            self.plan,
+            module=module,
+            terminal_positions={
+                robot_id: route[-1]
+                for robot_id, route in assigned_carry_routes.items()
+            },
+            installed_module_ids=set(self.executor.installed_modules),
+            robot_positions=measured_positions,
+            disabled_robot_ids=set(self.executor.disabled_robots),
+            waypoint_tolerance_m=self.executor.config.waypoint_tolerance_m,
+            config=self.yard_config,
+        )
         self.trace.append(
             {
                 "timestamp_s": pickup_at_s,
@@ -4000,6 +4070,7 @@ class Phase5FullCottageRunner:
                     carry_grid.obstacle_cells
                 ),
                 "carry_sample_count": len(carry_route),
+                "carry_handoff_waypoint_tolerance_m": carry_handoff_tolerance_m,
                 "maximum_planned_formation_offset_m": max(
                     (
                         math.hypot(offset.x, offset.y)
@@ -4020,7 +4091,8 @@ class Phase5FullCottageRunner:
             }
         )
         self.executor.follow_synchronized_routes(
-            assigned_carry_routes
+            assigned_carry_routes,
+            waypoint_tolerance_m=carry_handoff_tolerance_m,
         )
         install_clearance = self._minimum_active_module_clearance(
             module,

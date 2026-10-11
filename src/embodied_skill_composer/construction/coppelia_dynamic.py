@@ -628,8 +628,19 @@ class DynamicCoppeliaExecutor:
     def follow_synchronized_routes(
         self,
         routes: dict[str, list[Vec2]],
+        *,
+        waypoint_tolerance_m: float | None = None,
     ) -> None:
         """Follow one equal-horizon formation route with a shared waypoint index."""
+        tolerance = (
+            self.config.waypoint_tolerance_m
+            if waypoint_tolerance_m is None
+            else waypoint_tolerance_m
+        )
+        if not math.isfinite(tolerance) or tolerance <= 0:
+            raise DynamicCoppeliaError(
+                "synchronized route waypoint tolerance must be finite and positive"
+            )
         unavailable = sorted(set(routes) & self.disabled_robots)
         if unavailable:
             raise DynamicCoppeliaError(f"cannot route unavailable robots: {', '.join(unavailable)}")
@@ -640,7 +651,7 @@ class DynamicCoppeliaExecutor:
             raise DynamicCoppeliaError("synchronized transport routes must have equal horizons")
         self._follow_shared_route_time(
             routes,
-            waypoint_tolerance_m=self.config.waypoint_tolerance_m,
+            waypoint_tolerance_m=tolerance,
             enforce_relative_formation=True,
         )
 

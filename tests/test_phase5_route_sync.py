@@ -173,6 +173,72 @@ def _events(
     return [event for event in executor.runtime_events if event["event"] == name]
 
 
+@pytest.mark.parametrize("override", [None, 0.025])
+def test_synchronized_tolerance_default_and_override(override) -> None:
+    harness = _route_harness(
+        {"robot_1": Vec2(x=0, y=0), "robot_2": Vec2(x=0, y=2)},
+        waypoint_tolerance_m=0.12,
+        speeds={"robot_1": 0.11, "robot_2": 0.11},
+    )
+    routes = {
+        "robot_1": [Vec2(x=0, y=0), Vec2(x=1, y=0)],
+        "robot_2": [Vec2(x=0, y=2), Vec2(x=1, y=2)],
+    }
+    harness.executor.follow_synchronized_routes(
+        routes, waypoint_tolerance_m=override,
+    )
+    error = 1 - harness.positions["robot_1"].x
+    assert error == pytest.approx(0.12 if override is None else 0.01)
+    assert harness.executor.config.waypoint_tolerance_m == 0.12
+    assert _events(harness.executor, "route_time_synchronization_started")[0][
+        "relative_formation_enforced"
+    ] is True
+    assert harness.executor.collision_stops == 0
+
+
+@pytest.mark.parametrize("override", [0, -1, math.nan, math.inf, -math.inf])
+def test_synchronized_tolerance_rejects_invalid_before_motion(override) -> None:
+    harness = _route_harness(
+        {"robot_1": Vec2(x=0, y=0), "robot_2": Vec2(x=0, y=2)},
+    )
+    with pytest.raises(DynamicCoppeliaError, match="finite and positive"):
+        harness.executor.follow_synchronized_routes(
+            {"robot_1": [Vec2(x=1, y=0)], "robot_2": [Vec2(x=1, y=2)]},
+            waypoint_tolerance_m=override,
+        )
+    assert harness.executor.physics_steps == 0
+    assert harness.commands == []
+    assert harness.sample_calls == []
+
+
+def test_synchronized_tolerance_bounds_idle_hold_without_commanding_disabled() -> None:
+    harness = _route_harness(
+        {
+            "robot_1": Vec2(x=0, y=0), "robot_2": Vec2(x=0, y=2),
+            "robot_idle": Vec2(x=0, y=4), "robot_disabled": Vec2(x=0, y=6),
+        },
+        waypoint_tolerance_m=0.12,
+        speeds={robot_id: 0.11 for robot_id in (
+            "robot_1", "robot_2", "robot_idle", "robot_disabled",
+        )},
+    )
+    harness.executor.disabled_robots.add("robot_disabled")
+
+    def disturb_once(executor, positions):
+        if executor.physics_steps == 1:
+            positions["robot_idle"] = Vec2(x=0, y=3.9)
+
+    harness.after_step = disturb_once
+    harness.executor.follow_synchronized_routes(
+        {"robot_1": [Vec2(x=1, y=0)], "robot_2": [Vec2(x=1, y=2)]},
+        waypoint_tolerance_m=0.025,
+    )
+    assert abs(harness.positions["robot_idle"].y - 4) <= 0.025
+    assert any(command.robot_id == "robot_idle" and command.moving for command in harness.commands)
+    assert all(command.robot_id != "robot_disabled" for command in harness.commands)
+    assert harness.executor.collision_stops == 0
+
+
 def test_multi_route_uses_shared_index_and_holds_fast_endpoint() -> None:
     harness = _route_harness(
         {

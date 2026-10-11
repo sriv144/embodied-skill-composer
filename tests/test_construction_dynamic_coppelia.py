@@ -593,14 +593,15 @@ def test_dynamic_executor_commands_wheels_without_post_start_pose_sync(plan) -> 
     )
 
 
-def test_synchronized_carry_holds_faster_base_at_shared_waypoint(plan) -> None:
+@pytest.mark.parametrize("override_tolerance", [False, True])
+def test_synchronized_carry_holds_faster_base_at_shared_waypoint(plan, override_tolerance) -> None:
     fake = FakeDynamicClient()
     config = DynamicCoppeliaConfig(
         settle_steps=0,
         maximum_wheel_speed=10.0,
         effective_wheel_radius_m=0.2,
         position_gain=5.0,
-        waypoint_tolerance_m=0.025,
+        waypoint_tolerance_m=0.12 if override_tolerance else 0.025,
         formation_tolerance_m=0.3,
         safety_distance_m=0.05,
         max_steps_per_waypoint=1_000,
@@ -644,7 +645,9 @@ def test_synchronized_carry_holds_faster_base_at_shared_waypoint(plan) -> None:
     }
 
     executor.start()
-    executor.follow_synchronized_routes(routes)
+    executor.follow_synchronized_routes(
+        routes, waypoint_tolerance_m=0.025 if override_tolerance else None,
+    )
     executor.stop()
 
     held_targets = [
@@ -676,7 +679,7 @@ def test_synchronized_carry_holds_faster_base_at_shared_waypoint(plan) -> None:
         assert math.hypot(
             measured[0] - route[-1].x,
             measured[1] - route[-1].y,
-        ) <= config.waypoint_tolerance_m
+        ) <= 0.025
     assert executor.post_start_robot_pose_writes == 0
 
 
@@ -1306,6 +1309,9 @@ def test_phase5_nominal_full_cottage_offline_harness_proves_invariants(
     assert all(result.acceptance.values())
     assert result.acceptance["zero_nominal_collision_stops"]
     assert executor.post_start_robot_pose_writes == 0
+    carry_events = [event for event in result.trace if event["event"] == "carry_route_planned"]
+    assert len(carry_events) == len(scenario.plan.modules)
+    assert all(0 < event["carry_handoff_waypoint_tolerance_m"] <= 0.05 for event in carry_events)
     assert all(item.measured_poses for item in result.replay)
     assert all(
         item.planned_start_s <= item.planned_pickup_s <= item.planned_end_s
@@ -1500,6 +1506,9 @@ def test_phase5_recovery_disables_after_quarter_and_reassigns_remaining_work(
     assert result.recovery.reassigned_job_ids
     assert len(result.installed_module_ids) == len(scenario.plan.modules)
     assert all(result.acceptance.values())
+    carry_events = [event for event in result.trace if event["event"] == "carry_route_planned"]
+    assert len(carry_events) == len(scenario.plan.modules)
+    assert all(0 < event["carry_handoff_waypoint_tolerance_m"] <= 0.05 for event in carry_events)
     disabled = result.recovery.robot_id
     cutoff = result.recovery.stop_command_index
     assert not any(
