@@ -1,0 +1,159 @@
+schema_version: construction-intelligence-experiment-v1
+experiment_id: construction_intelligence_v1
+protocol_version: 1.0.0
+description: Frozen Construction Intelligence v1 learned-coordination protocol.
+
+training_seeds:
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+
+checkpoint_fractions:
+  - 0.10
+  - 0.25
+  - 0.50
+  - 0.75
+  - 1.00
+
+profiles:
+  unit:
+    transitions: 64
+    expert_episodes: 1
+    behavior_clone_epochs: 1
+    rollout_decisions: 8
+    ppo_epochs: 1
+    minibatch_size: 8
+    hidden_dim: 32
+    device: cpu
+  smoke:
+    transitions: 512
+    expert_episodes: 2
+    behavior_clone_epochs: 1
+    rollout_decisions: 32
+    ppo_epochs: 1
+    minibatch_size: 32
+    hidden_dim: 64
+    device: cpu
+  research:
+    transitions: 1500000
+    expert_episodes: 128
+    behavior_clone_epochs: 40
+    rollout_decisions: 2048
+    ppo_epochs: 6
+    minibatch_size: 512
+    hidden_dim: 128
+    device: auto
+
+variants:
+  - name: mappo_full
+    algorithm: mappo
+    role: primary
+    description: MAPPO with behavior cloning and the failure curriculum.
+    hypothesis: null
+    overrides:
+      expert_episodes: null
+      behavior_clone_epochs: null
+      include_training_failures: null
+  - name: ippo_full
+    algorithm: ippo
+    role: primary
+    description: IPPO with behavior cloning and the failure curriculum.
+    hypothesis: null
+    overrides:
+      expert_episodes: null
+      behavior_clone_epochs: null
+      include_training_failures: null
+  - name: mappo_no_bc
+    algorithm: mappo
+    role: ablation
+    description: MAPPO without expert collection or behavior-cloning updates.
+    hypothesis: behavior_cloning
+    overrides:
+      expert_episodes: 0
+      behavior_clone_epochs: 0
+      include_training_failures: null
+  - name: mappo_no_failure_curriculum
+    algorithm: mappo
+    role: ablation
+    description: MAPPO trained without sampled construction failures.
+    hypothesis: failure_curriculum
+    overrides:
+      expert_episodes: null
+      behavior_clone_epochs: null
+      include_training_failures: false
+
+scenario_splits:
+  training:
+    start: 0
+    end: 799
+  validation_seeds:
+    - 800
+    - 801
+    - 802
+    - 803
+    - 804
+  heldout_seeds:
+    - 900
+    - 901
+    - 902
+    - 903
+    - 904
+
+selection:
+  split: validation
+  scenario_seeds:
+    - 800
+    - 801
+    - 802
+    - 803
+    - 804
+  failure_modes:
+    - false
+    - true
+  deterministic: true
+  metric_order:
+    - completion_rate_desc
+    - makespan_s_asc
+    - transition_count_asc
+    - checkpoint_id_asc
+  forbidden_splits:
+    - test
+
+evaluation:
+  split: test
+  scenario_seeds:
+    - 900
+    - 901
+    - 902
+    - 903
+    - 904
+  deterministic: true
+  failure_modes:
+    - false
+    - true
+  controllers:
+    - sequential
+    - greedy
+    - auction
+    - cp_sat
+    - ippo
+    - mappo
+  aggregation: hierarchical_bootstrap
+  confidence_level: 0.95
+  bootstrap_samples: 2000
+
+acceptance:
+  mappo_no_failure_mean_completion_min: 0.95
+  ippo_no_failure_mean_completion_min: 0.95
+  mappo_median_makespan_cp_sat_ratio_max: 1.15
+  mappo_failure_mean_completion_min: 0.85
+
+ablations:
+  behavior_cloning:
+    final_completion_gain_min: 0.05
+    transitions_to_95_reduction_min: 0.20
+  failure_curriculum:
+    failure_completion_gain_min: 0.10
+    no_failure_completion_delta_min: -0.02

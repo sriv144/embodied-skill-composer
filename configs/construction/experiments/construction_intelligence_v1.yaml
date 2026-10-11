@@ -1,7 +1,7 @@
 schema_version: construction-intelligence-experiment-v1
 experiment_id: construction_intelligence_v1
-protocol_version: 1.0.0
-description: Frozen Construction Intelligence v1 learned-coordination protocol.
+protocol_version: 1.1.0
+description: Construction Intelligence v1 endpoint-feasibility correction and linear 0-to-35-percent failure curriculum over the first half of training; unchanged seeds, budgets, selection, and acceptance gates.
 
 training_seeds:
   - 7

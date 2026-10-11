@@ -39,11 +39,15 @@ invalid hashes, and source-identity disagreement. It copies the 20 selected chec
 into the private input directory under stable public-safe names; only the separately verified
 selected-policy release archive publishes their bytes.
 
+Use the identifier and paths of the **passing corrected matrix**. The historical protocol
+1.0.0 matrix (`construction_intelligence_v1-research-79e5444bb108`) failed its primary
+makespan gate and is not eligible for release packaging.
+
 ```powershell
 .\.venv\Scripts\python.exe scripts\package_construction_research_evidence.py `
   --registry <phase4-root>\logs\construction_intelligence\lab.sqlite `
-  --matrix-id construction_intelligence_v1-research-79e5444bb108 `
-  --selection-evidence <phase4-root>\logs\construction_intelligence\experiments\validation\construction_intelligence_v1-research-79e5444bb108\matrix_selections.json `
+  --matrix-id <corrected-matrix-id> `
+  --selection-evidence <phase4-root>\logs\construction_intelligence\experiments\validation\<corrected-matrix-id>\matrix_selections.json `
   --heldout-run-dir <phase4-heldout-evaluation-directory> `
   --output release-inputs\research
 ```
@@ -51,6 +55,13 @@ selected-policy release archive publishes their bytes.
 Use `release-inputs\research\research-bundle.json` as the research descriptor below. After this
 atomic staging step the descriptor is self-contained and does not require a writable or live lab
 database.
+
+Implementation CI at commit `dfba3f5144523fe7dc8c839474c0bcec9922968f` is green in
+[PR #24](https://github.com/sriv144/embodied-skill-composer/pull/24). Its pull-request run
+[38098614527](https://github.com/sriv144/embodied-skill-composer/actions/runs/38098614527)
+records 1,075 Python tests passed, three approval-gated tests skipped, 85.08% combined
+statement/branch coverage, 43 Vitest tests, and eight Playwright tests. These are software
+gates, not a claim that canonical research or live simulator evidence has passed.
 
 Then package the two independently verified native Phase 5 directories. This renders the public
 nominal and recovery MP4 files deterministically from measured base telemetry and the typed replay;

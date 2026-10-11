@@ -178,7 +178,7 @@ class AblationThresholds(_FrozenModel):
 class ExperimentProtocol(_FrozenModel):
     schema_version: Literal["construction-intelligence-experiment-v1"]
     experiment_id: Literal["construction_intelligence_v1"]
-    protocol_version: Literal["1.0.0"]
+    protocol_version: Literal["1.0.0", "1.1.0"]
     description: str = Field(min_length=1)
     training_seeds: list[int]
     checkpoint_fractions: list[float]
@@ -234,7 +234,7 @@ class ExperimentRunSpec(_FrozenModel):
 
     def training_config_payload(self) -> dict[str, object]:
         """Return only fields accepted by ``TrainingConfig``."""
-        return {
+        payload: dict[str, object] = {
             "algorithm": self.algorithm,
             "profile": self.profile,
             "seed": self.seed,
@@ -253,6 +253,14 @@ class ExperimentRunSpec(_FrozenModel):
             "device": self.device,
             "checkpoint_fractions": list(self.checkpoint_fractions),
         }
+        if self.protocol_version == "1.1.0":
+            payload.update(
+                failure_curriculum_mode="linear",
+                failure_curriculum_start_probability=0.0,
+                failure_curriculum_final_probability=0.35,
+                failure_curriculum_ramp_fraction=0.5,
+            )
+        return payload
 
 
 class CheckpointValidationResult(_FrozenModel):

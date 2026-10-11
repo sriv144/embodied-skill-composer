@@ -158,6 +158,18 @@ class PpoUpdateEvent(_StrictEvent):
     loss_entropy: float
     mean_episode_return: float
     rollout_terminal_fraction: float = Field(ge=0, le=1)
+    # Legacy persisted events do not contain these diagnostics. None is unknown,
+    # not a retrospective zero/success claim; exclude_unset keeps their wire form.
+    rollout_episode_count: int | None = Field(default=None, ge=1)
+    rollout_termination_fraction: float | None = Field(default=None, ge=0, le=1)
+    rollout_truncation_fraction: float | None = Field(default=None, ge=0, le=1)
+    rollout_collector_cutoff_fraction: float | None = Field(default=None, ge=0, le=1)
+    rollout_success_fraction: float | None = Field(default=None, ge=0, le=1)
+    rollout_structure_completion_rate: float | None = Field(default=None, ge=0, le=1)
+    rollout_failure_probability_mean: float | None = Field(default=None, ge=0, le=1)
+    rollout_failure_probability_min: float | None = Field(default=None, ge=0, le=1)
+    rollout_failure_probability_max: float | None = Field(default=None, ge=0, le=1)
+    rollout_failure_scenario_fraction: float | None = Field(default=None, ge=0, le=1)
 
 
 class TrainingCompletedEvent(_StrictEvent):

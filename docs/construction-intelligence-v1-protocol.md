@@ -7,6 +7,12 @@ changed seed partitions, incomplete checkpoint grids, unregistered variants, and
 Every queued run stores both the protocol digest and the canonical runtime-aware training
 configuration digest.
 
+The current manifest is candidate revision **1.1.0**, correcting endpoint feasibility and making
+the progressive failure curriculum explicit. It is not yet accepted research evidence. See the
+[amendment and validation-only rationale](construction-intelligence-v1-protocol-amendment-1.1.0.md).
+The original 1.0.0 manifest and its fingerprints remain archived; its completed research results
+must not be relabelled as revision 1.1.0.
+
 ## Frozen Matrix
 
 Each profile expands to the same 20-run shape:
@@ -21,6 +27,11 @@ Each profile expands to the same 20-run shape:
 The no-behavior-cloning variant sets both expert episodes and cloning epochs to zero. The
 no-failure-curriculum variant leaves all other training settings unchanged and disables sampled
 training failures.
+
+In revision 1.1.0, failure probability ramps linearly from 0 to 35% during the first half of the
+training budget and stays at 35% thereafter. The persisted transition counter controls this ramp
+on resume. Revision 1.0.0 used a constant 35% mixture, not a progressive curriculum; its legacy
+variant name is retained only when describing historical results.
 
 Every run saves resumable and evaluation-ready checkpoints at 10%, 25%, 50%, 75%, and 100%.
 Research targets are exactly 150,000, 375,000, 750,000, 1,125,000, and 1,500,000 transitions.
