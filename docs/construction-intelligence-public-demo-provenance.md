@@ -1,5 +1,26 @@
 # Construction Intelligence Public Demo Provenance
 
+## Training evidence and validation-curve semantics
+
+New canonical research packaging requires all 20 completed runs' byte-preserved
+`learning_curve.csv` files and a `construction-intelligence-training-curves-v1` index. The index binds
+each run key, algorithm/variant/seed, source commit/tree digest, configuration digest, byte count,
+SHA-256, and exact configured update/checkpoint transition schedule. Missing, truncated, renumbered,
+non-finite, or unsafe-column curves fail staging. Only bounded numeric diagnostics are published;
+raw run directories and absolute host paths are not copied into the public bundle.
+
+Artifact roles are `training_curves` for the index and `training_curve:<run_key>` for each CSV.
+Legacy nine-role research descriptors remain readable for inspection, but cannot be newly exported
+as a release without the complete training-curve evidence. Public artifact links include the index
+and all 20 CSVs, and deterministic research archives retain their original bytes.
+
+The five checkpoint-validation points use `curve_kind=validation_checkpoint_completion` and
+`validation_completion_rate`. They are not training rollout diagnostics. Training terminal fraction
+means termination **or** time-limit truncation; it must not be relabelled as task completion.
+Genuine rollout success and installed-module fraction are separately recorded when available.
+Source losses are final-minibatch diagnostics, not epoch means; unavailable historical diagnostics
+remain explicitly unavailable. The workbench renders validation and training curves separately.
+
 The public-demo exporter is an evidence packager, not an experiment runner. It copies only
 hash-pinned inputs, validates the claims they can support, generates stable read-only indexes, and
 writes `provenance.json`. It never promotes unit, smoke, fixture, or incomplete evidence into a
