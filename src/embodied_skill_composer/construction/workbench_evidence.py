@@ -3,9 +3,11 @@ from __future__ import annotations
 import csv
 import json
 from collections.abc import Iterable
-from math import isfinite
+from functools import lru_cache
+from math import isclose, isfinite
 from pathlib import Path
-from typing import cast
+from statistics import mean
+from typing import TYPE_CHECKING, cast
 from urllib.parse import quote
 
 from embodied_skill_composer.construction.coppelia_phase5 import (
@@ -14,11 +16,30 @@ from embodied_skill_composer.construction.coppelia_phase5 import (
 )
 from embodied_skill_composer.construction.lab_registry import LabRegistry
 
+if TYPE_CHECKING:
+    from embodied_skill_composer.construction.evaluation import EpisodeEvaluation, EvaluationSuite
+    from embodied_skill_composer.construction.experiment_protocol import (
+        CheckpointValidationResult,
+        SelectedCheckpoint,
+    )
+
 
 RESEARCH_SUMMARY_SCHEMA = "construction-intelligence-research-summary-v1"
 COPPELIA_SUMMARY_SCHEMA = "construction-intelligence-coppelia-public-v1"
 _MAX_ARTIFACT_REFERENCES = 200
 _MAX_CURVE_POINTS = 160
+_CLI_CHECKPOINT_FIELDS = {
+    "experiment_id",
+    "experiment_variant",
+    "training_seed",
+    "transition_count",
+    "checkpoint_path",
+    "checkpoint_sha256",
+    "checkpoint_lineage",
+    "configuration_digest",
+    "source_commit",
+    "resume_provenance",
+}
 _DOWNLOADABLE_SUFFIXES = {
     ".csv",
     ".glb",
@@ -80,11 +101,7 @@ def build_local_research_summary(registry: LabRegistry) -> dict[str, object]:
 
     matrices = registry.list_experiment_matrices()
     matrix = next(
-        (
-            item
-            for item in matrices
-            if item.get("execution_profile") == "research"
-        ),
+        (item for item in matrices if item.get("execution_profile") == "research"),
         matrices[0] if matrices else None,
     )
     if matrix is None:
@@ -118,8 +135,7 @@ def build_local_research_summary(registry: LabRegistry) -> dict[str, object]:
     runs_value = matrix.get("runs")
     runs = (
         cast(list[dict[str, object]], runs_value)
-        if isinstance(runs_value, list)
-        and all(isinstance(item, dict) for item in runs_value)
+        if isinstance(runs_value, list) and all(isinstance(item, dict) for item in runs_value)
         else []
     )
     status_counts = matrix.get("status_counts")
@@ -167,12 +183,8 @@ def build_local_research_summary(registry: LabRegistry) -> dict[str, object]:
         "selection_count": selection_count,
         "heldout_episode_count": _list_length(evaluation_payload.get("episodes")),
         "confidence_intervals": _object_list(evaluation_payload.get("summaries")),
-        "per_training_seed": _object_list(
-            evaluation_payload.get("per_training_seed")
-        ),
-        "per_scenario_seed": _object_list(
-            evaluation_payload.get("per_scenario_seed")
-        ),
+        "per_training_seed": _object_list(evaluation_payload.get("per_training_seed")),
+        "per_scenario_seed": _object_list(evaluation_payload.get("per_scenario_seed")),
         "learning_curves": _learning_curves(registry, runs),
         "acceptance": acceptance,
         "ablations": ablations if isinstance(ablations, list) else [],
@@ -298,6 +310,7 @@ def _cli_matrix_completion_artifacts(
         BASELINE_CONTROLLERS,
         MatrixSelectionEvidence,
         PrimaryAcceptanceAudit,
+        RunSelectionEvidence,
         audit_ablation_hypotheses,
         audit_primary_acceptance,
     )
@@ -305,6 +318,7 @@ def _cli_matrix_completion_artifacts(
         AblationDecision,
         ExperimentProtocol,
         protocol_digest,
+        select_validation_checkpoint,
     )
 
     try:
@@ -321,8 +335,7 @@ def _cli_matrix_completion_artifacts(
             or suite.expected_split != protocol.evaluation.split
             or suite.seeds != protocol.evaluation.scenario_seeds
             or suite.controllers != protocol.evaluation.controllers
-            or EvaluationSuite.model_validate(_cli_evidence_json(root / "evaluation.json"))
-            != suite
+            or EvaluationSuite.model_validate(_cli_evidence_json(root / "evaluation.json")) != suite
         ):
             raise ValueError("registered evaluation identity or persisted payload differs")
         policy_grid = [EvaluationGridEntry(controller=name) for name in BASELINE_CONTROLLERS]
@@ -354,7 +367,9 @@ def _cli_matrix_completion_artifacts(
             str(item["run_key"]): item["selection"]
             for item in registry.list_policy_selections(matrix_id)
         }
-        selected = {item.run_key: item.selected.model_dump(mode="json") for item in selections.selections}
+        selected = {
+            item.run_key: item.selected.model_dump(mode="json") for item in selections.selections
+        }
         runs = matrix["runs"]
         if not isinstance(runs, list) or not all(isinstance(item, dict) for item in runs):
             raise ValueError("matrix runs are invalid")
@@ -369,10 +384,22 @@ def _cli_matrix_completion_artifacts(
         ):
             raise ValueError("validation evidence differs from frozen matrix selections")
         algorithms = {variant.name: variant.algorithm for variant in protocol.variants}
+        runs_by_key = {str(item["run_key"]): item for item in runs}
+        selected_by_identity: dict[tuple[object, ...], RunSelectionEvidence] = {}
         for item in selections.selections:
+            run = runs_by_key[item.run_key]
+            config = run["config"]
+            if not isinstance(config, dict):
+                raise ValueError("registered training configuration is invalid")
             if (
                 item.matrix_id != matrix_id
                 or item.selected.experiment_id != protocol.experiment_id
+                or item.selected.experiment_id != config.get("experiment_id")
+                or item.selected.experiment_variant != config.get("experiment_variant")
+                or algorithms[item.selected.experiment_variant] != config.get("algorithm")
+                or item.selected.training_seed != config.get("training_seed")
+                or item.selected.configuration_digest != run.get("config_digest")
+                or item.selected.source_commit != run.get("source_commit")
                 or item.selected.training_seed not in protocol.training_seeds
                 or item.selected.scenario_seeds != protocol.selection.scenario_seeds
                 or item.selected.required_checkpoint_fractions != protocol.checkpoint_fractions
@@ -380,6 +407,15 @@ def _cli_matrix_completion_artifacts(
                 != protocol.checkpoint_fractions
             ):
                 raise ValueError("validation checkpoint evidence is incomplete")
+            identity = (
+                algorithms[item.selected.experiment_variant],
+                item.selected.experiment_id,
+                item.selected.experiment_variant,
+                item.selected.training_seed,
+            )
+            if identity in selected_by_identity:
+                raise ValueError("frozen selections duplicate a policy identity")
+            selected_by_identity[identity] = item
             for candidate in item.candidates:
                 if (
                     candidate.result.experiment_id != item.selected.experiment_id
@@ -389,23 +425,94 @@ def _cli_matrix_completion_artifacts(
                     or candidate.result.source_commit != item.selected.source_commit
                     or candidate.result.configuration_digest != item.selected.configuration_digest
                 ):
-                    raise ValueError("validation checkpoint identity differs from its frozen selection")
+                    raise ValueError(
+                        "validation checkpoint identity differs from its frozen selection"
+                    )
                 validate_evaluation_grid(
                     candidate.episodes,
                     scenario_seeds=protocol.selection.scenario_seeds,
-                    policy_grid=[EvaluationGridEntry(
-                        controller=algorithms[item.selected.experiment_variant],
-                        experiment_id=item.selected.experiment_id,
-                        experiment_variant=item.selected.experiment_variant,
-                        training_seed=item.selected.training_seed,
-                    )],
+                    policy_grid=[
+                        EvaluationGridEntry(
+                            controller=algorithms[item.selected.experiment_variant],
+                            experiment_id=item.selected.experiment_id,
+                            experiment_variant=item.selected.experiment_variant,
+                            training_seed=item.selected.training_seed,
+                        )
+                    ],
                     failure_modes=protocol.selection.failure_modes,
                     expected_split=protocol.selection.split,
                 )
-        acceptance = PrimaryAcceptanceAudit.model_validate(_cli_evidence_json(root / "acceptance.json"))
-        ablations = TypeAdapter(list[AblationDecision]).validate_python(_cli_evidence_json(root / "ablations.json"))
-        if acceptance != audit_primary_acceptance(suite, protocol) or ablations != audit_ablation_hypotheses(
-            suite, protocol, selection_evidence=selections,
+                for episode in candidate.episodes:
+                    _require_cli_episode_checkpoint(
+                        episode,
+                        candidate.result,
+                        policy_id=candidate.result.checkpoint_id,
+                    )
+                if not (
+                    isclose(
+                        candidate.result.mean_completion_rate,
+                        mean(episode.structure_completion_rate for episode in candidate.episodes),
+                        rel_tol=0,
+                        abs_tol=1e-12,
+                    )
+                    and isclose(
+                        candidate.result.mean_makespan_s,
+                        mean(episode.makespan_s for episode in candidate.episodes),
+                        rel_tol=0,
+                        abs_tol=1e-12,
+                    )
+                ):
+                    raise ValueError("validation candidate means differ from its episodes")
+            if item.selected != select_validation_checkpoint(
+                [candidate.result for candidate in item.candidates],
+                validation_seeds=protocol.selection.scenario_seeds,
+                required_fractions=protocol.checkpoint_fractions,
+            ):
+                raise ValueError("frozen selection differs from deterministic validation ranking")
+        for episode in suite.episodes:
+            if episode.controller in BASELINE_CONTROLLERS:
+                if episode.policy_id is not None or episode.model_dump(
+                    include=_CLI_CHECKPOINT_FIELDS
+                ) != {
+                    "experiment_id": None,
+                    "experiment_variant": None,
+                    "training_seed": None,
+                    "transition_count": None,
+                    "checkpoint_path": None,
+                    "checkpoint_sha256": None,
+                    "checkpoint_lineage": [],
+                    "configuration_digest": None,
+                    "source_commit": None,
+                    "resume_provenance": {},
+                }:
+                    raise ValueError("baseline episode contains learned-policy provenance")
+                continue
+            selection = selected_by_identity[
+                (
+                    episode.controller,
+                    episode.experiment_id,
+                    episode.experiment_variant,
+                    episode.training_seed,
+                )
+            ]
+            _require_cli_episode_checkpoint(
+                episode,
+                selection.selected,
+                policy_id=f"{matrix_id}-{selection.run_key}-selected",
+            )
+        _require_cli_aggregate_evidence(suite)
+        acceptance = PrimaryAcceptanceAudit.model_validate(
+            _cli_evidence_json(root / "acceptance.json")
+        )
+        ablations = TypeAdapter(list[AblationDecision]).validate_python(
+            _cli_evidence_json(root / "ablations.json")
+        )
+        if acceptance != audit_primary_acceptance(
+            suite, protocol
+        ) or ablations != audit_ablation_hypotheses(
+            suite,
+            protocol,
+            selection_evidence=selections,
         ):
             raise ValueError("persisted acceptance or ablations differ from their evidence")
         return {
@@ -414,6 +521,81 @@ def _cli_matrix_completion_artifacts(
         }
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         return None
+
+
+def _require_cli_episode_checkpoint(
+    episode: EpisodeEvaluation,
+    checkpoint: CheckpointValidationResult | SelectedCheckpoint,
+    *,
+    policy_id: str,
+) -> None:
+    if episode.policy_id != policy_id or episode.model_dump(
+        include=_CLI_CHECKPOINT_FIELDS
+    ) != checkpoint.model_dump(include=_CLI_CHECKPOINT_FIELDS):
+        raise ValueError("episode provenance differs from its exact frozen checkpoint")
+
+
+def _require_cli_aggregate_evidence(suite: EvaluationSuite) -> None:
+    # Provenance is checked on every request above. Only pure metric aggregation
+    # is cached: a five-second UI refresh must not repeat the 2000-sample bootstrap.
+    # Strip fields which cannot affect summarize_* so independent evidence roots
+    # and provenance-only verification do not multiply identical cache entries.
+    episodes_json = json.dumps(
+        [
+            episode.model_dump(
+                mode="json",
+                exclude=_CLI_CHECKPOINT_FIELDS
+                - {
+                    "experiment_id",
+                    "experiment_variant",
+                    "training_seed",
+                }
+                | {"policy_id"},
+            )
+            for episode in suite.episodes
+        ],
+        sort_keys=True,
+        allow_nan=False,
+    )
+    expected = _cli_expected_aggregates(episodes_json)
+    observed = tuple(
+        json.dumps(
+            [item.model_dump(mode="json") for item in group], sort_keys=True, allow_nan=False
+        )
+        for group in (
+            suite.summaries,
+            suite.per_training_seed,
+            suite.per_scenario_seed,
+        )
+    )
+    if observed != expected:
+        raise ValueError("held-out aggregates differ from deterministic episode summaries")
+
+
+@lru_cache(maxsize=8)
+def _cli_expected_aggregates(episodes_json: str) -> tuple[str, ...]:
+    from pydantic import TypeAdapter
+
+    from embodied_skill_composer.construction.evaluation import (
+        EpisodeEvaluation,
+        summarize_by_scenario_seed,
+        summarize_by_training_seed,
+        summarize_evaluations,
+    )
+
+    episodes = TypeAdapter(list[EpisodeEvaluation]).validate_json(episodes_json)
+    return tuple(
+        json.dumps(
+            [item.model_dump(mode="json") for item in summarizer(episodes)],
+            sort_keys=True,
+            allow_nan=False,
+        )
+        for summarizer in (
+            summarize_evaluations,
+            summarize_by_training_seed,
+            summarize_by_scenario_seed,
+        )
+    )
 
 
 def _cli_evidence_json(path: Path) -> object:
@@ -436,9 +618,7 @@ def _learning_curves(
         if not points:
             continue
         config = (
-            cast(dict[str, object], run["config"])
-            if isinstance(run.get("config"), dict)
-            else {}
+            cast(dict[str, object], run["config"]) if isinstance(run.get("config"), dict) else {}
         )
         series.append(
             {
@@ -537,8 +717,7 @@ def _passing_live_bundle(
         and manifest.run_status == "completed"
         and manifest.live_gate_passed
         and manifest.approval_gate_confirmed
-        and metrics.get("schema_version")
-        == "construction_intelligence.coppelia_evidence.v1"
+        and metrics.get("schema_version") == "construction_intelligence.coppelia_evidence.v1"
         and metrics.get("scenario") == manifest.scenario
         and metrics.get("evidence_kind") == "live_coppelia"
         and metrics.get("status") == "completed"
@@ -550,13 +729,14 @@ def _passing_live_bundle(
 
 
 def _matching_coppelia_pair(
-    verified: Iterable[
-        tuple[Path, Phase5ProvenanceManifest, dict[str, object]]
-    ],
-) -> tuple[
-    tuple[Path, Phase5ProvenanceManifest, dict[str, object]],
-    tuple[Path, Phase5ProvenanceManifest, dict[str, object]],
-] | None:
+    verified: Iterable[tuple[Path, Phase5ProvenanceManifest, dict[str, object]]],
+) -> (
+    tuple[
+        tuple[Path, Phase5ProvenanceManifest, dict[str, object]],
+        tuple[Path, Phase5ProvenanceManifest, dict[str, object]],
+    ]
+    | None
+):
     grouped: dict[
         tuple[str, str, str, int],
         dict[
@@ -587,9 +767,7 @@ def _local_coppelia_run(
     item: tuple[Path, Phase5ProvenanceManifest, dict[str, object]],
 ) -> dict[str, object]:
     run_dir, manifest, metrics = item
-    href_prefix = (
-        f"/api/lab/coppelia/evidence/{quote(run_dir.name, safe='')}/artifacts"
-    )
+    href_prefix = f"/api/lab/coppelia/evidence/{quote(run_dir.name, safe='')}/artifacts"
     return {
         "manifest": manifest.model_dump(mode="json"),
         "metrics": metrics,
