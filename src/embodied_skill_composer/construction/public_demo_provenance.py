@@ -35,7 +35,11 @@ from embodied_skill_composer.construction.evaluation import (
     summarize_by_training_seed,
 )
 from embodied_skill_composer.construction.experiment_execution import (
+    CandidateEvaluation,
+    MatrixSelectionEvidence,
     PrimaryAcceptanceAudit,
+    RunSelectionEvidence,
+    audit_ablation_hypotheses,
     audit_primary_acceptance,
 )
 from embodied_skill_composer.construction.experiment_protocol import (
@@ -552,7 +556,87 @@ def verify_public_demo_export(
         release_tag=release_tag,
     )
     _verify_public_archive_binding(root, payload)
+    if typed_channel == "release":
+        _verify_exported_research(root, payload)
     return payload
+
+
+def _verify_exported_research(root: Path, provenance: dict[str, object]) -> None:
+    """Recheck research semantics from downloaded bytes, not a staging-time claim.
+
+    Provenance and every member hash have already been verified. Reconstruct only
+    the semantic input contract from that inventory; this does not assert that the
+    original descriptor can be recovered from its recorded hash.
+    """
+    inputs = cast(list[dict[str, object]], provenance["inputs"])
+    metadata = next(item for item in inputs if item["kind"] == "research")
+    records = [
+        item for item in cast(list[dict[str, object]], provenance["artifacts"])
+        if item["source_kind"] == "research"
+    ]
+    artifacts: list[BundleArtifact] = []
+    try:
+        for item in records:
+            role = str(item["role"])
+            contract = _RESEARCH_ARTIFACT_CONTRACTS.get(role) or curve_contract(role)
+            if contract is None:
+                raise ValueError(f"unknown exported research role: {role}")
+            artifacts.append(
+                BundleArtifact(
+                    role=role,
+                    path=str(item["path"]),
+                    target=str(item["path"]),
+                    sha256=str(item["sha256"]),
+                    media_type=contract[1],
+                )
+            )
+        manifest = EvidenceBundleManifest.model_validate(
+            {
+                "schema_version": BUNDLE_SCHEMA_VERSION,
+                "kind": "research",
+                "evidence_status": metadata["evidence_status"],
+                "source": metadata["source"],
+                "created_at": metadata.get("created_at"),
+                "configuration_digests": metadata["configuration_digests"],
+                "protocol_digest": metadata.get("protocol_digest"),
+                "profile": metadata.get("profile"),
+                "matrix_id": metadata.get("matrix_id"),
+                "artifacts": artifacts,
+            }
+        )
+    except ValueError as exc:
+        raise PublicDemoExportError(f"exported research contract is invalid: {exc}") from exc
+    _validate_public_artifact_contract(manifest)
+    files = {item.role: root / item.path for item in artifacts}
+    if INDEX_ROLE not in files:
+        raise PublicDemoExportError(
+            "release verification requires all twenty per-update training curves"
+        )
+    bundle = _LoadedBundle(
+        path=root / _PROVENANCE_NAME,
+        sha256=str(metadata["manifest_sha256"]),
+        manifest=manifest,
+        files=files,
+    )
+    evidence = _validate_research(bundle)
+    for relative, expected in _research_view_payloads(bundle, evidence).items():
+        if _read_json(root / relative, f"exported research view {relative}") != expected:
+            raise PublicDemoExportError(
+                f"exported research view does not match canonical evidence: {relative}"
+            )
+    policies = _read_json(root / "policies.json", "exported selected policy index")
+    selected = _selected_policy_records(bundle, evidence)
+    selected_ids = {str(item["id"]) for item in selected}
+    if not isinstance(policies, list) or [
+        item for item in policies
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"] in selected_ids
+    ] != selected or [
+        item for item in policies
+        if isinstance(item, dict) and item.get("controller") in ("mappo", "ippo")
+    ] != selected:
+        raise PublicDemoExportError(
+            "exported research view does not match canonical evidence: policies.json"
+        )
 
 
 def verify_public_demo_regeneration_identity(
@@ -788,6 +872,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
         str(item["run_key"]): item for item in cast(list[dict[str, object]], selections_value)
     }
     selected_by_identity: dict[tuple[str, int], tuple[str, SelectedCheckpoint]] = {}
+    validated_selections: list[RunSelectionEvidence] = []
     for record in selection_records:
         run_key = str(record["run_key"])
         selection_payload = cast(dict[str, object], record["selection"])
@@ -817,6 +902,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
             raise PublicDemoExportError(f"validation candidates are malformed: {run_key}")
         fractions: list[float] = []
         candidate_results: list[CheckpointValidationResult] = []
+        validated_candidates: list[CandidateEvaluation] = []
         for candidate in cast(list[dict[str, object]], candidates):
             result_payload = candidate.get("result")
             episodes_payload = candidate.get("episodes")
@@ -869,6 +955,7 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
                 training_seed=cast(int, config.get("training_seed")),
             )
             candidate_results.append(result)
+            validated_candidates.append(CandidateEvaluation(result=result, episodes=episodes))
         if sorted(fractions) != [0.1, 0.25, 0.5, 0.75, 1.0]:
             raise PublicDemoExportError(
                 f"validation candidates do not cover five checkpoints: {run_key}"
@@ -891,6 +978,15 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
         if identity in selected_by_identity:
             raise PublicDemoExportError(f"duplicate selected policy identity: {identity}")
         selected_by_identity[identity] = (run_key, selection)
+        validated_selections.append(
+            RunSelectionEvidence(
+                matrix_id=cast(str, manifest.matrix_id),
+                run_key=run_key,
+                candidates=validated_candidates,
+                selected=selection,
+                evidence_path=Path(f"validation/{run_key}/validation_selection.json"),
+            )
+        )
 
     try:
         suite = EvaluationSuite.model_validate_json(
@@ -1049,6 +1145,22 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
         "failure_curriculum",
     }:
         raise PublicDemoExportError("both pre-registered ablation interpretations are required")
+    recomputed_ablations = audit_ablation_hypotheses(
+        suite,
+        protocol,
+        selection_evidence=MatrixSelectionEvidence(
+            matrix_id=cast(str, manifest.matrix_id),
+            protocol_digest=manifest.protocol_digest,
+            selections=validated_selections,
+            evidence_path=Path("evidence/research/selections.json"),
+        ),
+    )
+    if sorted(ablations, key=lambda item: item.hypothesis) != sorted(
+        recomputed_ablations, key=lambda item: item.hypothesis,
+    ):
+        raise PublicDemoExportError(
+            "declared ablation decisions do not match recomputed validation and held-out evidence"
+        )
     reproducibility_audit = _read_object(
         bundle.files["reproducibility_audit"],
         "research reproducibility audit",
@@ -1084,6 +1196,9 @@ def _validate_research(bundle: _LoadedBundle) -> _ValidatedResearch:
     if (
         release_completeness.get("complete") is not True
         or release_completeness.get("blocking_reasons") != []
+        or release_completeness.get("unsupported_ablation_hypotheses") != sorted(
+            item.hypothesis for item in recomputed_ablations if not item.supported
+        )
         or any(
             release_completeness.get(field) != []
             for field in (
@@ -1726,30 +1841,16 @@ def _copy_bundle(
         artifact_sources[target] = (bundle.manifest.kind, artifact.role)
 
 
-def _write_research_views(
-    staging: Path,
+def _research_view_payloads(
     bundle: _LoadedBundle,
     evidence: _ValidatedResearch,
-    artifact_sources: dict[str, tuple[str, str]],
-) -> None:
+) -> dict[str, object]:
+    """Derive public claims only from independently verified research evidence."""
     matrix_id = cast(str, bundle.manifest.matrix_id)
+    selections_target = _safe_relative_path(
+        f"experiment-matrices/{matrix_id}/selections.json",
+    ).as_posix()
     suite_payload = evidence.suite.model_dump(mode="json")
-    _write_json(staging / "experiment-matrices.json", [evidence.matrix])
-    selections_path = staging / "experiment-matrices" / matrix_id / "selections.json"
-    _write_json(selections_path, evidence.selection_records)
-    _write_json(
-        staging / "evaluations.json",
-        [
-            {
-                "id": evidence.suite.evaluation_id,
-                "matrix_id": matrix_id,
-                "split": "test",
-                "payload": suite_payload,
-                "artifact_dir": "evidence/research",
-                "created_at": bundle.manifest.created_at,
-            }
-        ],
-    )
     summary = {
         "schema_version": "construction-intelligence-research-summary-v1",
         "status": "validated",
@@ -1789,11 +1890,54 @@ def _write_research_views(
             "themselves prove dynamic CoppeliaSim execution or physical grasping."
         ),
     }
-    _write_json(staging / "research-summary.json", summary)
+    return {
+        "experiment-matrices.json": [evidence.matrix],
+        selections_target: evidence.selection_records,
+        "evaluations.json": [
+            {
+                "id": evidence.suite.evaluation_id,
+                "matrix_id": matrix_id,
+                "split": "test",
+                "payload": suite_payload,
+                "artifact_dir": "evidence/research",
+                "created_at": bundle.manifest.created_at,
+            }
+        ],
+        "research-summary.json": summary,
+    }
+
+
+def _write_research_views(
+    staging: Path,
+    bundle: _LoadedBundle,
+    evidence: _ValidatedResearch,
+    artifact_sources: dict[str, tuple[str, str]],
+) -> None:
+    matrix_id = cast(str, bundle.manifest.matrix_id)
+    selections_path = staging / "experiment-matrices" / matrix_id / "selections.json"
+    for relative, payload in _research_view_payloads(bundle, evidence).items():
+        _write_json(staging / relative, payload)
     existing_policies = _read_json(staging / "policies.json", "deterministic policies")
     if not isinstance(existing_policies, list):
         raise PublicDemoExportError("deterministic policies.json must contain a list")
-    selected_policies = [
+    policies = [*existing_policies, *_selected_policy_records(bundle, evidence)]
+    _write_json(staging / "policies.json", policies)
+    generated = {
+        "experiment-matrices.json": "matrix_index",
+        selections_path.relative_to(staging).as_posix(): "selection_index",
+        "evaluations.json": "evaluation_index",
+        "research-summary.json": "research_summary",
+        "policies.json": "selected_policy_index",
+    }
+    for path, role in generated.items():
+        artifact_sources[path] = ("generated", role)
+
+
+def _selected_policy_records(
+    bundle: _LoadedBundle,
+    evidence: _ValidatedResearch,
+) -> list[dict[str, object]]:
+    return [
         {
             "id": selection["checkpoint_id"],
             "controller": (
@@ -1805,17 +1949,6 @@ def _write_research_views(
         for record in evidence.selection_records
         for selection in [cast(dict[str, object], record["selection"])]
     ]
-    policies = [*existing_policies, *selected_policies]
-    _write_json(staging / "policies.json", policies)
-    generated = {
-        "experiment-matrices.json": "matrix_index",
-        selections_path.relative_to(staging).as_posix(): "selection_index",
-        "evaluations.json": "evaluation_index",
-        "research-summary.json": "research_summary",
-        "policies.json": "selected_policy_index",
-    }
-    for path, role in generated.items():
-        artifact_sources[path] = ("generated", role)
 
 
 def _write_simulator_view(
@@ -2224,6 +2357,7 @@ def _build_provenance(
             "manifest_sha256": bundle.sha256,
             "evidence_status": bundle.manifest.evidence_status,
             "source": bundle.manifest.source.model_dump(mode="json"),
+            "created_at": bundle.manifest.created_at,
             "configuration_digests": sorted(bundle.manifest.configuration_digests),
             "protocol_digest": bundle.manifest.protocol_digest,
             "profile": bundle.manifest.profile,

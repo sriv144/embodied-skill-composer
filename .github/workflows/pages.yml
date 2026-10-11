@@ -13,6 +13,13 @@ on:
         type: boolean
         default: true
   workflow_call:
+    outputs:
+      demo_identity:
+        description: "Verified canonical/preview demo identity hashes"
+        value: ${{ jobs.build.outputs.demo_identity }}
+      page_url:
+        description: "Successfully deployed workbench URL (empty for preflight)"
+        value: ${{ jobs.deploy.outputs.page_url }}
     inputs:
       channel:
         type: string
@@ -48,6 +55,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # GitHub requires push access to read drafts. Tokens are passed only to read commands.
+    permissions:
+      contents: write
     outputs:
       demo_identity: ${{ steps.identity.outputs.demo_identity }}
     steps:
@@ -55,6 +65,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Require fingerprint-bound release calls for draft evidence
+        if: inputs.allow_draft == true
+        shell: bash
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
+          DEPLOY_DRAFT: ${{ inputs.deploy }}
+          EXPECTED_ASSET_SET_SHA256: ${{ inputs.expected_asset_set_sha256 }}
+        run: |
+          set -euo pipefail
+          test "$REQUESTED_CHANNEL" = release
+          [[ "$EXPECTED_ASSET_SET_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          if [ "$DEPLOY_DRAFT" = true ]; then
+            test "$GITHUB_REF" = refs/tags/v1.0.0
+          fi
       - name: Resolve preview or canonical release without fallback on errors
         id: channel
         shell: bash
@@ -62,11 +86,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           REQUESTED_CHANNEL: ${{ inputs.channel || 'auto' }}
-          ALLOW_DRAFT: ${{ inputs.allow_draft == true && inputs.deploy == false }}
+          ALLOW_DRAFT: ${{ inputs.allow_draft == true && inputs.expected_asset_set_sha256 != '' }}
         run: |
           set -euo pipefail
           metadata_args=(--not-found)
-          if gh api "repos/${GH_REPO}/releases/tags/v1.0.0" \
+          if [ "$ALLOW_DRAFT" = true ]; then
+            gh release view v1.0.0 --json tagName,isDraft,isPrerelease \
+              --jq '{tag_name: .tagName, draft: .isDraft, prerelease: .isPrerelease}' \
+              > "$RUNNER_TEMP/pages-release.json"
+            metadata_args=(--release-json "$RUNNER_TEMP/pages-release.json")
+          elif gh api "repos/${GH_REPO}/releases/tags/v1.0.0" \
               > "$RUNNER_TEMP/pages-release.json" 2> "$RUNNER_TEMP/pages-release.err"; then
             metadata_args=(--release-json "$RUNNER_TEMP/pages-release.json")
           elif ! grep --quiet '(HTTP 404)' "$RUNNER_TEMP/pages-release.err"; then
@@ -115,11 +144,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          ALLOW_DRAFT: ${{ inputs.allow_draft == true && inputs.deploy == false }}
+          ALLOW_DRAFT: ${{ inputs.allow_draft == true && inputs.expected_asset_set_sha256 != '' }}
           EXPECTED_ASSET_SET_SHA256: ${{ inputs.expected_asset_set_sha256 }}
         run: |
           set -euo pipefail
-          gh api "repos/${GH_REPO}/releases/tags/v1.0.0" > "$RUNNER_TEMP/pages-release.json"
+          gh release view v1.0.0 --json tagName,isDraft,isPrerelease \
+            --jq '{tag_name: .tagName, draft: .isDraft, prerelease: .isPrerelease}' \
+            > "$RUNNER_TEMP/pages-release.json"
           test "$(jq -r '.prerelease' "$RUNNER_TEMP/pages-release.json")" = false
           if [ "$ALLOW_DRAFT" != true ]; then
             test "$(jq -r '.draft' "$RUNNER_TEMP/pages-release.json")" = false
@@ -164,20 +195,21 @@ jobs:
         if: always() && steps.channel.outputs.channel == 'release'
         uses: actions/upload-artifact@v6
         with:
-          name: pages-canonical-browser-diagnostics
+          name: pages-canonical-browser-diagnostics-${{ inputs.deploy == false && 'verify' || 'deploy' }}
           if-no-files-found: ignore
           path: |
             output/playwright/report
             output/playwright/test-results
       - uses: actions/configure-pages@v6
-        if: (inputs.deploy != false || inputs.channel == '') && inputs.allow_draft != true
+        if: inputs.deploy != false || inputs.channel == ''
       - uses: actions/upload-pages-artifact@v5
-        if: (inputs.deploy != false || inputs.channel == '') && inputs.allow_draft != true
+        if: inputs.deploy != false || inputs.channel == ''
         with:
           path: workbench/dist
 
   deploy:
-    if: (inputs.deploy != false || inputs.channel == '') && inputs.allow_draft != true
+    if: inputs.deploy != false || inputs.channel == ''
+    timeout-minutes: 15
     permissions:
       contents: read
       pages: write
@@ -187,6 +219,8 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     needs: build
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy
         id: deployment
@@ -205,6 +239,7 @@ jobs:
           for attempt in $(seq 1 12); do
             status="$(
               curl --location --silent --show-error \
+                --connect-timeout 10 --max-time 20 --retry 2 \
                 --output "${RUNNER_TEMP}/construction-workbench.html" \
                 --write-out "%{http_code}" \
                 "${PAGE_URL}"
@@ -215,6 +250,7 @@ jobs:
               identity_ready=true
               for artifact in release-status.json provenance.json research-summary.json coppelia-evidence.json; do
                 if ! curl --fail --location --silent --show-error \
+                    --connect-timeout 10 --max-time 20 --retry 2 \
                     --output "$RUNNER_TEMP/pages-smoke/$artifact" "${PAGE_URL%/}/demo/$artifact"; then
                   identity_ready=false
                 fi

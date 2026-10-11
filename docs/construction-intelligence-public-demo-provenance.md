@@ -10,8 +10,8 @@ non-finite, or unsafe-column curves fail staging. Only bounded numeric diagnosti
 raw run directories and absolute host paths are not copied into the public bundle.
 
 Artifact roles are `training_curves` for the index and `training_curve:<run_key>` for each CSV.
-Legacy nine-role research descriptors remain readable for inspection, but cannot be newly exported
-as a release without the complete training-curve evidence. Public artifact links include the index
+Legacy nine-role research descriptors remain readable for inspection, but cannot be exported or
+verified as a release without the complete training-curve evidence. Public artifact links include the index
 and all 20 CSVs, and deterministic research archives retain their original bytes.
 
 The five checkpoint-validation points use `curve_kind=validation_checkpoint_completion` and
@@ -110,7 +110,7 @@ A preview fixture may contain a smaller reviewed set, but its `evidence_status` 
 
 ### Research bundle
 
-The canonical Phase 4 descriptor contains exactly:
+The canonical Phase 4 descriptor contains these nine core roles:
 
 - `matrix`;
 - `selections`;
@@ -118,13 +118,19 @@ The canonical Phase 4 descriptor contains exactly:
 - `acceptance` and `ablations`;
 - `reproducibility_audit` and `release_completeness`.
 
+It additionally requires `training_curves` and all 20 `training_curve:<run_key>` roles described
+above. The legacy nine-role-only descriptor is readable for inspection, not release eligibility.
+
 The exporter verifies the research profile, all 20 completed matrix runs, all 20 immutable
 validation-only selections, seeds 800–804, the five checkpoint fractions, matching source and
 configuration digests, and the complete 240-episode held-out grid on seeds 900–904. The held-out
 grid must contain 200 learned-policy and 40 baseline episodes with hierarchical confidence
 interval summaries and per-training-seed and per-scenario-seed tables. All four primary acceptance
-checks must pass. Both pre-registered ablation interpretations must be present; an honestly
-unsupported hypothesis is allowed.
+checks must pass. Both pre-registered ablation interpretations must match recomputation from the
+verified validation candidates and held-out episodes; an honestly unsupported hypothesis is allowed.
+Downloaded-release verification reconstructs the semantic research contract from the hash-verified
+provenance inventory and rechecks these same claims, all training curves, and the derived public
+research views. Self-consistent hashes alone do not certify scientific acceptance.
 
 Phase 4 can create this descriptor after its durable executor writes the final matrix detail,
 `matrix_selections.json`, `evaluation.json`, `episodes.csv`, `report.md`, `acceptance.json`,
@@ -185,7 +191,7 @@ content, unregistered directories, and raw host paths.
 `provenance.json` uses schema `construction-intelligence-public-demo-provenance-v1` and records:
 
 - release channel and exact exporter source identity;
-- each input descriptor's SHA-256, evidence status, source identity, protocol digest,
+- each input descriptor's SHA-256, creation timestamp, evidence status, source identity, protocol digest,
   configuration digests, profile, and matrix ID;
 - every emitted artifact's relative path, byte size, SHA-256, source kind, and role;
 - the deterministic timestamp and ordering strategies;

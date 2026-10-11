@@ -101,8 +101,12 @@ descriptor files. It then:
    extra fields, and deterministic level-9 deflate;
 8. independently verifies the complete indexed staging directory before replacing the output.
 
-Repeat the command into a second output directory and compare it when performing the final
-regeneration audit. Identical inputs must produce byte-identical files.
+Staging automatically exports the canonical public demo a second time from the same original
+three descriptors and archive index, verifies both exports, and requires identical provenance
+before packaging policies or replacing any output. Downloaded-archive verification independently
+recomputes the research/ablation claims, but cannot regenerate original unarchived descriptors.
+Repeat the complete staging command into a second output directory when auditing full archive
+and ONNX byte determinism. Identical inputs must produce byte-identical files.
 
 The private `release-inputs/` and `output/` directories are ignored by Git. Do not copy the
 release-channel demo into the committed `workbench/public/demo` tree: that tree remains the
@@ -207,40 +211,57 @@ gh workflow run release.yml --ref v1.0.0
 commit. Dispatch from the tag so the publication job's deployment ref matches the release
 environment's tag-only policy; checking out the tag within a run dispatched from `main` does not
 change that deployment ref. The required environment reviewer must approve publication.
-The workflow's read-only verification job installs dependencies from the hash-locked Linux
+The workflow's non-mutating verification job installs dependencies from the hash-locked Linux
 constraints, downloads the existing draft, requires the exact indexed inventory, and verifies
 every identity, hash, archive, public-demo claim, selected checkpoint, and tag-to-HEAD relation.
 It passes only a SHA-256 fingerprint of that complete asset set to a fresh publication runner. The
-write-token job rechecks the tag, `main`, draft state, and downloaded asset-set fingerprint before
+publication job rechecks the tag, `main`, draft state, and downloaded asset-set fingerprint before
 running `gh release edit v1.0.0 --draft=false`. Before publication, a separate reusable Pages
 acceptance job checks out the fixed tag, verifies the complete draft asset set, hydrates its exact
 canonical public-demo archive, and runs the static desktop/mobile journey and accessibility gates.
 Its downloaded asset-set fingerprint must equal the first verifier's fingerprint.
-Draft acceptance cannot deploy to Pages. Both verification and publication require a
+The first draft acceptance call cannot deploy to Pages. After it passes, the protected release
+environment must approve a separate deployment of those same fingerprint-bound draft assets.
+That reusable Pages call runs canonical browser/accessibility acceptance again, deploys, and
+requires the deployed content-identity smoke to pass **before** the publication job can start.
+Draft deployment is allowed only from `refs/tags/v1.0.0`, with the release channel and a complete
+verified asset-set fingerprint. Both verification and publication require a
 non-prerelease draft and bind
 its exact title and normalized body to the committed
 `construction-intelligence-v1-release-notes.md` file. Configure the
 `construction-intelligence-v1-release` GitHub environment with required reviewers and protect the
 `v1.0.0` tag. A failed, cancelled, changed, or unapproved run leaves the release unpublished.
 
-After publication, the workflow dispatches `pages.yml` on `main` with `channel=release`. Pages
-downloads the exact indexed asset set, independently verifies the tag/source identity, policy matrix,
+The synchronous Pages gate downloads the exact indexed asset set, independently verifies the tag/source identity, policy matrix,
 research thresholds, native nominal/recovery evidence, release notes, and archive hashes, then
 atomically replaces its build's demo directory. Missing or invalid release evidence fails the
 build; it cannot substitute preview data. Normal Pages pushes also select the canonical v1
 release after it is public, so a later source update cannot silently restore the preview.
 
 The deployed smoke check requires HTTP 200 and byte-identical `release-status.json`,
-`provenance.json`, `research-summary.json`, and `coppelia-evidence.json`. Wait for that Pages
-run to pass before checking Phase 7. Retry deployment without publishing another release with:
+`provenance.json`, `research-summary.json`, and `coppelia-evidence.json`. Publication cannot run
+unless that reusable workflow succeeds. A failed deployment leaves the GitHub release a draft;
+Pages may already expose the approved canonical demo. After publication, retry deployment without
+publishing another release with:
 
 ```powershell
 gh workflow run pages.yml --ref main --field channel=release
 ```
 
 Before publication, normal Pages runs retain the preview. `channel=release` requires an existing
-published, non-prerelease v1.0.0; only the reusable verification call can consume a draft, with
-deployment disabled.
+published, non-prerelease v1.0.0. Only a fingerprint-bound reusable release call can consume a
+draft; draft deployment additionally requires the protected v1 tag and the preceding release
+environment authorization.
+
+Draft-reading verification/build jobs request `contents: write` because draft visibility requires
+push access; their token-bearing commands only read metadata/assets. Pages deployment retains
+`contents: read`. Draft metadata uses GitHub CLI's draft-aware lookup rather than the REST
+published-tag endpoint; see the [official CLI implementation](https://github.com/cli/cli/blob/trunk/pkg/cmd/release/shared/fetch.go)
+and [maintainer permission example](https://github.com/cli/cli/issues/9076).
+The `github-pages` environment must permit both the `main` branch and the exact protected `v1.0.0`
+tag. This does not remove the separate release environment's required reviewer. Publication also
+rechecks the returned deployed identity immediately before changing draft state; a concurrent Pages
+overwrite therefore fails this last check instead of relying only on the earlier smoke.
 
 The static workbench loads its channel identity once at startup, verifies the release-status
 bytes against the provenance hash, and uses that identity for preview/release labels. Missing,

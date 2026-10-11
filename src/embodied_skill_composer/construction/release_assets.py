@@ -275,6 +275,10 @@ def stage_release_assets(
 ) -> ReleaseAssetManifest:
     """Stage and independently verify all deterministic v1 release assets."""
 
+    from embodied_skill_composer.construction.public_demo_provenance import (
+        verify_public_demo_regeneration_identity,
+    )
+
     root = workspace.resolve()
     repository_identity = repository_release_identity(root)
     _require_repository_release_identity(
@@ -316,6 +320,23 @@ def stage_release_assets(
             expected_release_version=release_version,
             expected_release_tag=release_tag,
         )
+        # Rebuild from the original canonical inputs, not from the first export
+        # or the committed preview. This is a staging gate; downloaded-archive
+        # verification cannot reproduce the original, unarchived descriptors.
+        regenerated_root = work_root / "public-demo-regenerated"
+        export_public_demo_bundle(
+            regenerated_root,
+            deterministic_bundle=deterministic_bundle,
+            research_bundle=research_bundle,
+            simulator_bundle=simulator_bundle,
+            source=source,
+            channel="release",
+            release_version=release_version,
+            release_tag=release_tag,
+            coppelia_archive_index=assets_root / COPPELIA_ARCHIVE_INDEX_FILE,
+        )
+        verify_public_demo_regeneration_identity(public_root, regenerated_root)
+        shutil.rmtree(regenerated_root)
         public_selection_path = public_root / "evidence" / "research" / "selections.json"
         selection_source, checkpoint_source_root = _selected_policy_source(
             research_bundle,

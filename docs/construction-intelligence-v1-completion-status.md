@@ -25,7 +25,11 @@ implemented. Counting phases is not a weighted percentage of engineering work or
 - **Phase 7 release infrastructure:** provenance-bound demo export, selected policy/ONNX and
   native simulator asset packaging, release checks, and deployment verification. Final hardening
   adds all 20 per-update training CSVs with a hash/provenance index, and keeps validation completion
-  separate from rollout metrics. Canonical release artifacts cannot be generated from failed or
+  separate from rollout metrics. Further release-gate hardening independently recomputes research
+  and ablation claims from downloaded archives, regenerates the canonical demo twice during staging,
+  and makes draft publication wait for authorized deployment plus the exact-hash Pages smoke.
+  These additions have focused tests; their complete remote checks remain pending.
+  Canonical release artifacts cannot be generated from failed or
   incomplete research/simulator evidence.
 - **Quality hardening:** an independent 87.85% line-coverage gate, separate from the retained 82.19%
   combined statement/branch gate, and retained XML evidence for future baseline audits. The new line
@@ -44,13 +48,25 @@ recorded 1,222 Python tests passed, three approval-gated tests skipped, 85.25% c
 full-source mypy on 136 files, and eight Playwright tests. That pass does **not** certify the later
 hardening changes above; they require their own checks.
 
+The subsequent release-fidelity audit passed 97 focused research/provenance/curve tests, 29
+mocked release-asset tests, and 21 workflow/notes/channel tests. It found and closed archive-claim
+verification, canonical regeneration, draft-lookup/permission, duplicate diagnostics, and
+publication-before-deployment gaps. The Pages environment now permits `main` and the exact
+`v1.0.0` tag; the publication reviewer is unchanged. These are implementation/verification results,
+not a completed live or research release gate.
+
 ## Remaining release-critical work
 
 1. **Phase 4 — corrected research evidence.** The original 20-run / 30M-transition matrix and
    240 held-out episodes completed, but MAPPO median makespan was 1.310722× CP-SAT, above the
    unchanged 1.15× limit. Completion thresholds passed. Preserve those historical failed results.
-   Finish all four validation-only pilots; one IPPO pilot has completed 150K transitions with all
-   five checkpoint pairs and exported policy/ONNX. Freeze a corrected protocol only after pilot
+   Finish all four validation-only pilots; the IPPO and MAPPO two-epoch pilots have each completed
+   150K transitions with all five checkpoint pairs and exported policy/ONNX. See the scoped
+   [training-artifact audit](evidence/construction-intelligence-validation-pilot-20261011-training-audit.json).
+   The IPPO six-epoch pilot also resumed as attempt 2 and completed with the same scoped artifact
+   checks. One MAPPO six-epoch pilot remains, followed by validation; training completion is not
+   pilot eligibility.
+   Freeze a corrected protocol only after pilot
    eligibility and complete smoke/resume gates, then run all 20 fresh 1.5M-transition experiments,
    validation-only selection, and held-out evaluation. All primary gates must pass.
 2. **Phase 5 — live simulator evidence.** Complete and independently verify a full nominal cottage,
@@ -68,7 +84,7 @@ hardening changes above; they require their own checks.
 
 ## Recoverability and boundaries
 
-The completed pilot is retained. After earlier process handles disappeared, the dedicated durable
+All three completed pilots are retained. After earlier process handles disappeared, the dedicated durable
 pilot queue was reattached to reconcile/resume compatible work; its immutable source was not edited.
 The exact termination cause is unverified. Simulator attempts use separate output roots and are
 never substituted for one another. No held-out data selects pilots or policies.

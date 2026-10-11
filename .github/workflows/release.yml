@@ -18,6 +18,9 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # Draft visibility requires push access; verification commands remain non-mutating.
+    permissions:
+      contents: write
     outputs:
       asset_set_sha256: ${{ steps.fingerprint.outputs.asset_set_sha256 }}
       release_notes_sha256: ${{ steps.release_notes.outputs.release_notes_sha256 }}
@@ -111,7 +114,7 @@ jobs:
   canonical_pages:
     needs: verify
     permissions:
-      contents: read
+      contents: write
       pages: write
       id-token: write
     uses: ./.github/workflows/pages.yml
@@ -121,14 +124,34 @@ jobs:
       allow_draft: true
       expected_asset_set_sha256: ${{ needs.verify.outputs.asset_set_sha256 }}
 
-  publish:
+  authorize_deployment:
     needs: [verify, canonical_pages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: construction-intelligence-v1-release
+    steps:
+      - name: Authorize deployment of the verified, still-unpublished draft
+        run: echo 'The protected release environment approved canonical deployment.'
+
+  deploy_canonical_pages:
+    needs: [verify, authorize_deployment]
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
+    with:
+      channel: release
+      deploy: true
+      allow_draft: true
+      expected_asset_set_sha256: ${{ needs.verify.outputs.asset_set_sha256 }}
+
+  publish:
+    needs: [verify, deploy_canonical_pages]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
-      actions: write
-    environment: construction-intelligence-v1-release
     steps:
       - name: Revalidate protected main, draft state, and verified assets
         shell: bash
@@ -173,6 +196,26 @@ jobs:
           )"
           test "$actual_release_notes_sha256" = "$EXPECTED_RELEASE_NOTES_SHA256"
 
+      - name: Recheck deployed identity immediately before publication
+        shell: bash
+        env:
+          PAGE_URL: ${{ needs.deploy_canonical_pages.outputs.page_url }}
+          EXPECTED_DEMO_IDENTITY: ${{ needs.deploy_canonical_pages.outputs.demo_identity }}
+        run: |
+          set -euo pipefail
+          test -n "$PAGE_URL"
+          test -n "$EXPECTED_DEMO_IDENTITY"
+          mkdir "$RUNNER_TEMP/publish-pages-smoke"
+          printf '%s\n' "$EXPECTED_DEMO_IDENTITY" > "$RUNNER_TEMP/publish-pages-smoke/expected.sha256"
+          curl --fail --location --silent --show-error --retry 3 --max-time 30 \
+            --output "$RUNNER_TEMP/publish-pages-smoke/index.html" "$PAGE_URL"
+          grep --quiet '<div id="root"></div>' "$RUNNER_TEMP/publish-pages-smoke/index.html"
+          for artifact in release-status.json provenance.json research-summary.json coppelia-evidence.json; do
+            curl --fail --location --silent --show-error --retry 3 --max-time 30 \
+              --output "$RUNNER_TEMP/publish-pages-smoke/$artifact" "${PAGE_URL%/}/demo/$artifact"
+          done
+          (cd "$RUNNER_TEMP/publish-pages-smoke" && sha256sum --check expected.sha256)
+
       - name: Publish the verified draft
         shell: bash
         env:
@@ -180,8 +223,3 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit "$RELEASE_TAG" --draft=false
-      - name: Deploy the published canonical workbench
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run pages.yml --ref main --field channel=release

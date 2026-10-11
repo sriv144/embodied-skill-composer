@@ -36,6 +36,9 @@ from embodied_skill_composer.construction.evaluation import (
     summarize_evaluations,
 )
 from embodied_skill_composer.construction.experiment_execution import (
+    MatrixSelectionEvidence,
+    RunSelectionEvidence,
+    audit_ablation_hypotheses,
     audit_primary_acceptance,
 )
 from embodied_skill_composer.construction.experiment_protocol import (
@@ -1366,20 +1369,20 @@ def _research_bundle(root: Path) -> Path:
     _write_json(
         root / "ablations.json",
         [
-            {
-                "hypothesis": hypothesis,
-                "supported": False,
-                "completion_gain": 0.0,
-                "transitions_to_95_reduction": 0.0,
-                "failure_completion_gain": 0.0,
-                "no_failure_completion_delta": 0.0,
-                "completion_boundary_met": False,
-                "transition_boundary_met": False,
-                "failure_boundary_met": False,
-                "no_failure_safety_boundary_met": True,
-                "interpretation": "Complete evidence does not support the hypothesis.",
-            }
-            for hypothesis in ("behavior_cloning", "failure_curriculum")
+            item.model_dump(mode="json")
+            for item in audit_ablation_hypotheses(
+                typed_suite,
+                PROTOCOL,
+                selection_evidence=MatrixSelectionEvidence(
+                    matrix_id=MATRIX_ID,
+                    protocol_digest=PROTOCOL_DIGEST,
+                    selections=[
+                        RunSelectionEvidence.model_validate({"matrix_id": MATRIX_ID, **selection})
+                        for selection in selections
+                    ],
+                    evidence_path=root / "selections.json",
+                ),
+            )
         ],
     )
     _write_json(
