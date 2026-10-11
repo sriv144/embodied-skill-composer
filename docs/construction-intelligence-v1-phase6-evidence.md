@@ -72,3 +72,13 @@ default behavior, custom paths, invalid roots, and incompatible reload rejection
 Final full Python coverage, browser/accessibility revalidation, canonical research
 result integration, and protected remote checks remain pending. Earlier baseline
 passes do not substitute for those final gates.
+
+The published checkpoint `05bec64` subsequently passed both protected Linux CI
+matrices for [PR #23](https://github.com/sriv144/embodied-skill-composer/pull/23):
+580 Python tests passed, three approval-gated tests were skipped, combined coverage
+was 82.78%, full-source mypy checked 129 files, and six local/static browser journeys
+passed. Workbench lint, unit coverage, builds, lock integrity, and secret checks
+also passed. See the [push CI run](https://github.com/sriv144/embodied-skill-composer/actions/runs/38070145418)
+and [pull-request CI run](https://github.com/sriv144/embodied-skill-composer/actions/runs/38070148849).
+The later external-evidence launcher and CLI-origin result verifier still require
+their own final full-source checks; this checkpoint does not certify those additions.
