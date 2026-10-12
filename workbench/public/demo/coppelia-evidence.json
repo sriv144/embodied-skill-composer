@@ -1,0 +1,11 @@
+{
+  "claim_allowed": false,
+  "limitation": "Payload transport is logical. This evidence does not claim arm, gripper, grasp-contact, or payload dynamics.",
+  "nominal": null,
+  "payload_transport": "logical",
+  "ready": false,
+  "reason": "No live nominal and unavailable-robot Coppelia evidence bundle was supplied.",
+  "recovery": null,
+  "schema_version": "construction-intelligence-coppelia-public-v1",
+  "status": "absent"
+}

@@ -1,5 +1,5 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 import { BarChart3, BrainCircuit, Building2, Check, FlaskConical, Layers3, LoaderCircle, PlaySquare } from "lucide-react";
 import { api } from "./api";
 import type { CoppeliaHealth, LabMode, LabPolicy, LabRun, Project, Trace } from "./types";
@@ -20,8 +20,10 @@ const views: Array<{ id: View; label: string; icon: typeof Building2 }> = [
 ];
 
 export default function App() {
+  const reduceMotion = useReducedMotion();
   const [project, setProject] = useState<Project | null>(null);
   const [trace, setTrace] = useState<Trace | null>(null);
+  const [traceRevision, setTraceRevision] = useState(0);
   const [view, setView] = useState<View>(readView());
   const [controller, setController] = useState("optimized");
   const [mode, setMode] = useState<LabMode>(api.mode());
@@ -29,6 +31,37 @@ export default function App() {
   const [policies, setPolicies] = useState<LabPolicy[]>([]);
   const [coppelia, setCoppelia] = useState<CoppeliaHealth | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
+  const replayRequest = useRef(0);
+  const selectedController = useRef("optimized");
+
+  const refreshReplay = useCallback(async (nextController: string) => {
+    const request = ++replayRequest.current;
+    // A trace belongs to one design/controller revision. Never display the old
+    // replay while a replacement is loading, or accept an older request later.
+    setTrace(null);
+    try {
+      const nextTrace = await api.trace(nextController);
+      if (request === replayRequest.current) {
+        setTrace(nextTrace);
+        setTraceRevision(request);
+      }
+    } catch (reason) {
+      if (request === replayRequest.current) setError(String(reason));
+    }
+  }, []);
+
+  const changeController = useCallback((nextController: string) => {
+    selectedController.current = nextController;
+    setController(nextController);
+    void refreshReplay(nextController);
+  }, [refreshReplay]);
+
+  const replaceProject = useCallback((updated: Project) => {
+    setProject(updated);
+    setProjectNotice("Approved design compiled into a new build plan.");
+    void refreshReplay(selectedController.current);
+  }, [refreshReplay]);
 
   const refreshLab = useCallback(async () => {
     const [nextRuns, nextPolicies, health] = await Promise.all([
@@ -43,25 +76,33 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    Promise.all([api.project(), api.trace(controller)])
+    const request = ++replayRequest.current;
+    Promise.all([api.project(), api.trace("optimized")])
       .then(([nextProject, nextTrace]) => {
+        if (request !== replayRequest.current) return;
         setProject(nextProject);
         setTrace(nextTrace);
+        setTraceRevision(request);
         setMode(api.mode());
+        return refreshLab();
       })
-      .then(refreshLab)
-      .catch((reason) => setError(String(reason)));
-  }, []);
-
-  useEffect(() => {
-    api.trace(controller).then(setTrace).catch((reason) => setError(String(reason)));
-  }, [controller]);
+      .catch((reason) => {
+        if (request === replayRequest.current) setError(String(reason));
+      });
+    return () => {
+      replayRequest.current += 1;
+    };
+  }, [refreshLab]);
 
   useEffect(() => {
     const update = () => setView(readView());
     window.addEventListener("hashchange", update);
     return () => window.removeEventListener("hashchange", update);
   }, []);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+  }, [view]);
 
   const navigate = (next: View) => {
     window.location.hash = `/${next}`;
@@ -72,31 +113,57 @@ export default function App() {
   if (!project || !trace) return <StartupState />;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell app-shell-${view}`}>
+      <a className="skip-link" href="#main-content">Skip to workbench content</a>
       <aside className="rail">
-        <div className="brand-mark"><Layers3 size={21} strokeWidth={2.2} /></div>
+        <div className="brand-mark" aria-hidden="true"><Layers3 size={21} strokeWidth={2.2} /></div>
         <nav aria-label="Workbench views">
           {views.map((item) => (
-            <button key={item.id} className={view === item.id ? "rail-button active" : "rail-button"} onClick={() => navigate(item.id)} title={item.label}>
-              <item.icon size={20} /><span>{item.label}</span>
+            <button
+              key={item.id}
+              type="button"
+              className={view === item.id ? "rail-button active" : "rail-button"}
+              onClick={() => navigate(item.id)}
+              title={item.label}
+              aria-current={view === item.id ? "page" : undefined}
+            >
+              <item.icon aria-hidden="true" size={20} /><span>{item.label}</span>
             </button>
           ))}
         </nav>
-        <div className="rail-status" title={mode === "local" ? "Local research lab" : "Read-only public preview"}><span className={mode === "local" ? "status-dot" : "status-dot static"} />{mode === "local" ? "local" : "preview"}</div>
+        <div
+          className="rail-status"
+          title={mode === "local" ? "Local research lab" : "Read-only public preview"}
+          role="status"
+          aria-live="polite"
+        >
+          <span aria-hidden="true" className={mode === "local" ? "status-dot" : "status-dot static"} />
+          {mode === "local" ? "local" : "preview"}
+        </div>
       </aside>
-      <main className="main-shell">
+      <main id="main-content" className="main-shell" tabIndex={-1}>
         <header className="topbar">
           <div><p className="eyebrow">Construction Intelligence v1</p><h1>{project.design.title}</h1></div>
           <div className="topbar-meta">
             <span>{project.plan.modules.length} modules</span><span>{project.plan.robots.length} robots</span>
-            <span className="solver-ready"><Check size={14} /> {mode === "local" ? "Lab connected" : "Preview replay"}</span>
+            <span className="solver-ready" role="status" aria-live="polite">
+              <Check aria-hidden="true" size={14} /> {mode === "local" ? "Lab connected" : "Read-only preview"}
+            </span>
           </div>
         </header>
-        <motion.section key={view} className="view-stage" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.2 }}>
-          <Suspense fallback={<div className="view-loading"><LoaderCircle className="spin" size={24} /></div>}>
-            {view === "design" && <DesignView project={project} mode={mode} onProject={(updated) => { setProject(updated); api.trace(controller).then(setTrace); }} />}
-            {view === "brain" && <BrainView project={project} trace={trace} controller={controller} policies={policies} onController={setController} />}
-            {view === "simulate" && <SimulateView project={project} trace={trace} controller={controller} coppelia={coppelia} onController={setController} onTrace={setTrace} />}
+        <p className="notice-line project-notice" role="status" aria-live="polite">{projectNotice}</p>
+        <motion.section
+          key={view}
+          className="view-stage"
+          aria-label={`${views.find((item) => item.id === view)?.label ?? view} workbench`}
+          initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: reduceMotion ? 0 : 0.2 }}
+        >
+          <Suspense fallback={<div className="view-loading" role="status" aria-live="polite"><LoaderCircle aria-hidden="true" className="spin" size={24} /><span className="sr-only">Loading view</span></div>}>
+            {view === "design" && <DesignView project={project} mode={mode} onProject={replaceProject} />}
+            {view === "brain" && <BrainView project={project} trace={trace} controller={controller} policies={policies} onController={changeController} />}
+            {view === "simulate" && <SimulateView project={project} trace={trace} controller={controller} coppelia={coppelia} onController={changeController} onTrace={(nextTrace) => { if (traceRevision === replayRequest.current) setTrace(nextTrace); }} />}
             {view === "experiments" && <ExperimentsView mode={mode} runs={runs} policies={policies} coppelia={coppelia} onRefresh={() => refreshLab().catch((reason) => setError(String(reason)))} />}
             {view === "results" && <ResultsView project={project} policies={policies} />}
           </Suspense>
@@ -112,5 +179,11 @@ function readView(): View {
 }
 
 function StartupState({ error }: { error?: string }) {
-  return <div className="startup-state">{error ? <Layers3 size={32} /> : <LoaderCircle className="spin" size={32} />}<h1>{error ? "Workbench unavailable" : "Loading construction trace"}</h1><p>{error ?? ""}</p></div>;
+  return (
+    <div className="startup-state" role={error ? "alert" : "status"} aria-live="polite">
+      {error ? <Layers3 aria-hidden="true" size={32} /> : <LoaderCircle aria-hidden="true" className="spin" size={32} />}
+      <h1>{error ? "Workbench unavailable" : "Loading construction trace"}</h1>
+      <p>{error ?? "Connecting to the selected workbench runtime."}</p>
+    </div>
+  );
 }

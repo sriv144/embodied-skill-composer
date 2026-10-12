@@ -111,9 +111,23 @@ def _build_module(module: dict, materials: dict):
     kind = module["module_type"]
     material = materials.get(module["material"], materials["plaster_white"])
     if kind == "door_panel":
-        _opening_panel(root, dimensions, materials, "door")
+        _opening_panel(
+            root,
+            dimensions,
+            materials,
+            "door",
+            module.get("architectural_opening"),
+            module.get("architectural_opening_local_offset_m"),
+        )
     elif kind == "window_panel":
-        _opening_panel(root, dimensions, materials, "window")
+        _opening_panel(
+            root,
+            dimensions,
+            materials,
+            "window",
+            module.get("architectural_opening"),
+            module.get("architectural_opening_local_offset_m"),
+        )
     else:
         _cube_child(root, "body", dimensions, material)
         if kind == "roof_panel":
@@ -125,42 +139,69 @@ def _build_module(module: dict, materials: dict):
     return root
 
 
-def _opening_panel(root, dimensions, materials, opening_kind: str) -> None:
+def _opening_panel(
+    root,
+    dimensions,
+    materials,
+    opening_kind: str,
+    architectural_opening=None,
+    architectural_opening_local_offset_m=None,
+) -> None:
     width, depth, height = dimensions["width"], dimensions["depth"], dimensions["height"]
-    opening_w = min(width * 0.56, 1.25)
-    opening_h = min(height * (0.72 if opening_kind == "door" else 0.48), 2.15)
-    sill = 0 if opening_kind == "door" else height * 0.23
-    side_w = max((width - opening_w) / 2, 0.12)
-    for sign in (-1, 1):
+    if architectural_opening:
+        opening_w = architectural_opening["width_m"]
+        opening_h = architectural_opening["height_m"]
+        sill = architectural_opening["sill_height_m"]
+        local_offset = architectural_opening_local_offset_m or 0
+    else:
+        opening_w = min(width * 0.56, 1.25)
+        opening_h = min(height * (0.72 if opening_kind == "door" else 0.48), 2.15)
+        sill = 0 if opening_kind == "door" else height * 0.23
+        local_offset = 0
+    left_w = width / 2 + local_offset - opening_w / 2
+    right_w = width / 2 - local_offset - opening_w / 2
+    if left_w > 1e-9:
         _cube_child(
             root,
-            f"jamb_{sign}",
-            {"width": side_w, "depth": depth, "height": height},
+            "jamb_left",
+            {"width": left_w, "depth": depth, "height": height},
             materials["plaster_white"],
-            x=sign * (opening_w / 2 + side_w / 2),
+            x=-width / 2 + left_w / 2,
         )
-    top_h = max(height - sill - opening_h, 0.15)
-    _cube_child(
-        root,
-        "lintel",
-        {"width": opening_w, "depth": depth, "height": top_h},
-        materials["plaster_white"],
-        z=height / 2 - top_h / 2,
-    )
-    if sill:
+    if right_w > 1e-9:
+        _cube_child(
+            root,
+            "jamb_right",
+            {"width": right_w, "depth": depth, "height": height},
+            materials["plaster_white"],
+            x=width / 2 - right_w / 2,
+        )
+    top_h = height - sill - opening_h
+    if top_h > 1e-9:
+        _cube_child(
+            root,
+            "lintel",
+            {"width": opening_w, "depth": depth, "height": top_h},
+            materials["plaster_white"],
+            x=local_offset,
+            z=height / 2 - top_h / 2,
+        )
+    if sill > 1e-9:
         _cube_child(
             root,
             "sill",
             {"width": opening_w, "depth": depth, "height": sill},
             materials["plaster_white"],
+            x=local_offset,
             z=-height / 2 + sill / 2,
         )
     insert = materials["timber"] if opening_kind == "door" else materials["glass"]
     _cube_child(
         root,
         opening_kind,
-        {"width": opening_w * 0.92, "depth": depth * 0.35, "height": opening_h * 0.96},
+        {"width": opening_w, "depth": depth * 0.35, "height": opening_h},
         insert,
+        x=local_offset,
         z=-height / 2 + sill + opening_h / 2,
     )
 

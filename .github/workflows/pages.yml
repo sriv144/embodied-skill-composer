@@ -10,8 +10,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -22,12 +20,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
           cache-dependency-path: workbench/package-lock.json
       - run: npm ci
+        working-directory: workbench
+      - run: npm run lint
+        working-directory: workbench
+      - run: npm run test:unit
         working-directory: workbench
       - run: npm run build:static
         working-directory: workbench
@@ -37,6 +41,10 @@ jobs:
           path: workbench/dist
 
   deploy:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -46,3 +54,28 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v5
+      - name: Smoke deployed workbench
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${PAGE_URL}"
+          for attempt in $(seq 1 12); do
+            status="$(
+              curl --location --silent --show-error \
+                --output "${RUNNER_TEMP}/construction-workbench.html" \
+                --write-out "%{http_code}" \
+                "${PAGE_URL}"
+            )"
+            if [ "${status}" = "200" ] &&
+              grep --quiet '<div id="root"></div>' \
+                "${RUNNER_TEMP}/construction-workbench.html"; then
+              echo "Pages smoke passed on attempt ${attempt}: ${PAGE_URL}"
+              exit 0
+            fi
+            echo "Pages not ready on attempt ${attempt} (HTTP ${status})"
+            sleep 5
+          done
+          echo "Pages smoke failed after 12 attempts: ${PAGE_URL}" >&2
+          exit 1

@@ -35,6 +35,9 @@ QUIESCENT_RUN_STATUSES: frozenset[str] = TERMINAL_RUN_STATUSES | {"interrupted"}
 ACTIVE_RUN_STATUSES: tuple[str, ...] = ("running", "cancel_requested")
 RESUMABLE_RUN_STATUSES: tuple[str, ...] = ("interrupted", "failed", "cancelled")
 DURABLE_SUBPROCESS_KINDS: tuple[str, ...] = ("training", "matrix_evaluation")
+CANCELLABLE_RUN_STATUSES: frozenset[str] = frozenset(
+    {"queued", "running", "resuming"}
+)
 MATRIX_EVALUATION_DEDUPLICATED_STATUSES: frozenset[str] = frozenset(
     {
         "queued",
@@ -849,7 +852,7 @@ class LabRegistry:
             row = connection.execute(
                 "SELECT status FROM runs WHERE id = ?", (run_id,)
             ).fetchone()
-            if row is None or str(row["status"]) in QUIESCENT_RUN_STATUSES:
+            if row is None or not run_can_cancel(str(row["status"])):
                 return False
             current = str(row["status"])
             target = "cancelled" if current in {"queued", "resuming"} else "cancel_requested"
@@ -869,38 +872,116 @@ class LabRegistry:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT kind, status, latest_checkpoint FROM runs WHERE id = ?",
+                """
+                SELECT kind, status, latest_checkpoint
+                FROM runs WHERE id = ?
+                """,
                 (run_id,),
             ).fetchone()
-            is_restartable_matrix_evaluation = bool(
-                row and str(row["kind"]) == "matrix_evaluation"
-            )
-            has_training_checkpoint = bool(
-                row
-                and row["latest_checkpoint"]
-                and Path(str(row["latest_checkpoint"])).is_file()
-            )
             if (
                 row is None
-                or str(row["status"]) not in RESUMABLE_RUN_STATUSES
-                or not (is_restartable_matrix_evaluation or has_training_checkpoint)
+                or not run_can_resume(
+                    kind=str(row["kind"]),
+                    status=str(row["status"]),
+                    latest_checkpoint=row["latest_checkpoint"],
+                )
             ):
                 return False
+            restart_from_beginning = row["latest_checkpoint"] is None
             connection.execute(
                 """
                 UPDATE runs SET status = 'resuming', cancel_requested = 0, error = NULL,
                     ended_at = NULL, pid = NULL, process_identity = NULL,
-                    claim_token = NULL, interrupted_at = NULL
+                    claim_token = NULL, interrupted_at = NULL,
+                    progress = CASE WHEN ? THEN 0 ELSE progress END,
+                    artifact_dir = CASE WHEN ? THEN NULL ELSE artifact_dir END,
+                    started_at = CASE WHEN ? THEN NULL ELSE started_at END
                 WHERE id = ?
+                """,
+                (
+                    restart_from_beginning,
+                    restart_from_beginning,
+                    restart_from_beginning,
+                    run_id,
+                ),
+            )
+        event: dict[str, object] = {"event": "resume_requested"}
+        if restart_from_beginning:
+            event["restart_from_beginning"] = True
+        else:
+            event["checkpoint"] = str(row["latest_checkpoint"])
+        self.append_event(run_id, event)
+        return True
+
+    def request_restart(self, run_id: str) -> bool:
+        """Requeue a never-started training attempt after an operational failure.
+
+        This deliberately does not broaden checkpoint resume semantics. A restart is
+        only safe when the durable record proves that no training progress or
+        resumable checkpoint exists and no worker still owns the run.
+        """
+
+        created_at = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT kind, status, progress, latest_checkpoint, pid,
+                    process_identity, claim_token, event_log_path
+                FROM runs WHERE id = ?
+                """,
+                (run_id,),
+            ).fetchone()
+            if (
+                row is None
+                or str(row["kind"]) != "training"
+                or str(row["status"]) not in RESUMABLE_RUN_STATUSES
+                or row["latest_checkpoint"] is not None
+                or float(row["progress"]) != 0.0
+                or row["pid"] is not None
+                or row["process_identity"] is not None
+                or row["claim_token"] is not None
+            ):
+                return False
+
+            previous_status = str(row["status"])
+            event = _validated_event_payload(
+                {
+                    "event": "restart_requested",
+                    "previous_status": previous_status,
+                    "restart_from_beginning": True,
+                }
+            )
+            cursor = connection.execute(
+                """
+                UPDATE runs SET status = 'resuming', cancel_requested = 0,
+                    error = NULL, started_at = NULL, ended_at = NULL,
+                    interrupted_at = NULL, progress = 0, artifact_dir = NULL,
+                    heartbeat_at = NULL, pid = NULL, process_identity = NULL,
+                    claim_token = NULL
+                WHERE id = ? AND kind = 'training'
+                    AND status IN ('interrupted', 'failed', 'cancelled')
+                    AND latest_checkpoint IS NULL AND progress = 0
+                    AND pid IS NULL AND process_identity IS NULL
+                    AND claim_token IS NULL
                 """,
                 (run_id,),
             )
-        event: dict[str, object] = {"event": "resume_requested"}
-        if row["latest_checkpoint"]:
-            event["checkpoint"] = str(row["latest_checkpoint"])
-        else:
-            event["restart_from_beginning"] = True
-        self.append_event(run_id, event)
+            if cursor.rowcount != 1:
+                return False
+            sequence = _insert_event(
+                connection,
+                run_id,
+                created_at=created_at,
+                serialized_payload=_json(event),
+            )
+            event_log_path = row["event_log_path"]
+        _write_event_log_record(
+            event_log_path,
+            sequence=sequence,
+            created_at=created_at,
+            payload=event,
+        )
         return True
 
     def cancel_requested(self, run_id: str) -> bool:
@@ -1253,10 +1334,13 @@ class LabRegistry:
 
 
 def _run_row(row: sqlite3.Row) -> dict[str, object]:
+    status = str(row["status"])
+    kind = str(row["kind"])
+    latest_checkpoint = row["latest_checkpoint"]
     return {
         "id": str(row["id"]),
-        "kind": str(row["kind"]),
-        "status": str(row["status"]),
+        "kind": kind,
+        "status": status,
         "config": _object_dict(row["config_json"]),
         "input": _object_dict(row["input_json"]),
         "created_at": str(row["created_at"]),
@@ -1271,7 +1355,7 @@ def _run_row(row: sqlite3.Row) -> dict[str, object]:
         "attempt": int(row["attempt"]),
         "heartbeat_at": row["heartbeat_at"],
         "event_log_path": row["event_log_path"],
-        "latest_checkpoint": row["latest_checkpoint"],
+        "latest_checkpoint": latest_checkpoint,
         "config_digest": row["config_digest"],
         "source_commit": row["source_commit"],
         "resume_provenance_history": _resume_provenance_history(
@@ -1279,7 +1363,38 @@ def _run_row(row: sqlite3.Row) -> dict[str, object]:
         ),
         "claim_token": row["claim_token"],
         "interrupted_at": row["interrupted_at"],
+        "can_cancel": run_can_cancel(status),
+        "can_resume": run_can_resume(
+            kind=kind,
+            status=status,
+            latest_checkpoint=latest_checkpoint,
+        ),
     }
+
+
+def run_can_cancel(status: str) -> bool:
+    """Return the exact persisted-state predicate used by the cancel endpoint."""
+
+    return status in CANCELLABLE_RUN_STATUSES
+
+
+def run_can_resume(
+    *,
+    kind: str,
+    status: str,
+    latest_checkpoint: object,
+) -> bool:
+    """Return the exact durable-state predicate used by the resume endpoint."""
+
+    if (
+        kind not in DURABLE_SUBPROCESS_KINDS
+        or status not in RESUMABLE_RUN_STATUSES
+    ):
+        return False
+    if latest_checkpoint is None:
+        return True
+    checkpoint = str(latest_checkpoint)
+    return bool(checkpoint) and Path(checkpoint).is_file()
 
 
 def _insert_event(
