@@ -56,6 +56,23 @@ async function start() {
 }
 
 describe("replay revision ownership", () => {
+  it("reserves a live-status grid row between the header and view before and after compilation", async () => {
+    await start();
+    const status = document.querySelector(".main-shell > .project-notice");
+    expect(status).toBeEmptyDOMElement();
+    expect(status).toHaveAttribute("role", "status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status?.previousElementSibling).toHaveClass("topbar");
+    expect(status?.nextElementSibling?.tagName).toBe("SECTION");
+
+    vi.mocked(api.trace).mockResolvedValueOnce(traceFixture("compiled"));
+    await act(async () => controls.replace!(projectFixture("compiled")));
+    const updatedStatus = document.querySelector(".main-shell > .project-notice");
+    expect(updatedStatus).toHaveTextContent("Approved design compiled into a new build plan.");
+    expect(updatedStatus?.previousElementSibling).toHaveClass("topbar");
+    expect(updatedStatus?.nextElementSibling?.tagName).toBe("SECTION");
+  });
+
   it("makes post-compile failures visible and removes stale replay while loading", async () => {
     await start();
     const pending = deferred<Trace>();

@@ -1,7 +1,8 @@
 # Construction Intelligence v1 — Phase 6 Evidence
 
-Status: the previous implementation checkpoint passed remote checks. Final hardening below requires
-fresh browser/remote acceptance; protected-branch review and merge are pending.
+Status: the latest Phase 6 hardening passed all eight local browser flows on 2026-10-12.
+Fresh protected remote acceptance, branch review, and merge remain pending; an earlier
+implementation checkpoint passed remote checks.
 
 ## Product journey
 
@@ -36,13 +37,45 @@ The new local browser flow uses real full CPU resume checkpoints interrupted at 
 transitions, resumes through the workbench, verifies `training_resumed` and completion events,
 policy/ONNX artifacts and provenance, evaluates validation seed 800, then downloads the actual
 report from its Results record. It runs for desktop and mobile; it does not train a research
-matrix or use held-out data for selection. This stronger browser proof is implemented and
-typechecked but **has not yet passed browser execution**.
+matrix or use held-out data for selection. This stronger browser proof passed local browser
+execution on 2026-10-12, as recorded below; fresh protected remote acceptance remains pending.
 
 Focused verification in the isolated hardening checkout: ESLint and TypeScript passed; 54
 Vitest tests across ten files passed; 19 backend lab-path tests passed; owned Python Ruff/mypy
 and diff checks passed. These are scoped checks, not a replacement for full remote CI,
 production builds, browser/accessibility acceptance, or protected review.
+
+## Browser CI regression repair — 2026-10-12
+
+The failed [PR #23 acceptance run](https://github.com/sriv144/embodied-skill-composer/actions/runs/38140060855)
+and [PR #25 acceptance run](https://github.com/sriv144/embodied-skill-composer/actions/runs/38142195468)
+exposed two real layout defects. The parent compilation notice was a third child in a two-row
+desktop grid and became visually collapsed; the desktop failure reproduced locally before
+repair. Mobile CSS also hid the named progress bars with `display: none`, removing them from
+both the display and accessibility tree even when the resumed job had completed correctly.
+
+The workbench now reserves a dedicated automatic-height live-status row between its header and
+view, and mobile run rows show their progress bar across a second row. The browser test retains
+the actual `100` percent accessible-value check and additionally requires the bar to be visible;
+checkpoint, event, manifest, ONNX, evaluation, and artifact assertions were not weakened.
+
+Verification scoped to `codex/phase-6-workbench` on Windows with local Chrome:
+
+- All 49 Vitest tests across 10 files passed, including a new status-row regression.
+- ESLint passed with zero warnings; strict TypeScript and `git diff --check` passed.
+- Local and static production builds passed; the largest minified chunk remained 308.14 kB
+  with no Vite chunk-size warning.
+- All eight browser flows passed in separate local and static invocations: six local desktop/mobile
+  tests (2.6 minutes) and two read-only static desktop/mobile journeys (1.5 minutes).
+- Both local journeys resumed a real interrupted CPU unit checkpoint from 32 to 64 transitions,
+  checked resume/completion events and policy/ONNX provenance, evaluated diagnostic validation
+  seed 800, downloaded the real Results report, and exercised matrix WebSocket/cancel controls.
+- The journeys' responsive, focus/occlusion, CSP, and serious/critical accessibility gates passed.
+
+These are Phase 6 checkout counts, distinct from the earlier 54-test isolated hardening checkout.
+They do not certify the complete Python coverage matrix, Linux CI, the research acceptance
+matrix, live Coppelia gates, or a public release. Phase 6 remains unchecked until its fresh
+required remote checks pass and the pull request is reviewed and merged.
 
 ## Acceptance coverage
 

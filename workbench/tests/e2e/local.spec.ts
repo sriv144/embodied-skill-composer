@@ -194,7 +194,9 @@ test("local design-to-results flow proves editing, durable controls, and evidenc
     expect(run.status, run.error ?? "CPU resume must not fail").not.toBe("failed");
     return run.status;
   }, { timeout: 90_000, intervals: [500, 1_000, 2_000] }).toBe("completed");
-  await expect(page.getByRole("progressbar", { name: `${resumeId} progress` })).toHaveAttribute("aria-valuenow", "100");
+  const resumedProgress = page.getByRole("progressbar", { name: `${resumeId} progress` });
+  await expect(resumedProgress).toBeVisible();
+  await expect(resumedProgress).toHaveAttribute("aria-valuenow", "100");
   const events = await (await page.request.get(`/api/lab/runs/${resumeId}/events`)).json() as RunEventEnvelope[];
   expect(events.some((event) => event.payload.event === "training_resumed" && event.payload.transitions === 32)).toBe(true);
   expect(events.some((event) => event.payload.event === "training_completed")).toBe(true);

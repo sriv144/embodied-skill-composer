@@ -151,7 +151,7 @@ export default function App() {
             </span>
           </div>
         </header>
-        {projectNotice && <p className="notice-line" role="status" aria-live="polite">{projectNotice}</p>}
+        <p className="notice-line project-notice" role="status" aria-live="polite">{projectNotice}</p>
         <motion.section
           key={view}
           className="view-stage"
