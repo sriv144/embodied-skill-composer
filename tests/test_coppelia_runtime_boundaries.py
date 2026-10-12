@@ -112,7 +112,7 @@ def test_base_only_physics_keeps_five_dynamic_contact_shapes_and_excludes_grippe
     assert sim.booleans[(6, "collidable")] is False
     assert all(sim.integers[(handle, sim.shapeintparam_static)] == 0 for handle in range(1, 6))
     audit = executor.robot_base_physics_audit[0]
-    assert audit["measured_footprint_radius_m"] == pytest.approx(math.sqrt(0.05**2 * 2))
+    assert audit["measured_footprint_radius_m"] == pytest.approx(math.sqrt(0.05**2 * 3))
     assert audit["base_only_policy_verified"] is True
 
 

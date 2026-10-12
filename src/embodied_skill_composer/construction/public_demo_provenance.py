@@ -292,6 +292,13 @@ def export_public_demo_bundle(
         if simulator_bundle is not None
         else None
     )
+    archive = None
+    if coppelia_archive_index is not None:
+        if channel != "release" or simulator is None:
+            raise PublicDemoExportError("Coppelia archive binding requires release simulator evidence")
+        # Reject a different descriptor/source before costly native replay checks.
+        # Every accepted archive still undergoes full simulator validation below.
+        archive = _validate_simulator_archive(coppelia_archive_index, simulator)
     validated_research = _validate_research(research) if research is not None else None
     validated_simulator = _validate_simulator(simulator) if simulator is not None else None
     _validate_export_claims(
@@ -303,12 +310,6 @@ def export_public_demo_bundle(
         validated_research,
         validated_simulator,
     )
-    archive = None
-    if coppelia_archive_index is not None:
-        if channel != "release" or simulator is None:
-            raise PublicDemoExportError("Coppelia archive binding requires release simulator evidence")
-        archive = _validate_simulator_archive(coppelia_archive_index, simulator)
-
     destination = output_dir.resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-", dir=destination.parent))
@@ -1732,7 +1733,7 @@ def _validate_export_claims(
 
 
 def _validate_simulator_archive(path: Path, bundle: _LoadedBundle) -> CoppeliaArchiveIndex:
-    """Bind the compact view to the already fully validated native descriptor."""
+    """Bind compact storage to a hash-verified descriptor; native gates run separately."""
     try:
         archive = load_coppelia_archive_index(path)
     except ValueError as exc:
