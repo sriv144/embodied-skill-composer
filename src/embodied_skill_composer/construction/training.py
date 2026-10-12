@@ -26,6 +26,7 @@ from torchrl.objectives.multiagent import IPPOLoss, MAPPOLoss
 
 from embodied_skill_composer.construction.intelligence_models import PolicyManifest
 from embodied_skill_composer.construction.marl_env_v1 import (
+    DEFAULT_REWARD_TIME_COEFFICIENT,
     FLEET_SIZE,
     TemporalConstructionCoordinationEnv,
 )
@@ -68,6 +69,12 @@ class TrainingConfig(BaseModel):
     clip_epsilon: float = Field(default=0.2, gt=0)
     entropy_coefficient: float = Field(default=0.01, ge=0)
     max_grad_norm: float = Field(default=1.0, gt=0)
+    reward_time_coefficient: float = Field(
+        default=DEFAULT_REWARD_TIME_COEFFICIENT,
+        gt=0,
+        allow_inf_nan=False,
+        strict=True,
+    )
     include_training_failures: bool = True
     failure_curriculum_mode: Literal["constant", "linear"] = "constant"
     failure_curriculum_start_probability: float = Field(default=0.0, ge=0, le=1)
@@ -709,7 +716,13 @@ def collect_policy_rollouts(
                 obstacle_count_range=(0, 4),
             ),
         )
-        env = TemporalConstructionCoordinationEnv(scenario)
+        if config.reward_time_coefficient == DEFAULT_REWARD_TIME_COEFFICIENT:
+            env = TemporalConstructionCoordinationEnv(scenario)
+        else:
+            env = TemporalConstructionCoordinationEnv(
+                scenario,
+                reward_time_coefficient=config.reward_time_coefficient,
+            )
         observations, _ = env.reset(seed=scenario_seed)
         trajectory: list[RolloutStep] = []
         terminated = False
@@ -1108,6 +1121,10 @@ def configuration_digest(config: TrainingConfig) -> str:
             "source_tree_digest",
         },
     )
+    if config.reward_time_coefficient == DEFAULT_REWARD_TIME_COEFFICIENT:
+        # Missing historical fields mean the unchanged 0.15 objective. Preserve
+        # those configuration/resume digests; every intervention is fingerprinted.
+        payload.pop("reward_time_coefficient", None)
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 

@@ -135,7 +135,11 @@ def workflow(tmp_path, monkeypatch):
                         "seed": seed, "split": "validation", "controller": config["algorithm"],
                         "failure_enabled": failure,
                         "structure_completion_rate": 1.0 if index == 0 else 0.96,
-                        "makespan_s": 110 if config["ppo_epochs"] == 6 else 105,
+                        "makespan_s": (
+                            110 if config["reward_time_coefficient"] == 0.15 else 105
+                        ) if "reward_time_coefficient" in config else (
+                            110 if config["ppo_epochs"] == 6 else 105
+                        ),
                     })
             candidates.append({"result": result, "episodes": rows})
         return Model({
@@ -203,6 +207,59 @@ def test_identity_is_stable_and_bound_to_source_design_and_device():
     assert identity() != identity(source={**SOURCE, "commit": "e" * 40})
     assert identity() != identity(design_digest="f" * 64)
     assert identity() != identity(device="cpu")
+
+
+def test_default_ppo_comparison_preserves_pre_generalization_identity():
+    fields = dict(source=SOURCE, design_digest="c" * 64, parent_protocol_digest="d" * 64, device="cuda")
+    omitted = pilot.build_pilot_protocol(**fields)
+    explicit = pilot.build_pilot_protocol(**fields, comparison="ppo-epochs")
+    assert omitted == explicit
+    # Captured from the original committed pilot builder before adding reward mode.
+    assert omitted[:2] == (
+        "validation-pilot-aaaaaaaaaaaa-9785be8368bc",
+        "9785be8368bcf3c0ac89ba8ef6d574733624db89bbffc1b297d07c7b94a78742",
+    )
+    assert "comparison_mode" not in omitted[2]
+    assert pilot.build_parser().parse_args([]).comparison == "ppo-epochs"
+
+
+def test_reward_time_protocol_is_exact_one_factor_with_research_prefix():
+    fields = dict(source=SOURCE, design_digest="c" * 64, parent_protocol_digest="d" * 64, device="cuda")
+    matrix_id, digest, protocol = pilot.build_pilot_protocol(**fields, comparison="reward-time")
+    assert (matrix_id, digest) != pilot.build_pilot_protocol(**fields)[:2]
+    assert protocol["comparison_parameter"] == "reward_time_coefficient"
+    assert protocol["comparison_protocol_version"] == "reward-time-v1"
+    assert protocol["winner_rule"]["lexicographic_order"][-1] == "reward_time_coefficient_asc"
+    assert protocol["release_eligible"] is protocol["research_launch_authorized"] is False
+    assert protocol["total_training_transitions"] == 600_000
+    assert {row["run_key"] for row in protocol["run_specs"]} == {
+        "mappo-time0p15-ppo6-seed7", "mappo-time1p5-ppo6-seed7",
+        "ippo-time0p15-ppo6-seed7", "ippo-time1p5-ppo6-seed7",
+    }
+    assert len({row["config"]["protocol_run_digest"] for row in protocol["run_specs"]}) == 4
+    for algorithm in ("mappo", "ippo"):
+        configs = [row["config"] for row in protocol["run_specs"] if row["config"]["algorithm"] == algorithm]
+        assert {key for key in configs[0] if configs[0][key] != configs[1][key]} == {
+            "reward_time_coefficient", "experiment_variant", "protocol_run_digest",
+        }
+        assert {config["reward_time_coefficient"] for config in configs} == {0.15, 1.5}
+        for config in configs:
+            assert config["ppo_epochs"] == 6
+            assert config["seed"] == config["training_seed"] == 7
+            assert config["transitions"] == 150_000
+            assert config["expert_episodes"] == 128
+            assert config["behavior_clone_epochs"] == 40
+            assert config["failure_curriculum_reference_transitions"] == 1_500_000
+            assert config["failure_curriculum_mode"] == "linear"
+            assert config["checkpoint_fractions"] == pilot.FRACTIONS
+
+
+def test_unknown_comparison_fails_without_building_runs():
+    with pytest.raises(ValueError, match="comparison"):
+        pilot.build_pilot_protocol(
+            SOURCE, design_digest="c" * 64, parent_protocol_digest="d" * 64,
+            device="cuda", comparison="unregistered",
+        )
 
 
 def test_fresh_workflow_launches_once_and_persists_only_validation_evidence(workflow):
@@ -280,16 +337,20 @@ def test_keyboard_interrupt_detaches_without_cancelling_running_job(workflow, mo
     assert calls["candidates"] == before["candidates"]
 
 
-def test_source_change_before_dispatch_is_rejected(workflow):
+@pytest.mark.parametrize("comparison", ["ppo-epochs", "reward-time"])
+def test_source_change_before_dispatch_is_rejected(workflow, comparison):
     args, runtime, _registry, _service, calls, _parent = workflow
+    args.comparison = comparison
     fingerprints = iter([SOURCE, {**SOURCE, "dirty": True}])
     with pytest.raises(ValueError, match="before dispatch"):
         pilot.execute(args, replace(runtime, source=lambda: next(fingerprints)))
     assert calls["service"] == 0
 
 
-def test_source_change_while_polling_detaches_before_evaluation(workflow):
+@pytest.mark.parametrize("comparison", ["ppo-epochs", "reward-time"])
+def test_source_change_while_polling_detaches_before_evaluation(workflow, comparison):
     args, runtime, _registry, service, calls, _parent = workflow
+    args.comparison = comparison
     fingerprints = iter([SOURCE, SOURCE, {**SOURCE, "dirty": True}])
     with pytest.raises(ValueError, match="during execution"):
         pilot.execute(args, replace(runtime, source=lambda: next(fingerprints)))
@@ -297,13 +358,17 @@ def test_source_change_while_polling_detaches_before_evaluation(workflow):
     assert calls["baseline"] == calls["candidates"] == []
 
 
-@pytest.mark.parametrize("mutation", ["epochs", "digest", "source", "design", "grid"])
-def test_reattachment_refuses_changed_records_before_service_start(workflow, mutation):
+@pytest.mark.parametrize("comparison", ["ppo-epochs", "reward-time"])
+@pytest.mark.parametrize("mutation", ["epochs", "reward", "digest", "source", "design", "grid"])
+def test_reattachment_refuses_changed_records_before_service_start(workflow, mutation, comparison):
     args, runtime, registry, _service, calls, _parent = workflow
+    args.comparison = comparison
     pilot.execute(args, runtime)
     run = registry.matrix["runs"][0]
     if mutation == "epochs":
         run["config"]["ppo_epochs"] = 8
+    elif mutation == "reward":
+        run["config"]["reward_time_coefficient"] = 2.0
     elif mutation == "digest":
         run["config_digest"] = "wrong"
     elif mutation == "source":
@@ -384,8 +449,10 @@ def test_evidence_split_guard_rejects_tampered_candidate(workflow):
         pilot.execute(args, replace(runtime, candidates=tampered))
 
 
-def test_source_change_during_last_candidate_refuses_summary_and_registration(workflow):
+@pytest.mark.parametrize("comparison", ["ppo-epochs", "reward-time"])
+def test_source_change_during_last_candidate_refuses_summary_and_registration(workflow, comparison):
     args, runtime, registry, _service, _calls, _parent = workflow
+    args.comparison = comparison
     real = runtime.candidates
     state = {"calls": 0, "changed": False}
 
@@ -502,6 +569,136 @@ def test_preregistered_lexicographic_tiebreaks(field):
 def test_default_command_is_nonlaunching_plan(workflow):
     args, runtime, _registry, _service, calls, _parent = workflow
     args.command = "plan"
+    assert pilot.execute(args, runtime) == 0
+    assert calls["service"] == 0
+    assert calls["baseline"] == calls["candidates"] == []
+
+
+def _reward_summary(algorithm, coefficient, **kwargs):
+    return {**_summary(algorithm, 6, **kwargs), "reward_time_coefficient": coefficient}
+
+
+def test_reward_time_winner_uses_final_checkpoint_not_best_selected():
+    rows = [_reward_summary(algorithm, coefficient, nominal=0.8 if coefficient == 1.5 else 0.95)
+            for algorithm in ("mappo", "ippo") for coefficient in (0.15, 1.5)]
+    decision = pilot.choose_common_reward_time_coefficient(rows)
+    assert decision["winner_reward_time_coefficient"] == 0.15
+    assert "winner_ppo_epochs" not in decision
+    assert "epoch_options" not in decision
+    assert decision["release_eligible"] is decision["research_launch_authorized"] is False
+
+
+def test_no_shared_eligible_reward_winner_is_null():
+    rows = [_reward_summary(algorithm, coefficient,
+                           nominal=0.8 if (algorithm, coefficient) in {("mappo", 0.15), ("ippo", 1.5)} else 0.96)
+            for algorithm in ("mappo", "ippo") for coefficient in (0.15, 1.5)]
+    decision = pilot.choose_common_reward_time_coefficient(rows)
+    assert decision["winner_reward_time_coefficient"] is None
+    assert decision["per_algorithm_preferences"] == {"mappo": 1.5, "ippo": 0.15}
+
+
+@pytest.mark.parametrize("nominal,failure,ratio,eligible", [
+    (0.95, 0.85, 1.15, True), (0.949, 0.85, 1.15, False),
+    (0.95, 0.849, 1.15, False), (0.95, 0.85, 1.151, False),
+])
+def test_reward_eligibility_is_unchanged_and_ties_prefer_control(nominal, failure, ratio, eligible):
+    rows = [_reward_summary(algorithm, coefficient, nominal=nominal, failure=failure, ratio=ratio)
+            for algorithm in ("mappo", "ippo") for coefficient in (0.15, 1.5)]
+    decision = pilot.choose_common_reward_time_coefficient(rows)
+    assert all(row["validation_pilot_eligible"] is eligible for row in decision["coefficient_options"])
+    assert decision["winner_reward_time_coefficient"] == (0.15 if eligible else None)
+
+
+@pytest.mark.parametrize("mutation", ["epochs", "missing", "duplicate"])
+def test_reward_winner_requires_fixed_epochs_and_complete_distinct_grid(mutation):
+    rows = [_reward_summary(algorithm, coefficient)
+            for algorithm in ("mappo", "ippo") for coefficient in (0.15, 1.5)]
+    if mutation == "epochs":
+        rows[0]["ppo_epochs"] = 2
+    elif mutation == "missing":
+        rows.pop()
+    else:
+        rows[-1]["reward_time_coefficient"] = 0.15
+    with pytest.raises(ValueError, match="PPO epochs 6|both time coefficients"):
+        pilot.choose_common_reward_time_coefficient(rows)
+
+
+def test_reward_workflow_launches_four_and_persists_validation_only_decision(workflow):
+    import json
+
+    args, runtime, registry, service, calls, _parent = workflow
+    args.comparison = "reward-time"
+    assert pilot.execute(args, runtime) == 0
+    assert service.launches == 1
+    assert len(calls["baseline"]) == 10
+    assert len(calls["candidates"]) == 4
+    root = args.evidence_root / registry.matrix["id"]
+    summary = json.loads((root / "validation_pilot_summary.json").read_text())
+    evidence = json.loads((root / "pilot_evidence.json").read_text())
+    assert summary["comparison_parameter"] == "reward_time_coefficient"
+    assert summary["final_checkpoint_decision"]["winner_reward_time_coefficient"] == 1.5
+    assert "winner_ppo_epochs" not in summary["final_checkpoint_decision"]
+    assert summary["release_eligible"] is summary["research_launch_authorized"] is False
+    assert sum(len(candidate["episodes"]) for selection in evidence["selections"]
+               for candidate in selection["candidates"]) == 200
+    assert all(row["selected"]["checkpoint_fraction"] == 0.1 for row in summary["runs"])
+    assert all(row["final"]["transition_count"] == 150_000 and row["ppo_epochs"] == 6 for row in summary["runs"])
+    assert {row["reward_time_coefficient"] for row in summary["runs"]} == {0.15, 1.5}
+    assert registry.evaluations[0]["split"] == "validation"
+
+
+def test_reward_completed_reattachment_and_interrupted_resume_do_not_duplicate_queue(workflow, tmp_path):
+    args, runtime, registry, service, _calls, _parent = workflow
+    args.comparison = "reward-time"
+    assert pilot.execute(args, runtime) == 0
+    assert pilot.execute(args, runtime) == 0
+    checkpoint = tmp_path / "reward-latest.pt"
+    checkpoint.write_bytes(b"synthetic-workflow-checkpoint")
+    run = registry.matrix["runs"][0]
+    run.update(status="interrupted", progress=0.5, latest_checkpoint=str(checkpoint))
+    assert pilot.execute(args, runtime) == 0
+    assert service.launches == 1
+    assert service.resumes == [run["id"]]
+
+
+@pytest.mark.parametrize("mutation", ["heldout_seed", "test_split", "config_digest"])
+def test_reward_validation_evidence_rejects_wrong_split_or_reward_config_provenance(workflow, mutation):
+    args, runtime, registry, _service, _calls, _parent = workflow
+    args.comparison = "reward-time"
+    original = runtime.candidates
+
+    def tampered(*args, **kwargs):
+        result = original(*args, **kwargs)
+        first = result.payload["candidates"][0]
+        if mutation == "heldout_seed":
+            first["episodes"][0]["seed"] = 900
+        elif mutation == "test_split":
+            first["episodes"][0]["split"] = "test"
+        else:
+            first["result"]["configuration_digest"] = "0" * 64
+        return result
+
+    with pytest.raises(ValueError, match="validation seeds|non-validation|provenance"):
+        pilot.execute(args, replace(runtime, candidates=tampered))
+    assert registry.evaluations == []
+
+
+def test_reward_runtime_must_not_silently_drop_reward_configuration(workflow):
+    args, runtime, _registry, _service, calls, _parent = workflow
+    args.comparison = "reward-time"
+
+    def ignoring_config(payload):
+        return Model({key: value for key, value in payload.items() if key != "reward_time_coefficient"})
+
+    with pytest.raises(ValueError, match="preserve the reward-time comparison"):
+        pilot.execute(args, replace(runtime, config=ignoring_config))
+    assert calls["service"] == 0
+
+
+def test_reward_plan_does_not_start_services_or_evaluate(workflow):
+    args, runtime, _registry, _service, calls, _parent = workflow
+    args.command = "plan"
+    args.comparison = "reward-time"
     assert pilot.execute(args, runtime) == 0
     assert calls["service"] == 0
     assert calls["baseline"] == calls["candidates"] == []

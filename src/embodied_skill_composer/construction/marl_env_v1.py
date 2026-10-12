@@ -4,7 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import combinations
-from math import hypot, inf
+from math import hypot, inf, isfinite
 
 import numpy as np
 from gymnasium.spaces import Box, Dict as DictSpace, Discrete, MultiBinary
@@ -33,6 +33,7 @@ MAX_MODULES = 32
 FLEET_SIZE = 4
 MODULE_FEATURES = 14
 ROBOT_FEATURES = 11
+DEFAULT_REWARD_TIME_COEFFICIENT = 0.15
 
 
 @dataclass
@@ -79,7 +80,16 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
         router: RoutingAdapter | None = None,
         max_decisions: int = 256,
         max_sim_time_s: float = 1800.0,
+        reward_time_coefficient: float = DEFAULT_REWARD_TIME_COEFFICIENT,
     ) -> None:
+        if (
+            isinstance(reward_time_coefficient, bool)
+            or not isinstance(reward_time_coefficient, (int, float))
+            or not isfinite(reward_time_coefficient)
+            or reward_time_coefficient <= 0
+        ):
+            raise ValueError("reward_time_coefficient must be finite and positive")
+        self.reward_time_coefficient = float(reward_time_coefficient)
         self.scenario: ScenarioManifest | None
         if isinstance(scenario, ScenarioManifest):
             scenario_manifest = scenario.model_copy(deep=True)
@@ -202,7 +212,7 @@ class TemporalConstructionCoordinationEnv(ParallelEnv):
         completion_gain = len(self.completed) - completed_before
         team_reward = (
             4.0 * completion_gain / len(self.modules)
-            - 0.15 * elapsed / self.max_sim_time_s
+            - self.reward_time_coefficient * elapsed / self.max_sim_time_s
             - 0.002 * (self.total_travel_m - travel_before)
             - 0.04 * (self.invalid_bid_count - invalid_before)
             - 0.08 * (self.drop_count - dropped_before)

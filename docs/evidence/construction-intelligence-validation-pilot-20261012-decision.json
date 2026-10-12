@@ -1,0 +1,30 @@
+{
+  "schema_version": "construction-intelligence-validation-pilot-decision-v1",
+  "evidence_kind": "validation_only_non_release",
+  "matrix_id": "validation-pilot-2eba09c3fdff-978196b893d7",
+  "source_commit": "2eba09c3fdff9babc15c7615ca6a437f8a9704cf",
+  "source_dirty": false,
+  "protocol_digest": "978196b893d789f8365ec068095ec256e64679632f11f5e5a327e8bfe555d2db",
+  "summary_sha256": "5a0f0a66d1c41ebd017110e3cc33e99dd14c00a2cb35c021caebfff65b8ecccb",
+  "training_seeds": [7],
+  "validation_seeds": [800, 801, 802, 803, 804],
+  "transitions_per_run": 150000,
+  "completed_training_runs": 4,
+  "comparison_checkpoint": "final 150000-transition checkpoint only",
+  "runs": [
+    {"algorithm": "mappo", "ppo_epochs": 6, "nominal_completion": 0.8767525577870405, "failure_completion": 0.8913414172034861, "nominal_makespan_cp_sat_ratio": 2.0985459891459275},
+    {"algorithm": "mappo", "ppo_epochs": 2, "nominal_completion": 1.0, "failure_completion": 1.0, "nominal_makespan_cp_sat_ratio": 2.3740031593655693},
+    {"algorithm": "ippo", "ppo_epochs": 6, "nominal_completion": 1.0, "failure_completion": 1.0, "nominal_makespan_cp_sat_ratio": 2.295494333641291},
+    {"algorithm": "ippo", "ppo_epochs": 2, "nominal_completion": 0.8333834143271529, "failure_completion": 0.8262405571842958, "nominal_makespan_cp_sat_ratio": 2.6781468252466025}
+  ],
+  "winner_ppo_epochs": null,
+  "research_launch_authorized": false,
+  "release_eligible": false,
+  "verification_scope": [
+    "All four durable training jobs completed without recorded errors.",
+    "All 20 validation-candidate policy hashes match the saved candidate records; paired resume checkpoints exist.",
+    "All four final policy hashes match their manifests; ONNX models and external data exist.",
+    "Each learning curve contains the configured 20 updates and reaches 150000 transitions."
+  ],
+  "limitations": "One training seed and validation only. No held-out results, confidence claim, corrected full-matrix eligibility, or release acceptance. Diagnostic per-algorithm preferences do not authorize a hybrid winner."
+}

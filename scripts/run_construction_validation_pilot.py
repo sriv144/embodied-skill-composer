@@ -1,4 +1,4 @@
-"""Durable, validation-only PPO update-budget pilots; never a release matrix."""
+"""Durable, validation-only single-factor policy pilots; never a release matrix."""
 
 from __future__ import annotations
 
@@ -92,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--design", type=Path, default=WORKSPACE / "configs/construction/cottage_v1.yaml",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument(
+        "--comparison", choices=("ppo-epochs", "reward-time"), default="ppo-epochs",
+        help="Preregistered one-factor comparison; reward-time fixes PPO epochs at 6.",
+    )
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--max-resume-attempts", type=int, default=3)
     return parser
@@ -114,18 +118,23 @@ def _require_clean_source(source: dict[str, object]) -> None:
 
 def build_pilot_protocol(
     source: dict[str, object], *, design_digest: str, parent_protocol_digest: str, device: str,
+    comparison: str = "ppo-epochs",
 ) -> tuple[str, str, dict[str, Any]]:
     _require_clean_source(source)
     if device not in {"cpu", "cuda"}:
         raise ValueError("pilot device must be cpu or cuda")
+    if comparison not in {"ppo-epochs", "reward-time"}:
+        raise ValueError("pilot comparison must be ppo-epochs or reward-time")
     specs: list[dict[str, Any]] = []
     for algorithm in ("mappo", "ippo"):
-        for epochs in (6, 2):
-            key = f"{algorithm}-ppo{epochs}-seed7"
+        for value in ((6, 2) if comparison == "ppo-epochs" else (0.15, 1.5)):
+            epochs = int(value) if comparison == "ppo-epochs" else 6
+            label = f"ppo{epochs}" if comparison == "ppo-epochs" else f"time{str(value).replace('.', 'p')}-ppo6"
+            key = f"{algorithm}-{label}-seed7"
             config = {
                 "algorithm": algorithm, "profile": "research", "seed": 7,
                 "training_seed": 7, "experiment_id": EXPERIMENT_ID,
-                "experiment_variant": f"{algorithm}_ppo{epochs}",
+                "experiment_variant": f"{algorithm}_ppo{epochs}" if comparison == "ppo-epochs" else f"{algorithm}_reward_time{str(value).replace('.', 'p')}_ppo6",
                 "transitions": TRANSITIONS, "expert_episodes": 128,
                 "behavior_clone_epochs": 40, "rollout_decisions": 2048,
                 "ppo_epochs": epochs, "minibatch_size": 512, "hidden_dim": 128,
@@ -136,6 +145,8 @@ def build_pilot_protocol(
                 "failure_curriculum_reference_transitions": 1_500_000,
                 "checkpoint_fractions": list(FRACTIONS), "device": device,
             }
+            if comparison == "reward-time":
+                config["reward_time_coefficient"] = value
             specs.append({"run_key": key, "config": config})
     protocol: dict[str, Any] = {
         "schema_version": SCHEMA, "experiment_id": EXPERIMENT_ID,
@@ -165,6 +176,15 @@ def build_pilot_protocol(
         },
         "research_launch_authorized": False,
     }
+    if comparison == "reward-time":
+        protocol["comparison_mode"] = "reward-time"
+        protocol["comparison_parameter"] = "reward_time_coefficient"
+        protocol["comparison_protocol_version"] = "reward-time-v1"
+        protocol["comparison"] = (
+            "Reward time coefficient 0.15 versus 1.5; PPO epochs 6; "
+            "all other training fields fixed"
+        )
+        protocol["winner_rule"]["lexicographic_order"][-1] = "reward_time_coefficient_asc"
     identity = _digest(protocol)
     for spec in specs:
         spec["config"]["protocol_run_digest"] = _digest({"pilot": identity, "run": spec})
@@ -307,26 +327,29 @@ def _candidate_summary(
     }
 
 
-def choose_common_epochs(summaries: list[dict[str, Any]]) -> dict[str, Any]:
-    """Apply the preregistered FINAL-checkpoint validation pilot rule, not release gates."""
+def _choose_common_parameter(
+    summaries: list[dict[str, Any]], *, parameter: str, options: tuple[int | float, ...],
+    option_key: str, missing_message: str, preference_tail: str,
+) -> dict[str, Any]:
+    """Rank one shared intervention using final checkpoints only."""
     rows = []
     preferences = {}
     for algorithm in ("mappo", "ippo"):
         candidates = [row for row in summaries if row["algorithm"] == algorithm]
-        if len(candidates) != 2 or {row["ppo_epochs"] for row in candidates} != {6, 2}:
-            raise ValueError("pilot winner requires both epoch budgets for both algorithms")
+        if len(candidates) != 2 or {row[parameter] for row in candidates} != set(options):
+            raise ValueError(missing_message)
         preferred = min(candidates, key=lambda row: (
             -row["final"]["nominal"]["mean_completion"],
             -row["final"]["failure"]["mean_completion"],
             row["final"]["nominal"]["median_makespan_cp_sat_ratio"],
-            row["final"]["nominal"]["mean_makespan_s"], row["ppo_epochs"],
+            row["final"]["nominal"]["mean_makespan_s"], row[parameter],
         ))
-        preferences[algorithm] = preferred["ppo_epochs"]
-    for epochs in (6, 2):
+        preferences[algorithm] = preferred[parameter]
+    for value in options:
         mappo = next(row["final"] for row in summaries
-                     if row["algorithm"] == "mappo" and row["ppo_epochs"] == epochs)
+                     if row["algorithm"] == "mappo" and row[parameter] == value)
         ippo = next(row["final"] for row in summaries
-                    if row["algorithm"] == "ippo" and row["ppo_epochs"] == epochs)
+                    if row["algorithm"] == "ippo" and row[parameter] == value)
         completions = [mappo["nominal"]["mean_completion"], ippo["nominal"]["mean_completion"]]
         eligible = (
             min(completions) >= 0.95
@@ -334,7 +357,7 @@ def choose_common_epochs(summaries: list[dict[str, Any]]) -> dict[str, Any]:
             and mappo["nominal"]["median_makespan_cp_sat_ratio"] <= 1.15
         )
         rows.append({
-            "ppo_epochs": epochs, "validation_pilot_eligible": eligible,
+            parameter: value, "validation_pilot_eligible": eligible,
             "minimum_nominal_completion": min(completions),
             "mean_nominal_completion": mean(completions),
             "mappo_failure_completion": mappo["failure"]["mean_completion"],
@@ -347,19 +370,40 @@ def choose_common_epochs(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     winner = min(eligible_rows, key=lambda row: (
         -row["minimum_nominal_completion"], -row["mean_nominal_completion"],
         -row["mappo_failure_completion"], row["mappo_nominal_makespan_ratio"],
-        row["pooled_nominal_mean_makespan_s"], row["ppo_epochs"],
+        row["pooled_nominal_mean_makespan_s"], row[parameter],
     )) if eligible_rows else None
     return {
         "comparison_checkpoint": "final 150000-transition checkpoint only",
-        "winner_ppo_epochs": winner["ppo_epochs"] if winner else None,
+        f"winner_{parameter}": winner[parameter] if winner else None,
         "per_algorithm_preferences": preferences,
         "per_algorithm_preference_rule": (
             "final nominal completion, final failure completion, nominal makespan ratio, "
-            "nominal mean makespan, fewer epochs; diagnostic only"
+            f"nominal mean makespan, {preference_tail}; diagnostic only"
         ),
-        "epoch_options": rows, "release_eligible": False,
+        option_key: rows, "release_eligible": False,
         "research_launch_authorized": False,
     }
+
+
+def choose_common_epochs(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply the unchanged FINAL-checkpoint PPO epoch pilot rule."""
+    return _choose_common_parameter(
+        summaries, parameter="ppo_epochs", options=(6, 2), option_key="epoch_options",
+        missing_message="pilot winner requires both epoch budgets for both algorithms",
+        preference_tail="fewer epochs",
+    )
+
+
+def choose_common_reward_time_coefficient(summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Choose one coefficient shared by both algorithms, never separate winners."""
+    if any(row.get("ppo_epochs") != 6 for row in summaries):
+        raise ValueError("reward-time pilot requires fixed PPO epochs 6")
+    return _choose_common_parameter(
+        summaries, parameter="reward_time_coefficient", options=(0.15, 1.5),
+        option_key="coefficient_options",
+        missing_message="pilot winner requires both time coefficients for both algorithms",
+        preference_tail="lower reward time coefficient",
+    )
 
 
 def _evaluate(
@@ -367,6 +411,9 @@ def _evaluate(
     protocol: Any, pilot_protocol: dict[str, Any], root: Path, device: str,
     runtime: PilotRuntime,
 ) -> dict[str, Any]:
+    reward_comparison = pilot_protocol.get("comparison_mode") == "reward-time"
+    parameter = "reward_time_coefficient" if reward_comparison else "ppo_epochs"
+    control_value, treatment_value = (0.15, 1.5) if reward_comparison else (6, 2)
     if runtime.source() != pilot_protocol["source"]:
         raise ValueError("pilot source changed before validation evaluation")
     baseline = [
@@ -428,17 +475,20 @@ def _evaluate(
         ):
             raise ValueError("pilot selection is not one of its validated candidates")
         evidence.append(selection)
-        summaries.append({
+        run_summary = {
             "run_key": run["run_key"], "algorithm": config["algorithm"],
             "ppo_epochs": config["ppo_epochs"], "training_seed": 7,
             "selected": _candidate_summary(selected[0], baseline),
             "final": _candidate_summary(candidates[-1], baseline),
             "learning_checkpoints": [_candidate_summary(item, baseline) for item in candidates],
-        })
+        }
+        if reward_comparison:
+            run_summary["reward_time_coefficient"] = config["reward_time_coefficient"]
+        summaries.append(run_summary)
     comparisons = []
     for algorithm in ("mappo", "ippo"):
-        control = next(row for row in summaries if row["algorithm"] == algorithm and row["ppo_epochs"] == 6)
-        treatment = next(row for row in summaries if row["algorithm"] == algorithm and row["ppo_epochs"] == 2)
+        control = next(row for row in summaries if row["algorithm"] == algorithm and row[parameter] == control_value)
+        treatment = next(row for row in summaries if row["algorithm"] == algorithm and row[parameter] == treatment_value)
         comparisons.append({
             "algorithm": algorithm,
             "final_nominal_completion_delta_points": 100 * (
@@ -449,7 +499,8 @@ def _evaluate(
                 treatment["final"]["failure"]["mean_completion"]
                 - control["final"]["failure"]["mean_completion"]
             ),
-            "final_nominal_makespan_ratio_epoch2_over_epoch6": (
+            ("final_nominal_makespan_ratio_time1p5_over_time0p15" if reward_comparison
+             else "final_nominal_makespan_ratio_epoch2_over_epoch6"): (
                 treatment["final"]["nominal"]["median_makespan_s"]
                 / control["final"]["nominal"]["median_makespan_s"]
             ),
@@ -459,9 +510,15 @@ def _evaluate(
         "purpose": "validation_only_non_release", "release_eligible": False,
         "research_launch_authorized": False, "source": pilot_protocol["source"],
         "runs": summaries, "comparisons": comparisons,
-        "final_checkpoint_decision": choose_common_epochs(summaries),
+        "final_checkpoint_decision": (
+            choose_common_reward_time_coefficient(summaries) if reward_comparison
+            else choose_common_epochs(summaries)
+        ),
         "limitations": "Single training seed; validation only; no release acceptance or confidence claim.",
     }
+    if reward_comparison:
+        summary["comparison_mode"] = "reward-time"
+        summary["comparison_parameter"] = parameter
     if runtime.source() != pilot_protocol["source"]:
         raise ValueError("pilot source changed before validation evidence persistence")
     _write_json(root / "pilot_evidence.json", {
@@ -500,6 +557,7 @@ def execute(args: argparse.Namespace, runtime: PilotRuntime) -> int:
     matrix_id, digest, pilot = build_pilot_protocol(
         source, design_digest=runtime.design_digest(design),
         parent_protocol_digest=runtime.protocol_digest(parent), device=args.device,
+        comparison=getattr(args, "comparison", "ppo-epochs"),
     )
     if args.command == "plan":
         print(json.dumps({"matrix_id": matrix_id, "protocol_digest": digest, "protocol": pilot}, indent=2))
@@ -518,6 +576,11 @@ def execute(args: argparse.Namespace, runtime: PilotRuntime) -> int:
             config = runtime.config(payload)
             if _dump(config).get("failure_curriculum_reference_transitions") != 1_500_000:
                 raise ValueError("training runtime cannot preserve the research curriculum prefix")
+            if pilot.get("comparison_mode") == "reward-time" and (
+                _dump(config).get("reward_time_coefficient") != spec["config"]["reward_time_coefficient"]
+                or _dump(config).get("ppo_epochs") != 6
+            ):
+                raise ValueError("training runtime cannot preserve the reward-time comparison")
             configs[spec["run_key"]] = runtime.config({
                 **_dump(config), "configuration_digest": runtime.config_digest(config),
             })
