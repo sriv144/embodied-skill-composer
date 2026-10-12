@@ -32,6 +32,20 @@ Open [http://127.0.0.1:5173](http://127.0.0.1:5173). The primary journey is
 **Design &rarr; Brain &rarr; Simulate &rarr; Experiments &rarr; Results**. Local mode uses the loopback API for
 editing, compilation, simulation, experiment control, and verified artifact access.
 
+If research and native simulator evidence were produced in separate workspaces,
+stop the existing research executor before opening the same registry with the local
+API. Use one queue owner per registry. Launch the API with the existing data paths:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\run_construction_api.py `
+  --registry-path "<research-workspace>\logs\construction_intelligence\lab.sqlite" `
+  --coppelia-evidence-root "<directory-containing-native-phase5-run-bundles>"
+```
+
+Start the workbench frontend separately with `npm run dev` from `workbench/`.
+The simulator evidence directory must exist; custom paths cannot be combined with
+`--reload`. Registry completion alone never satisfies a research or simulator gate.
+
 To build the read-only preview instead:
 
 ```powershell
@@ -64,6 +78,7 @@ data.
 | [Reproducibility](construction-intelligence-v1-reproducibility.md) | Environments, quality gates, fingerprints, durable jobs, and strict resume behavior |
 | [Public-demo provenance](construction-intelligence-public-demo-provenance.md) | Preview/release channels, input descriptors, hashes, and fail-closed packaging |
 | [Release assets](construction-intelligence-v1-release.md) | Deterministic ZIP staging, draft verification, and fail-closed GitHub publication |
+| [V1 release notes](construction-intelligence-v1-release-notes.md) | Public release summary, asset inventory, reproduction links, and simulator boundary |
 | [Phase 3 evidence](construction-intelligence-v1-phase3-evidence.md) | Protocol smoke matrix and protected-check evidence |
 | [Phase 5 runbook](construction-intelligence-v1-phase5-runbook.md) | Required live Coppelia nominal and unavailable-robot runs |
 | [Phase 6 evidence](construction-intelligence-v1-phase6-evidence.md) | Local editor, workbench, accessibility, responsive, and browser acceptance evidence |

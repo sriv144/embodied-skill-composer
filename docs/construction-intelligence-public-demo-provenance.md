@@ -21,14 +21,19 @@ fixture and visibly records that learned-policy and live Coppelia evidence are a
 ```powershell
 .\.venv\Scripts\python.exe scripts\export_construction_public_demo.py `
   --channel release `
-  --deterministic-bundle release-inputs\deterministic-bundle.json `
-  --research-bundle release-inputs\research-bundle.json `
-  --simulator-bundle release-inputs\simulator-bundle.json `
+  --deterministic-bundle release-inputs\deterministic\deterministic-bundle.json `
+  --research-bundle release-inputs\research\research-bundle.json `
+  --simulator-bundle release-inputs\coppelia\simulator-bundle.json `
   --source-commit <40-character-commit> `
   --source-clean `
   --source-tree-digest <64-character-clean-tree-digest> `
   --output workbench\public\demo
 ```
+
+Create that canonical deterministic descriptor from the clean release commit with
+`scripts/export_construction_public_demo.py --deterministic-input-only --output
+release-inputs/deterministic`. The default exporter remains a truthful fixture preview and never
+silently promotes itself to canonical evidence.
 
 The final packaging command must run from a clean, explicitly recorded commit. Each evidence
 descriptor also records its own clean source identity. Those input commits may differ when, for
@@ -103,8 +108,13 @@ unsupported hypothesis is allowed.
 Phase 4 can create this descriptor after its durable executor writes the final matrix detail,
 `matrix_selections.json`, `evaluation.json`, `episodes.csv`, `report.md`, `acceptance.json`,
 `ablations.json`, `reproducibility_audit.json`, and `release_completeness.json`. Both final audits
-must be complete and blocker-free. The descriptor points at those files and records their exact
-SHA-256 values; the exporter does not need the live SQLite database.
+must be complete and blocker-free. Run
+`scripts/package_construction_research_evidence.py` with the read-only registry, matrix id,
+selection evidence, held-out directory, and an empty output location. It creates a self-contained,
+atomically replaced descriptor directory, records every public artifact SHA-256, replaces
+machine-local paths with stable public references, and stages hash-verified selected checkpoint
+sources for the separate policy archive. The exporter does not need the live SQLite database after
+that packaging step.
 
 ### Simulator bundle
 
@@ -139,7 +149,8 @@ nominal and unavailable-robot recovery manifests, metrics, measured-telemetry re
 individual file links. It sets `ready: true` only when both native live gates pass and both MP4
 files decode successfully.
 
-Every public link is a safe path below the exported bundle. Research and simulator descriptors
+Public evidence links are safe paths below the exported bundle, or exact versioned GitHub asset
+URLs from the verified Coppelia archive index. Research and simulator descriptors
 must match the exact v1 role-to-target and media-type contracts: JSON, JSONL, CSV, Markdown, MP4,
 and the binary Coppelia scene are allowed, while HTML, SVG, XML, JavaScript, CSS, and other
 same-origin active content cannot be published under an evidence link. MP4 files are generated
@@ -184,7 +195,22 @@ uploaded as an unstructured directory. `scripts/package_construction_release.py`
 the canonical research evidence, Coppelia evidence, and all 20 validation-selected checkpoint and
 ONNX exports. The packager independently verifies the release-channel public demo before creating
 any ZIP, includes every ONNX external-data sidecar, uses sorted fixed-metadata ZIP entries, and
-writes the five-file checksums/identity contract consumed by the manual draft-release workflow.
+writes the indexed checksums/identity contract consumed by the manual draft-release workflow.
+
+Canonical release packaging passes `--coppelia-archive-index` to the exporter. It still validates
+both complete native bundles before writing anything. Pages receives only unchanged native gate
+manifests, metrics, reports, reusable scenes, and replay videos (at most 32 MiB per retained file),
+plus the byte-identical archive index at `evidence/coppelia/archive-index.json`. Raw replay,
+telemetry, wheel-command, trace, scenario, and job files remain in bounded release shards, not in
+the Pages directory. The index records all original byte counts and hashes, ordered chunk hashes,
+and each shard's hash. The provenance binds the index to the simulator descriptor and clean native
+source identity; the public manifests and metrics are identical to the independently validated
+native files. Full release verification reconstructs and revalidates native evidence separately.
+
+Static release startup loads this hash-pinned local index once. Download links are permitted only
+for its contiguous shard filenames at the exact repository's `v1.0.0` release URL; unknown assets,
+other hosts/tags, query strings, fragments, encoded traversal, and unverified URLs are rejected.
+Missing or corrupt index metadata fails visibly and cannot fall back to preview data.
 
 See [Construction Intelligence v1 release assets](construction-intelligence-v1-release.md) for the
 exact local staging, draft creation, verification, and publication sequence.

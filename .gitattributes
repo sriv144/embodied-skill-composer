@@ -1,1 +1,2 @@
+# Public artifacts are hashed byte-for-byte; checkout must not convert line endings.
 workbench/public/demo/** -text

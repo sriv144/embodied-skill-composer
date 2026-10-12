@@ -17,6 +17,20 @@ from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from embodied_skill_composer.construction.coppelia_archive import (
+    COPPELIA_ARCHIVE_INDEX_FILE,
+    COPPELIA_PART_PREFIX,
+    ArchiveSource,
+    CoppeliaArchiveIndex,
+    load_coppelia_archive_index,
+    reconstruct_coppelia_scenario,
+    stage_coppelia_archive,
+    verify_coppelia_archive_parts,
+)
+from embodied_skill_composer.construction.coppelia_phase5 import (
+    Phase5ProvenanceManifest,
+    verify_phase5_artifact_bundle,
+)
 from embodied_skill_composer.construction.experiment_protocol import (
     SelectedCheckpoint,
 )
@@ -27,10 +41,12 @@ from embodied_skill_composer.construction.policy import (
     load_policy_checkpoint_metadata,
 )
 from embodied_skill_composer.construction.public_demo_provenance import (
+    EvidenceBundleManifest,
     PublicDemoExportError,
     SourceIdentity,
     export_public_demo_bundle,
     verify_public_demo_export,
+    _verify_simulator_video,
 )
 from embodied_skill_composer.construction.release_identity import (
     RepositoryReleaseIdentity,
@@ -45,12 +61,12 @@ ReleaseAssetRole = Literal[
     "coppelia_evidence",
     "selected_policies",
 ]
-RELEASE_ASSET_SCHEMA_VERSION: Literal[
-    "construction-intelligence-release-assets-v1"
-] = "construction-intelligence-release-assets-v1"
-POLICY_ASSET_SCHEMA_VERSION: Literal[
+RELEASE_ASSET_SCHEMA_VERSION: Literal["construction-intelligence-release-assets-v2"] = (
+    "construction-intelligence-release-assets-v2"
+)
+POLICY_ASSET_SCHEMA_VERSION: Literal["construction-intelligence-selected-policies-v1"] = (
     "construction-intelligence-selected-policies-v1"
-] = "construction-intelligence-selected-policies-v1"
+)
 RELEASE_IDENTITY_FILE = "construction-intelligence-v1-release-assets.json"
 POLICY_INDEX_FILE = "policy-assets.json"
 _GENERATED_AT: Literal["1970-01-01T00:00:00Z"] = "1970-01-01T00:00:00Z"
@@ -66,11 +82,12 @@ _MAX_ARCHIVE_COMPRESSED_BYTES = 1024 * 1024**2
 _MAX_COMPRESSION_RATIO = 200.0
 _MAX_CENTRAL_DIRECTORY_BYTES = 16 * 1024**2
 _MAX_ARCHIVE_PATH_BYTES = 1024
-_MAX_RELEASE_VERIFICATION_DISK_BYTES = 5 * 1024**3
+_MAX_RELEASE_VERIFICATION_DISK_BYTES = 10 * 1024**3
+_MAX_RELEASE_IDENTITY_BYTES = 256 * 1024
 _ASSET_FILES: dict[ReleaseAssetRole, str] = {
     "public_demo": "construction-intelligence-v1-public-demo.zip",
     "research_evidence": "construction-intelligence-v1-research-evidence.zip",
-    "coppelia_evidence": "construction-intelligence-v1-coppelia-evidence.zip",
+    "coppelia_evidence": COPPELIA_ARCHIVE_INDEX_FILE,
     "selected_policies": "construction-intelligence-v1-selected-policies.zip",
 }
 
@@ -92,9 +109,9 @@ _DEFAULT_ARCHIVE_BUDGET = _ArchiveBudget(
 _ASSET_ARCHIVE_BUDGETS: dict[str, _ArchiveBudget] = {
     _ASSET_FILES["public_demo"]: _ArchiveBudget(
         max_members=10_000,
-        max_member_uncompressed_bytes=256 * 1024**2,
-        max_uncompressed_bytes=768 * 1024**2,
-        max_compressed_bytes=512 * 1024**2,
+        max_member_uncompressed_bytes=64 * 1024**2,
+        max_uncompressed_bytes=128 * 1024**2,
+        max_compressed_bytes=96 * 1024**2,
     ),
     _ASSET_FILES["research_evidence"]: _ArchiveBudget(
         max_members=5_000,
@@ -217,7 +234,7 @@ class ReleaseAssetRecord(_FrozenModel):
 
 
 class ReleaseAssetManifest(_FrozenModel):
-    schema_version: Literal["construction-intelligence-release-assets-v1"]
+    schema_version: Literal["construction-intelligence-release-assets-v2"]
     generated_at: Literal["1970-01-01T00:00:00Z"]
     release_version: str = Field(min_length=1)
     release_tag: str = Field(min_length=1)
@@ -280,6 +297,7 @@ def stage_release_assets(
     policy_root = work_root / "selected-policies"
     assets_root.mkdir(parents=True)
     try:
+        coppelia_index = _stage_coppelia_release_evidence(simulator_bundle, assets_root)
         export_public_demo_bundle(
             public_root,
             deterministic_bundle=deterministic_bundle,
@@ -289,6 +307,7 @@ def stage_release_assets(
             channel="release",
             release_version=release_version,
             release_tag=release_tag,
+            coppelia_archive_index=assets_root / COPPELIA_ARCHIVE_INDEX_FILE,
         )
         verify_public_demo_export(
             public_root,
@@ -297,9 +316,15 @@ def stage_release_assets(
             expected_release_version=release_version,
             expected_release_tag=release_tag,
         )
+        public_selection_path = public_root / "evidence" / "research" / "selections.json"
+        selection_source, checkpoint_source_root = _selected_policy_source(
+            research_bundle,
+            fallback=public_selection_path,
+        )
         policy_index = _stage_selected_policies(
-            public_root / "evidence" / "research" / "selections.json",
+            selection_source,
             policy_root,
+            checkpoint_source_root=checkpoint_source_root,
         )
         _write_json(
             policy_root / POLICY_INDEX_FILE,
@@ -312,20 +337,19 @@ def stage_release_assets(
                 public_root / "evidence" / "research",
                 PurePosixPath("evidence/research"),
             ),
-            "coppelia_evidence": (
-                public_root / "evidence" / "coppelia",
-                PurePosixPath("evidence/coppelia"),
-            ),
             "selected_policies": (policy_root, None),
         }
         records: list[ReleaseAssetRecord] = []
         for role in _REQUIRED_ROLES:
-            source_root, prefix = archive_roots[role]
             archive_path = assets_root / _ASSET_FILES[role]
-            entry_count = write_deterministic_zip(
-                archive_path,
-                _directory_archive_entries(source_root, prefix=prefix),
-            )
+            if role == "coppelia_evidence":
+                entry_count = len(coppelia_index.files)
+            else:
+                source_root, prefix = archive_roots[role]
+                entry_count = write_deterministic_zip(
+                    archive_path,
+                    _directory_archive_entries(source_root, prefix=prefix),
+                )
             records.append(
                 ReleaseAssetRecord(
                     role=role,
@@ -350,6 +374,9 @@ def stage_release_assets(
             assets_root / RELEASE_IDENTITY_FILE,
             manifest.model_dump(mode="json"),
         )
+        # Independent verification reconstructs from the archives. The generated
+        # source copies are no longer needed and would inflate the disk peak.
+        shutil.rmtree(work_root)
         verified = verify_release_assets(
             assets_root,
             workspace=root,
@@ -381,20 +408,30 @@ def verify_release_assets(
     """Fail closed unless a release directory is exact, safe, and self-consistent."""
 
     root = asset_dir.resolve()
-    observed_files = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-    if observed_files != _EXPECTED_FILES:
+    entries = list(root.iterdir())
+    if any(path.is_symlink() or not path.is_file() for path in entries):
+        raise ReleaseAssetError("release assets must be flat regular files without symbolic links")
+    observed_files = {path.name for path in entries}
+    identity_path = root / RELEASE_IDENTITY_FILE
+    if identity_path.is_file() and identity_path.stat().st_size > _MAX_RELEASE_IDENTITY_BYTES:
+        raise ReleaseAssetError("release identity manifest exceeds its JSON byte budget")
+    try:
+        coppelia_index = load_coppelia_archive_index(root / COPPELIA_ARCHIVE_INDEX_FILE)
+    except ValueError as exc:
+        raise ReleaseAssetError(f"release Coppelia index is invalid: {exc}") from exc
+    expected_files = _EXPECTED_FILES | {part.file for part in coppelia_index.parts}
+    if observed_files != expected_files:
         raise ReleaseAssetError(
             "release asset inventory mismatch; "
-            f"missing={sorted(_EXPECTED_FILES - observed_files)}, "
-            f"extra={sorted(observed_files - _EXPECTED_FILES)}"
+            f"missing={sorted(expected_files - observed_files)}, "
+            f"extra={sorted(observed_files - expected_files)}"
         )
+    input_bytes = sum((root / name).stat().st_size for name in observed_files)
+    if input_bytes > _MAX_RELEASE_VERIFICATION_DISK_BYTES:
+        raise ReleaseAssetError("release assets exceed the verification disk budget")
     try:
         manifest = ReleaseAssetManifest.model_validate_json(
-            (root / RELEASE_IDENTITY_FILE).read_text(encoding="utf-8")
+            identity_path.read_text(encoding="utf-8")
         )
     except (OSError, ValueError) as exc:
         raise ReleaseAssetError(f"release identity manifest is invalid: {exc}") from exc
@@ -425,27 +462,42 @@ def verify_release_assets(
         path = root / record.file
         if path.stat().st_size != record.bytes or file_sha256(path) != record.sha256:
             raise ReleaseAssetError(f"release asset integrity check failed: {record.file}")
-        entry_count = verify_deterministic_zip(path)
+        entry_count = (
+            len(coppelia_index.files)
+            if role == "coppelia_evidence"
+            else verify_deterministic_zip(path)
+        )
         if entry_count != record.entry_count:
-            raise ReleaseAssetError(
-                f"release asset entry count changed: {record.file}"
-            )
+            raise ReleaseAssetError(f"release asset entry count changed: {record.file}")
 
     public_zip = root / _ASSET_FILES["public_demo"]
     research_zip = root / _ASSET_FILES["research_evidence"]
-    coppelia_zip = root / _ASSET_FILES["coppelia_evidence"]
     _require_archive_subset(
         public_zip,
         research_zip,
         prefix="evidence/research/",
     )
-    _require_archive_subset(
-        public_zip,
-        coppelia_zip,
-        prefix="evidence/coppelia/",
-    )
+    verify_coppelia_archive_parts(root, coppelia_index, verify_zip=verify_deterministic_zip)
     temporary_root = Path(tempfile.mkdtemp(prefix="construction-release-verify-"))
     try:
+        extraction_roles: tuple[ReleaseAssetRole, ...] = (
+            "public_demo",
+            "research_evidence",
+            "selected_policies",
+        )
+        extraction_sizes = {
+            role: _zip_uncompressed_bytes(root / _ASSET_FILES[role]) for role in extraction_roles
+        }
+        public_bytes = extraction_sizes["public_demo"]
+        peak_bytes = public_bytes + max(
+            extraction_sizes["research_evidence"] + extraction_sizes["selected_policies"],
+            coppelia_index.scenario_bytes("nominal"),
+            coppelia_index.scenario_bytes("recovery"),
+        )
+        if input_bytes + peak_bytes > _MAX_RELEASE_VERIFICATION_DISK_BYTES:
+            raise ReleaseAssetError("release verification exceeds its temporary disk budget")
+        if shutil.disk_usage(temporary_root).free < peak_bytes + 4 * 1024**2:
+            raise ReleaseAssetError("insufficient free disk for release verification")
         public_root = temporary_root / "public"
         extract_verified_zip(public_zip, public_root)
         try:
@@ -457,13 +509,8 @@ def verify_release_assets(
                 expected_release_tag=manifest.release_tag,
             )
         except (OSError, ValueError, PublicDemoExportError) as exc:
-            raise ReleaseAssetError(
-                f"public demo release verification failed: {exc}"
-            ) from exc
-        if (
-            file_sha256(public_root / "provenance.json")
-            != manifest.public_demo_provenance_sha256
-        ):
+            raise ReleaseAssetError(f"public demo release verification failed: {exc}") from exc
+        if file_sha256(public_root / "provenance.json") != manifest.public_demo_provenance_sha256:
             raise ReleaseAssetError("public demo provenance identity does not match")
 
         research_root = temporary_root / "research"
@@ -477,9 +524,181 @@ def verify_release_assets(
             research_root / "evidence" / "research" / "selections.json",
             policy_root,
         )
+        shutil.rmtree(research_root)
+        shutil.rmtree(policy_root)
+        _verify_coppelia_release_evidence(
+            root,
+            coppelia_index,
+            public_root,
+            temporary_root,
+            disk_budget_bytes=_MAX_RELEASE_VERIFICATION_DISK_BYTES - input_bytes - public_bytes,
+        )
     finally:
         shutil.rmtree(temporary_root, ignore_errors=True)
     return manifest
+
+
+def stage_release_public_demo(asset_dir: Path, *, workspace: Path) -> ReleaseAssetManifest:
+    """Replace the build's preview only after verifying the complete tagged release.
+
+    The committed preview stays reproducible in source control. Pages consumes the
+    canonical archive at build time, so its source identity never depends on a
+    generated provenance file being committed into the Git tree that it hashes.
+    """
+
+    root = workspace.resolve()
+    destination = root / "workbench" / "public" / "demo"
+    assets = asset_dir.resolve()
+    if assets == destination or destination in assets.parents or assets in destination.parents:
+        raise ReleaseAssetError("Pages release assets must be outside the demo destination")
+    if not destination.resolve().is_relative_to(root) or any(
+        path.is_symlink() for path in (root / "workbench", destination.parent, destination)
+    ):
+        raise ReleaseAssetError("Pages demo destination must not follow a symbolic link")
+    manifest = verify_release_assets(
+        assets,
+        workspace=root,
+        expected_release_version="1.0.0",
+        expected_release_tag="v1.0.0",
+        require_tag_at_head=True,
+    )
+    public_record = next(record for record in manifest.assets if record.role == "public_demo")
+    public_zip = assets / public_record.file
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".demo.release-", dir=destination.parent) as raw:
+        staged = Path(raw) / "demo"
+        extract_verified_zip(public_zip, staged)
+        verify_public_demo_export(
+            staged,
+            expected_channel="release",
+            expected_source=manifest.source,
+            expected_release_version=manifest.release_version,
+            expected_release_tag=manifest.release_tag,
+        )
+        if file_sha256(public_zip) != public_record.sha256:
+            raise ReleaseAssetError("public demo archive changed during Pages staging")
+        _replace_directory(staged, destination)
+    return manifest
+
+
+def _stage_coppelia_release_evidence(
+    descriptor_path: Path,
+    destination: Path,
+) -> CoppeliaArchiveIndex:
+    descriptor = EvidenceBundleManifest.model_validate_json(descriptor_path.read_bytes())
+    if descriptor.kind != "simulator" or descriptor.evidence_status != "canonical":
+        raise ReleaseAssetError("Coppelia archives require canonical simulator evidence")
+    files: dict[str, Path] = {}
+    expected_sha256: dict[str, str] = {}
+    by_role = {item.role: item for item in descriptor.artifacts}
+    for artifact in descriptor.artifacts:
+        path = Path(artifact.path)
+        if not path.is_absolute():
+            path = descriptor_path.parent / path
+        files[artifact.target] = path
+        expected_sha256[artifact.target] = artifact.sha256
+    # Runtime attestations are part of each exact native bundle even when older
+    # simulator input descriptors do not expose a public attestation role.
+    for scenario in ("nominal", "recovery"):
+        native_artifact = by_role.get(f"{scenario}_manifest")
+        if native_artifact is None:
+            raise ReleaseAssetError("Coppelia input lacks its native manifest")
+        native_path = files[native_artifact.target]
+        native = Phase5ProvenanceManifest.model_validate_json(native_path.read_bytes())
+        for member in native.artifacts:
+            target = f"evidence/coppelia/{scenario}/{member.path}"
+            path = native_path.parent / member.path
+            if target in files and (
+                files[target].resolve() != path.resolve()
+                or expected_sha256[target] != member.sha256
+            ):
+                raise ReleaseAssetError("simulator descriptor differs from its native bundle")
+            files[target] = path
+            expected_sha256[target] = member.sha256
+    return stage_coppelia_archive(
+        destination,
+        files,
+        source=ArchiveSource.model_validate(descriptor.source.model_dump(mode="json")),
+        descriptor_sha256=file_sha256(descriptor_path),
+        expected_sha256=expected_sha256,
+        verify_zip=verify_deterministic_zip,
+    )
+
+
+def _zip_uncompressed_bytes(path: Path) -> int:
+    with zipfile.ZipFile(path) as archive:
+        return sum(info.file_size for info in archive.infolist())
+
+
+def _verify_coppelia_release_evidence(
+    asset_root: Path,
+    index: CoppeliaArchiveIndex,
+    public_root: Path,
+    temporary_root: Path,
+    *,
+    disk_budget_bytes: int,
+) -> None:
+    index_path = asset_root / COPPELIA_ARCHIVE_INDEX_FILE
+    public_index = public_root / "evidence" / "coppelia" / "archive-index.json"
+    if not public_index.is_file() or file_sha256(public_index) != file_sha256(index_path):
+        raise ReleaseAssetError("public Coppelia archive index differs from release evidence")
+    originals = {item.path: item for item in index.files}
+    for path in (public_root / "evidence" / "coppelia").rglob("*"):
+        if not path.is_file() or path == public_index:
+            continue
+        original = originals.get(path.relative_to(public_root).as_posix())
+        if (
+            original is None
+            or path.stat().st_size != original.bytes
+            or file_sha256(path) != original.sha256
+        ):
+            raise ReleaseAssetError("public Coppelia artifact differs from canonical evidence")
+    summary = json.loads((public_root / "coppelia-evidence.json").read_text(encoding="utf-8"))
+    if not isinstance(summary, dict):
+        raise ReleaseAssetError("public Coppelia evidence must be an object")
+    for scenario in ("nominal", "recovery"):
+        scenario_root = temporary_root / f"native-{scenario}"
+        try:
+            native_root = reconstruct_coppelia_scenario(
+                asset_root,
+                index,
+                scenario_root,
+                scenario=scenario,
+                disk_budget_bytes=disk_budget_bytes,
+            )
+            native = verify_phase5_artifact_bundle(native_root)
+            expected_scenario = "nominal" if scenario == "nominal" else "unavailable_robot_recovery"
+            if (
+                native.scenario != expected_scenario
+                or native.evidence_kind != "live_coppelia"
+                or not native.live_evidence
+                or not native.live_gate_passed
+                or native.run_status != "completed"
+                or native.source_dirty
+                or not native.approval_gate_confirmed
+                or native.source_commit != index.source.commit
+                or native.source_tree_digest != index.source.tree_digest
+            ):
+                raise ReleaseAssetError(
+                    "archived native Coppelia evidence does not pass release gates"
+                )
+            _verify_simulator_video(
+                scenario_root / "evidence" / "coppelia" / "visualizations" / f"{scenario}.mp4",
+                scenario,
+            )
+            item = summary.get(scenario)
+            native_metrics = json.loads((native_root / "metrics.json").read_text(encoding="utf-8"))
+            if (
+                not isinstance(item, dict)
+                or item.get("manifest") != native.model_dump(mode="json")
+                or item.get("metrics") != native_metrics
+            ):
+                raise ReleaseAssetError(
+                    "public Coppelia summary differs from independently verified evidence"
+                )
+        finally:
+            if scenario_root.exists():
+                shutil.rmtree(scenario_root)
 
 
 def repository_source_identity(workspace: Path) -> SourceIdentity:
@@ -488,9 +707,7 @@ def repository_source_identity(workspace: Path) -> SourceIdentity:
     root = workspace.resolve()
     commit = _git_bytes(root, "rev-parse", "--verify", "HEAD").decode().strip()
     if re.fullmatch(_COMMIT_PATTERN, commit) is None:
-        raise ReleaseAssetError(
-            "release packaging requires a full 40-character Git commit"
-        )
+        raise ReleaseAssetError("release packaging requires a full 40-character Git commit")
     status = _git_bytes(
         root,
         "status",
@@ -498,9 +715,7 @@ def repository_source_identity(workspace: Path) -> SourceIdentity:
         "--untracked-files=all",
     )
     if status.strip():
-        raise ReleaseAssetError(
-            "release packaging requires a completely clean Git worktree"
-        )
+        raise ReleaseAssetError("release packaging requires a completely clean Git worktree")
     tree_listing = _git_bytes(root, "ls-tree", "-r", "--full-tree", "HEAD")
     if not tree_listing:
         raise ReleaseAssetError("release Git tree listing is empty")
@@ -517,17 +732,11 @@ def require_tag_points_at_head(workspace: Path, tag: str) -> None:
     root = workspace.resolve()
     head = _git_bytes(root, "rev-parse", "--verify", "HEAD").decode().strip()
     try:
-        tag_commit = (
-            _git_bytes(root, "rev-list", "-n", "1", f"refs/tags/{tag}")
-            .decode()
-            .strip()
-        )
+        tag_commit = _git_bytes(root, "rev-list", "-n", "1", f"refs/tags/{tag}").decode().strip()
     except ReleaseAssetError as exc:
         raise ReleaseAssetError(f"release tag does not exist: {tag}") from exc
     if not tag_commit or tag_commit != head:
-        raise ReleaseAssetError(
-            f"release tag {tag!r} does not point at checked-out HEAD"
-        )
+        raise ReleaseAssetError(f"release tag {tag!r} does not point at checked-out HEAD")
 
 
 def write_deterministic_zip(
@@ -566,11 +775,14 @@ def write_deterministic_zip(
             info.extra = b""
             info.comment = b""
             info.file_size = source.stat().st_size
-            with source.open("rb") as source_handle, archive.open(
-                info,
-                mode="w",
-                force_zip64=False,
-            ) as archive_handle:
+            with (
+                source.open("rb") as source_handle,
+                archive.open(
+                    info,
+                    mode="w",
+                    force_zip64=False,
+                ) as archive_handle,
+            ):
                 shutil.copyfileobj(source_handle, archive_handle, length=1024 * 1024)
     verify_deterministic_zip(destination)
     return len(normalized)
@@ -617,9 +829,7 @@ def verify_deterministic_zip(path: Path) -> int:
                     )
             corrupt = archive.testzip()
             if corrupt is not None:
-                raise ReleaseAssetError(
-                    f"release archive contains corrupt data: {corrupt}"
-                )
+                raise ReleaseAssetError(f"release archive contains corrupt data: {corrupt}")
             return len(infos)
     except (OSError, zipfile.BadZipFile) as exc:
         raise ReleaseAssetError(f"release archive is unreadable: {path}: {exc}") from exc
@@ -631,15 +841,12 @@ def _validate_zip_resource_limits(
     budget: _ArchiveBudget,
 ) -> None:
     if len(infos) > budget.max_members:
-        raise ReleaseAssetError(
-            f"release archive exceeds the member-count limit: {archive_name}"
-        )
+        raise ReleaseAssetError(f"release archive exceeds the member-count limit: {archive_name}")
     total_uncompressed = 0
     for info in infos:
         if info.file_size > budget.max_member_uncompressed_bytes:
             raise ReleaseAssetError(
-                "release archive member exceeds the uncompressed-size limit: "
-                f"{info.filename}"
+                f"release archive member exceeds the uncompressed-size limit: {info.filename}"
             )
         total_uncompressed += info.file_size
         if total_uncompressed > budget.max_uncompressed_bytes:
@@ -661,7 +868,11 @@ def _validate_zip_resource_limits(
 def _archive_budget(archive_name: str) -> _ArchiveBudget:
     configured = _ASSET_ARCHIVE_BUDGETS.get(
         archive_name,
-        _DEFAULT_ARCHIVE_BUDGET,
+        (
+            _ArchiveBudget(2, 128 * 1024**2, 256 * 1024**2, 384 * 1024**2)
+            if re.fullmatch(re.escape(COPPELIA_PART_PREFIX) + r"\d{6}\.zip", archive_name)
+            else _DEFAULT_ARCHIVE_BUDGET
+        ),
     )
     return _ArchiveBudget(
         max_members=min(configured.max_members, _MAX_ARCHIVE_MEMBERS),
@@ -686,9 +897,7 @@ def _validate_source_resource_limits(
     budget: _ArchiveBudget,
 ) -> None:
     if len(entries) > budget.max_members:
-        raise ReleaseAssetError(
-            f"release archive exceeds the member-count limit: {archive_name}"
-        )
+        raise ReleaseAssetError(f"release archive exceeds the member-count limit: {archive_name}")
     total_bytes = 0
     for name, source in entries:
         path_bytes = len(name.encode("utf-8"))
@@ -735,34 +944,18 @@ def _preflight_zip_central_directory(
         ) = struct.unpack_from("<4s4H2IH", tail, relative_offset)
         eocd_offset = file_size - tail_size + relative_offset
         if comment_length != 0 or eocd_offset + eocd_size != file_size:
-            raise ReleaseAssetError(
-                f"release archive EOCD is not canonical: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive EOCD is not canonical: {path.name}")
         if disk_number != 0 or central_disk != 0 or disk_entries != total_entries:
-            raise ReleaseAssetError(
-                f"release archive cannot span disks: {path.name}"
-            )
-        if (
-            total_entries == 0xFFFF
-            or central_size == 0xFFFFFFFF
-            or central_offset == 0xFFFFFFFF
-        ):
-            raise ReleaseAssetError(
-                f"release archive cannot use ZIP64 metadata: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive cannot span disks: {path.name}")
+        if total_entries == 0xFFFF or central_size == 0xFFFFFFFF or central_offset == 0xFFFFFFFF:
+            raise ReleaseAssetError(f"release archive cannot use ZIP64 metadata: {path.name}")
         if total_entries == 0 or total_entries > budget.max_members:
-            raise ReleaseAssetError(
-                f"release archive exceeds the member-count limit: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive exceeds the member-count limit: {path.name}")
         if central_size > _MAX_CENTRAL_DIRECTORY_BYTES:
-            raise ReleaseAssetError(
-                f"release archive central directory is too large: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive central directory is too large: {path.name}")
         central_end = central_offset + central_size
         if central_offset > eocd_offset or central_end != eocd_offset:
-            raise ReleaseAssetError(
-                f"release archive central directory is invalid: {path.name}"
-            )
+            raise ReleaseAssetError(f"release archive central directory is invalid: {path.name}")
         handle.seek(central_offset)
         position = central_offset
         for _ in range(total_entries):
@@ -802,8 +995,13 @@ def extract_verified_zip(path: Path, destination: Path) -> None:
     """Extract only after the complete archive has passed path and metadata checks."""
 
     verify_deterministic_zip(path)
+    declared_bytes = _zip_uncompressed_bytes(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if shutil.disk_usage(destination.parent).free < declared_bytes:
+        raise ReleaseAssetError("insufficient free disk for bounded archive extraction")
     destination.mkdir(parents=True, exist_ok=False)
     resolved_destination = destination.resolve()
+    written_bytes = 0
     with zipfile.ZipFile(path, mode="r") as archive:
         for info in archive.infolist():
             relative = Path(*PurePosixPath(info.filename).parts)
@@ -814,18 +1012,43 @@ def extract_verified_zip(path: Path, destination: Path) -> None:
                 )
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(info, "r") as source, target.open("wb") as output:
-                shutil.copyfileobj(source, output)
+                member_bytes = 0
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    member_bytes += len(chunk)
+                    written_bytes += len(chunk)
+                    if member_bytes > info.file_size or written_bytes > declared_bytes:
+                        raise ReleaseAssetError(
+                            "archive extraction exceeded its declared byte budget"
+                        )
+                    output.write(chunk)
+                if member_bytes != info.file_size:
+                    raise ReleaseAssetError("archive extraction member byte count differs")
+    if written_bytes != declared_bytes:
+        raise ReleaseAssetError("archive extraction byte count differs")
 
 
 def _stage_selected_policies(
     selection_path: Path,
     destination: Path,
+    *,
+    checkpoint_source_root: Path | None = None,
 ) -> PolicyAssetIndex:
     matrix_id, protocol_digest, selections = _load_selected_checkpoints(selection_path)
     destination.mkdir(parents=True, exist_ok=False)
     packaged: list[PackagedPolicy] = []
     for run_key, selected in selections:
-        checkpoint_path = Path(selected.checkpoint_path).resolve()
+        checkpoint_value = Path(selected.checkpoint_path)
+        if checkpoint_value.is_absolute():
+            checkpoint_path = checkpoint_value.resolve()
+        elif checkpoint_source_root is not None:
+            resolved_root = checkpoint_source_root.resolve()
+            checkpoint_path = (resolved_root / checkpoint_value).resolve()
+            if not checkpoint_path.is_relative_to(resolved_root):
+                raise ReleaseAssetError(
+                    f"selected checkpoint escapes its research bundle: {run_key}"
+                )
+        else:
+            checkpoint_path = checkpoint_value.resolve()
         _validate_selected_checkpoint_file(checkpoint_path, selected)
         bundle = load_policy_checkpoint(checkpoint_path, device="cpu")
         expected_algorithm = _EXPECTED_ALGORITHMS[selected.experiment_variant]
@@ -844,13 +1067,9 @@ def _stage_selected_policies(
             device="cpu",
         )
         if exported_onnx.resolve() != (run_root / "actor.onnx").resolve():
-            raise ReleaseAssetError(
-                f"ONNX exporter returned an unexpected path for {run_key}"
-            )
+            raise ReleaseAssetError(f"ONNX exporter returned an unexpected path for {run_key}")
         onnx_paths = sorted(
-            path
-            for path in run_root.rglob("*")
-            if path.is_file() and path != packaged_checkpoint
+            path for path in run_root.rglob("*") if path.is_file() and path != packaged_checkpoint
         )
         if run_root / "actor.onnx" not in onnx_paths:
             raise ReleaseAssetError(f"ONNX export is missing for {run_key}")
@@ -860,9 +1079,7 @@ def _stage_selected_policies(
                 run_key=run_key,
                 selected_checkpoint=selected,
                 checkpoint=_archive_member(packaged_checkpoint, destination),
-                onnx_artifacts=[
-                    _archive_member(path, destination) for path in onnx_paths
-                ],
+                onnx_artifacts=[_archive_member(path, destination) for path in onnx_paths],
             )
         )
     return PolicyAssetIndex(
@@ -873,6 +1090,34 @@ def _stage_selected_policies(
         policy_count=20,
         policies=sorted(packaged, key=lambda item: item.run_key),
     )
+
+
+def _selected_policy_source(
+    research_bundle: Path,
+    *,
+    fallback: Path,
+) -> tuple[Path, Path | None]:
+    """Resolve private bundle-local policy sources without publishing local paths."""
+
+    descriptor = research_bundle.resolve()
+    if not descriptor.is_file():
+        return fallback, None
+    try:
+        manifest = EvidenceBundleManifest.model_validate_json(
+            descriptor.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        raise ReleaseAssetError(f"research bundle descriptor is invalid: {exc}") from exc
+    selection = next(
+        (artifact for artifact in manifest.artifacts if artifact.role == "selections"),
+        None,
+    )
+    if manifest.kind != "research" or selection is None:
+        raise ReleaseAssetError("research bundle does not declare canonical selection evidence")
+    selection_path = Path(selection.path)
+    if not selection_path.is_absolute():
+        selection_path = descriptor.parent / selection_path
+    return selection_path.resolve(), descriptor.parent
 
 
 def _verify_packaged_policies(
@@ -909,9 +1154,7 @@ def _verify_packaged_policies(
                 or path.stat().st_size != member.bytes
                 or file_sha256(path) != member.sha256
             ):
-                raise ReleaseAssetError(
-                    f"packaged policy member integrity failed: {member.path}"
-                )
+                raise ReleaseAssetError(f"packaged policy member integrity failed: {member.path}")
             declared_paths.add(member.path)
         _validate_selected_checkpoint_file(
             policy_root / Path(*PurePosixPath(policy.checkpoint.path).parts),
@@ -922,9 +1165,7 @@ def _verify_packaged_policies(
             device="cpu",
         )
         if bundle.algorithm != _EXPECTED_ALGORITHMS[selected.experiment_variant]:
-            raise ReleaseAssetError(
-                f"packaged policy algorithm mismatch: {policy.run_key}"
-            )
+            raise ReleaseAssetError(f"packaged policy algorithm mismatch: {policy.run_key}")
         _validate_onnx_model(policy_root / "policies" / policy.run_key / "actor.onnx")
     if set(expected) != {item.run_key for item in index.policies}:
         raise ReleaseAssetError("selected-policy archive does not cover all 20 selections")
@@ -975,8 +1216,7 @@ def _load_selected_checkpoints(
             ) from exc
         selections.append((run_key, selected))
     identities = {
-        (selected.experiment_variant, selected.training_seed)
-        for _, selected in selections
+        (selected.experiment_variant, selected.training_seed) for _, selected in selections
     }
     if (
         len(selections) != 20
@@ -997,9 +1237,7 @@ def _validate_selected_checkpoint_file(
         raise ReleaseAssetError(f"selected checkpoint is missing: {path}")
     actual_sha = file_sha256(path)
     if actual_sha != selected.checkpoint_sha256:
-        raise ReleaseAssetError(
-            f"selected checkpoint SHA-256 mismatch: {path}"
-        )
+        raise ReleaseAssetError(f"selected checkpoint SHA-256 mismatch: {path}")
     try:
         metadata = load_policy_checkpoint_metadata(path, device="cpu")
     except (OSError, ValueError, RuntimeError) as exc:
@@ -1016,9 +1254,7 @@ def _validate_selected_checkpoint_file(
         "checkpoint_lineage": selected.checkpoint_lineage,
         "resume_provenance": selected.resume_provenance,
     }
-    mismatches = [
-        name for name, value in expected.items() if metadata.get(name) != value
-    ]
+    mismatches = [name for name, value in expected.items() if metadata.get(name) != value]
     fraction = metadata.get("checkpoint_fraction")
     if (
         not isinstance(fraction, (int, float))
@@ -1047,24 +1283,16 @@ def _validate_onnx_model(path: Path) -> None:
         for tensor in external_data_helper._get_all_tensors(model):
             if not external_data_helper.uses_external_data(tensor):
                 continue
-            locations = [
-                item.value for item in tensor.external_data if item.key == "location"
-            ]
+            locations = [item.value for item in tensor.external_data if item.key == "location"]
             if len(locations) != 1:
-                raise ReleaseAssetError(
-                    f"ONNX tensor has invalid external-data locations: {path}"
-                )
+                raise ReleaseAssetError(f"ONNX tensor has invalid external-data locations: {path}")
             relative = _safe_archive_name(locations[0])
-            external_path = (
-                path.parent / Path(*PurePosixPath(relative).parts)
-            ).resolve()
+            external_path = (path.parent / Path(*PurePosixPath(relative).parts)).resolve()
             if (
                 not external_path.is_relative_to(path.parent.resolve())
                 or not external_path.is_file()
             ):
-                raise ReleaseAssetError(
-                    f"ONNX external data is missing or unsafe: {relative}"
-                )
+                raise ReleaseAssetError(f"ONNX external data is missing or unsafe: {relative}")
         external_data_helper.load_external_data_for_model(
             model,
             str(path.parent.resolve()),
@@ -1114,11 +1342,7 @@ def _require_archive_subset(
 ) -> None:
     parent = _zip_member_identities(parent_path)
     subset = _zip_member_identities(subset_path)
-    expected = {
-        name: identity
-        for name, identity in parent.items()
-        if name.startswith(prefix)
-    }
+    expected = {name: identity for name, identity in parent.items() if name.startswith(prefix)}
     if subset != expected:
         raise ReleaseAssetError(
             f"release evidence archive does not match public demo subset: {prefix}"
@@ -1161,9 +1385,7 @@ def _require_repository_release_identity(
 ) -> None:
     validate_release_identity(release_version, release_tag)
     if identity.version != release_version or identity.tag != release_tag:
-        raise ReleaseAssetError(
-            "release asset identity does not match repository package versions"
-        )
+        raise ReleaseAssetError("release asset identity does not match repository package versions")
 
 
 def _write_json(path: Path, payload: object) -> None:

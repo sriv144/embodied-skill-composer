@@ -25,7 +25,7 @@ from embodied_skill_composer.construction.release_identity import (  # noqa: E40
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Stage or fail-closed verify the five Construction Intelligence v1 "
+            "Stage or fail-closed verify the indexed Construction Intelligence v1 "
             "GitHub release assets."
         )
     )
@@ -115,7 +115,8 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "asset_count": len(manifest.assets),
+                "asset_count": sum(path.is_file() for path in args.output.iterdir()),
+                "logical_asset_count": len(manifest.assets),
                 "output": str(args.output.resolve()),
                 "release_tag": manifest.release_tag,
                 "release_version": manifest.release_version,

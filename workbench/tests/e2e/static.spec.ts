@@ -13,6 +13,7 @@ import {
 } from "./security";
 
 test.describe.configure({ mode: "serial" });
+const canonicalRelease = process.env.CONSTRUCTION_EVIDENCE_CHANNEL === "release";
 
 async function auditPrimaryView(page: Page): Promise<void> {
   await expect(
@@ -40,7 +41,7 @@ test("static workbench is visibly read-only across the complete journey", async 
     page.getByRole("heading", { name: "Orthogonal floor-plan editor" })
   ).toBeVisible();
   await expect(
-    page.getByLabel("Design inspector").getByText("Read-only preview", {
+    page.getByLabel("Design inspector").getByText(canonicalRelease ? "Read-only release v1.0.0" : "Read-only preview", {
       exact: true
     })
   ).toBeVisible();
@@ -85,7 +86,7 @@ test("static workbench is visibly read-only across the complete journey", async 
   await expect(page.getByRole("button", { name: "Robot offline" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Drop payload" })).toHaveCount(0);
   await expect(
-    page.getByText("This preview ships only the obstacle recovery trace.")
+    page.getByText("This public workbench ships only the obstacle recovery trace.")
   ).toBeVisible();
   await page.getByRole("button", { name: "Obstacle" }).click();
   await expect(
@@ -97,7 +98,7 @@ test("static workbench is visibly read-only across the complete journey", async 
   await expect(
     page.getByRole("heading", { name: "Durable experiment registry" })
   ).toBeVisible();
-  await expect(page.getByText("Read-only public preview", { exact: true }))
+  await expect(page.getByText(canonicalRelease ? "Read-only public release v1.0.0" : "Read-only public preview", { exact: true }))
     .toBeVisible();
   await expect(page.getByRole("button", { name: "Queue matrix" })).toBeDisabled();
   await auditPrimaryView(page);
@@ -120,9 +121,35 @@ test("static workbench is visibly read-only across the complete journey", async 
   ).toBeVisible();
   await expect(page.getByText("Nominal gate", { exact: true })).toBeVisible();
   await expect(page.getByText("Recovery gate", { exact: true })).toBeVisible();
-  await expect(
-    page.getByText(/no canonical 20-run research bundle was supplied/i)
-  ).toBeVisible();
+  if (canonicalRelease) {
+    const releaseStatus = await page.request.get("/demo/release-status.json");
+    expect(releaseStatus.ok()).toBe(true);
+    expect(await releaseStatus.json()).toMatchObject({
+      channel: "release",
+      release_ready: true,
+      release_tag: "v1.0.0",
+      release_version: "1.0.0"
+    });
+    await expect(
+      page.getByText("Canonical, hash-verified release evidence.", {
+        exact: true
+      })
+    ).toBeVisible();
+    await expect(
+      page.getByText("Frozen held-out acceptance passed.", { exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByText(
+        "Nominal and unavailable-robot recovery manifests independently pass the live gate.",
+        { exact: true }
+      )
+    ).toBeVisible();
+    await expect(page.getByText("validated live", { exact: true })).toHaveCount(2);
+  } else {
+    await expect(
+      page.getByText(/no canonical 20-run research bundle was supplied/i)
+    ).toBeVisible();
+  }
   await expect(page.getByText(/does not claim arm, gripper, payload contact/i))
     .toBeVisible();
   if ((page.viewportSize()?.width ?? 0) <= 720) {
@@ -137,4 +164,12 @@ test("static workbench is visibly read-only across the complete journey", async 
 
   expect(apiRequests).toEqual([]);
   expect(cspViolations).toEqual([]);
+});
+
+test("static channel metadata failures remain visible", async ({ page }) => {
+  await page.route("**/demo/release-status.json", (route) => route.abort());
+  await page.goto("/#/design");
+  await expect(page.getByRole("heading", { name: "Workbench unavailable" })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("release-status.json");
+  await expect(page.getByRole("application", { name: /floor plan/i })).toHaveCount(0);
 });

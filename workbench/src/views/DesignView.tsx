@@ -49,7 +49,7 @@ export function DesignView({
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string>(
     mode === "static"
-      ? "Read-only public preview. Connect the local lab to edit and compile."
+      ? `${api.runtime().label}. Connect the local lab to edit and compile.`
       : "Select a tool or an existing element to begin."
   );
   const validation = useMemo(
@@ -207,7 +207,7 @@ export function DesignView({
           <div className="design-readonly-note" role="note">
             <CircleAlert size={16} aria-hidden="true" />
             <div>
-              <strong>Read-only preview</strong>
+              <strong>{api.runtime().channel === "release" ? "Read-only release v1.0.0" : "Read-only preview"}</strong>
               <span>Editing and compilation require the local research lab.</span>
             </div>
           </div>

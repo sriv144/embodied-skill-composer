@@ -1,6 +1,6 @@
 # Embodied Skill Composer
 
-Embodied Skill Composer is a **Physical AI construction research workbench**. Its current flagship converts an approved architectural design into 24 transportable modules, schedules four robots, exposes the AI brain's decisions, and replays construction in a browser digital twin. The earlier two-robot assembly, MuJoCo, CoppeliaSim, tabletop, and warehouse experiments remain as research baselines.
+Embodied Skill Composer is a **Physical AI construction research workbench**. Its current flagship converts an approved architectural design into a 16-32-module cottage, schedules four robots, exposes the AI brain's decisions, and replays construction in a browser digital twin. The earlier two-robot assembly, MuJoCo, CoppeliaSim, tabletop, and warehouse experiments remain as research baselines.
 
 ## Construction Intelligence v1
 
@@ -41,7 +41,8 @@ npm run build:static
 ```
 
 The 64-transition `unit` profile validates the training pipeline; it is not research evidence. MAPPO/IPPO
-acceptance remains open until the five 1.5M-transition research seeds and held-out suites have completed.
+acceptance remains open until all 20 1.5M-transition research runs across training seeds `7-11` and
+their validation-only selection and held-out suites have completed.
 The Coppelia controller is `dynamic_base_logical_payload`: bases are wheel-driven from measured poses,
 while payload attachment remains a logical carrier constraint rather than arm/gripper contact dynamics.
 A live one-module gate has passed with `2,274` physics steps, `4,540` wheel commands, `4,536` measured
@@ -148,9 +149,9 @@ The long-term direction is an **AI construction swarm simulator**: multiple auto
 
 Read the north-star document in [vision.md](docs/vision.md) and the milestone plan in [roadmap.md](docs/roadmap.md).
 
-## Flagship Result
+## Retained Assembly Baseline Result
 
-The current verified result is:
+The retained collaborative-assembly benchmark result is:
 
 - **hierarchical learned options** solve the default `2/2 beams` assembly task
 - the retained **low-level learned MARL** baseline still stalls at `1/2 beams`
@@ -177,7 +178,7 @@ gh repo view --json nameWithOwner,visibility,url
 The GitHub Pages workbench is a read-only preview until the Construction Intelligence v1 research and
 live-simulator acceptance gates are complete.
 
-## What It Does
+## Retained Tabletop and Warehouse Capabilities
 
 - Runs a perception-driven warehouse collection task with reusable skills
 - Supports **oracle** and **classical CV** perception modes
@@ -186,7 +187,7 @@ live-simulator acceptance gates are complete.
 - Benchmarks success rate, completion rate, grasp retry rate, perception miss rate, and action count
 - Keeps the assembly task contract separate from backend selection so richer simulators, including Isaac Lab, can be added later
 
-## Current Project Modes
+## Retained Legacy Project Modes
 
 ### 1. Tabletop baseline
 
@@ -200,7 +201,7 @@ Run it with:
 python scripts\run_demo.py --task pick_and_place_red_to_tray
 ```
 
-### 2. Warehouse flagship task
+### 2. Warehouse collection baseline
 
 - `warehouse_multi_object_collection`
 

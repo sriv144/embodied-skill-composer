@@ -27,20 +27,29 @@ const configuredMode: LabMode =
     ? "static"
     : "local";
 
-export function runtimeStatusFor(mode: LabMode): RuntimeStatus {
+export function runtimeStatusFor(
+  mode: LabMode,
+  channel: "preview" | "release" | null = null
+): RuntimeStatus {
   return Object.freeze(
     mode === "static"
       ? {
           mode,
+          channel,
           source: "versioned-static-demo",
           readOnly: true,
           interactive: false,
-          label: "Read-only public preview",
+          label: channel === "release"
+            ? "Read-only public release v1.0.0"
+            : channel === "preview"
+              ? "Read-only public preview"
+              : "Read-only static workbench",
           detail:
             "Versioned demo artifacts are loaded from this deployment. Compute and simulator controls are disabled."
         }
       : {
           mode,
+          channel: null,
           source: "loopback-api",
           readOnly: false,
           interactive: true,
@@ -51,7 +60,14 @@ export function runtimeStatusFor(mode: LabMode): RuntimeStatus {
   );
 }
 
-const runtimeStatus = runtimeStatusFor(configuredMode);
+let runtimeStatus = runtimeStatusFor(configuredMode);
+let runtimeInitialization: Promise<RuntimeStatus> | null = null;
+let verifiedReleaseAssets: ReadonlySet<string> = new Set();
+const releaseAssetBaseUrl =
+  "https://github.com/sriv144/embodied-skill-composer/releases/download/v1.0.0/";
+const coppeliaArchivePath = "evidence/coppelia/archive-index.json";
+const coppeliaArchiveAsset = "construction-intelligence-v1-coppelia-evidence.json";
+const hashPattern = /^[a-f0-9]{64}$/;
 const passiveStaticArtifactSuffixes = new Set([
   ".csv",
   ".glb",
@@ -86,6 +102,210 @@ export class ApiRequestError extends Error {
 
 function demoUrl(path: string) {
   return `${base}demo/${path}`;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+async function sha256Text(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+}
+
+export async function verifiedStaticRuntime(
+  provenanceValue: unknown,
+  statusText: string
+): Promise<RuntimeStatus> {
+  const provenance = record(provenanceValue);
+  const status = record(JSON.parse(statusText));
+  const channel = status?.channel;
+  if (
+    !provenance || !status ||
+    provenance.schema_version !== "construction-intelligence-public-demo-provenance-v1" ||
+    status.schema_version !== "construction-intelligence-public-status-v1" ||
+    (channel !== "preview" && channel !== "release") ||
+    provenance.channel !== channel ||
+    status.release_ready !== (channel === "release") ||
+    status.release_version !== provenance.release_version ||
+    status.release_tag !== provenance.release_tag
+  ) {
+    throw new Error("Static release channel metadata is missing or inconsistent.");
+  }
+  const integrityPayload = { ...provenance, manifest_payload_sha256: null };
+  const canonical = JSON.stringify(integrityPayload, (_key, value: unknown) => {
+    const object = record(value);
+    return object
+      ? Object.fromEntries(Object.keys(object).sort().map((key) => [key, object[key]]))
+      : value;
+  }, 2) + "\n";
+  if (provenance.manifest_payload_sha256 !== await sha256Text(canonical)) {
+    throw new Error("Static provenance manifest failed its integrity check.");
+  }
+  const artifacts = Array.isArray(provenance.artifacts) ? provenance.artifacts : [];
+  const matching = artifacts.map(record).filter((item) => item?.path === "release-status.json");
+  const bytes = new TextEncoder().encode(statusText);
+  if (matching.length !== 1 || matching[0]?.bytes !== bytes.byteLength) {
+    throw new Error("Static release status is absent from the provenance inventory.");
+  }
+  const observed = await sha256Text(statusText);
+  if (matching[0]?.sha256 !== observed) {
+    throw new Error("Static release status failed its provenance hash check.");
+  }
+  if (channel === "release") {
+    const evidence = record(status.evidence);
+    const source = record(provenance.source);
+    if (
+      status.release_version !== "1.0.0" || status.release_tag !== "v1.0.0" ||
+      status.claim_status !== "release_evidence" ||
+      !Array.isArray(status.limitations) || status.limitations.length !== 0 ||
+      evidence?.deterministic !== "canonical" || evidence.research !== "validated" ||
+      evidence.coppelia !== "validated" || source?.dirty !== false ||
+      typeof source.commit !== "string" || !/^[a-f0-9]{40}$/.test(source.commit) ||
+      typeof source.tree_digest !== "string" || !/^[a-f0-9]{64}$/.test(source.tree_digest)
+    ) {
+      throw new Error("Static release metadata does not attest complete canonical v1 evidence.");
+    }
+  } else if (status.release_version !== null || status.release_tag !== null) {
+    throw new Error("Static preview metadata cannot declare a release identity.");
+  }
+  return runtimeStatusFor("static", channel);
+}
+
+function initializeRuntime(): Promise<RuntimeStatus> {
+  if (runtimeStatus.mode === "local") return Promise.resolve(runtimeStatus);
+  runtimeInitialization ??= Promise.all([
+    fetchJson<unknown>(demoUrl("provenance.json")),
+    fetchText(demoUrl("release-status.json"))
+  ]).then(async ([provenance, statusText]) => {
+    const verified = await verifiedStaticRuntime(provenance, statusText);
+    if (verified.channel === "release") {
+      const indexText = await fetchText(demoUrl(coppeliaArchivePath));
+      verifiedReleaseAssets = await verifiedReleaseAssetUrls(provenance, indexText);
+    }
+    runtimeStatus = verified;
+    return runtimeStatus;
+  });
+  return runtimeInitialization;
+}
+
+export async function verifiedReleaseAssetUrls(
+  provenanceValue: unknown,
+  indexText: string
+): Promise<ReadonlySet<string>> {
+  const provenance = record(provenanceValue);
+  const binding = record(provenance?.coppelia_archive);
+  const index = record(JSON.parse(indexText));
+  const inputs = Array.isArray(provenance?.inputs) ? provenance.inputs.map(record) : [];
+  const simulator = inputs.filter((input) => input?.kind === "simulator");
+  const inventory = Array.isArray(provenance?.artifacts) ? provenance.artifacts.map(record) : [];
+  const indexInventory = inventory.filter((item) => item?.path === coppeliaArchivePath);
+  const digest = await sha256Text(indexText);
+  const bytes = new TextEncoder().encode(indexText).byteLength;
+  if (
+    provenance?.channel !== "release" || provenance.release_tag !== "v1.0.0" ||
+    binding?.path !== coppeliaArchivePath || binding.asset_file !== coppeliaArchiveAsset ||
+    binding.asset_base_url !== releaseAssetBaseUrl || binding.sha256 !== digest ||
+    indexInventory.length !== 1 || indexInventory[0]?.sha256 !== digest ||
+    indexInventory[0]?.bytes !== bytes || bytes > 4 * 1024 ** 2 ||
+    index?.schema_version !== "construction-intelligence-coppelia-archive-v1" ||
+    index.generated_at !== "1970-01-01T00:00:00Z" || simulator.length !== 1 ||
+    index.descriptor_sha256 !== simulator[0]?.manifest_sha256
+  ) {
+    throw new Error("Static release archive index is missing or not bound to provenance.");
+  }
+  const source = record(index.source);
+  const inputSource = record(simulator[0]?.source);
+  if (
+    !source || !inputSource || source.dirty !== false || inputSource.dirty !== false ||
+    source.commit !== inputSource.commit || source.tree_digest !== inputSource.tree_digest ||
+    typeof source.commit !== "string" || !/^[a-f0-9]{40}$/.test(source.commit) ||
+    typeof source.tree_digest !== "string" || !hashPattern.test(source.tree_digest)
+  ) {
+    throw new Error("Static release archive source identity is inconsistent.");
+  }
+  const parts = Array.isArray(index.parts) ? index.parts.map(record) : [];
+  const files = Array.isArray(index.files) ? index.files.map(record) : [];
+  const nativeNames = [
+    "manifest.json", "scenario.json", "planned_jobs.json", "planned_vs_measured_replay.json",
+    "wheel_commands.jsonl", "measured_telemetry.jsonl", "trace.json", "metrics.json",
+    "report.md", "construction_intelligence.ttt", "runtime_attestation.json"
+  ];
+  const paths = ["nominal", "recovery"].flatMap((scenario) => [
+    ...nativeNames.map((name) => `evidence/coppelia/${scenario}/${name}`),
+    `evidence/coppelia/visualizations/${scenario}.mp4`
+  ]).sort();
+  const positiveInteger = (value: unknown, maximum: number): value is number =>
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= maximum;
+  const validHash = (value: unknown): value is string =>
+    typeof value === "string" && hashPattern.test(value);
+  if (
+    !parts.length || parts.length > 256 || files.length !== paths.length ||
+    !positiveInteger(index.chunk_bytes, 128 * 1024 ** 2) ||
+    parts.some((part, position) => (
+      part?.file !== `construction-intelligence-v1-coppelia-evidence-part-${String(position + 1).padStart(6, "0")}.zip` ||
+      !positiveInteger(part.bytes, 384 * 1024 ** 2) || !validHash(part.sha256) ||
+      !positiveInteger(part.entry_count, 2)
+    )) ||
+    files.some((file, position) => (
+      file?.path !== paths[position] || !positiveInteger(file.bytes, 8 * 1024 ** 3) ||
+      !validHash(file.sha256) || !Array.isArray(file.chunks) || !file.chunks.length
+    ))
+  ) {
+    throw new Error("Static release archive inventory is invalid.");
+  }
+  let ordinal = 0;
+  let totalBytes = 0;
+  const scenarioBytes = { nominal: 0, recovery: 0 };
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    const size = file?.bytes as number;
+    const chunks = (file?.chunks as unknown[]).map(record);
+    const chunkBytes = index.chunk_bytes;
+    totalBytes += size;
+    const scenario = String(file?.path).startsWith("evidence/coppelia/nominal/") ||
+      file?.path === "evidence/coppelia/visualizations/nominal.mp4" ? "nominal" : "recovery";
+    scenarioBytes[scenario] += size;
+    if (chunks.length !== Math.ceil(size / chunkBytes)) {
+      throw new Error("Static release archive chunks are invalid.");
+    }
+    for (const [offset, chunk] of chunks.entries()) {
+      const part = parts[Math.floor(ordinal / 2)];
+      if (
+        !part || !chunk || chunk.part !== part.file || !validHash(chunk.sha256) ||
+        chunk.bytes !== Math.min(chunkBytes, size - offset * chunkBytes) ||
+        chunk.member !== `chunks/${String(file?.path)}/${String(offset + 1).padStart(6, "0")}.bin`
+      ) throw new Error("Static release archive chunks are invalid.");
+      counts.set(String(part.file), (counts.get(String(part.file)) ?? 0) + 1);
+      ordinal += 1;
+    }
+  }
+  if (
+    totalBytes > 16 * 1024 ** 3 ||
+    scenarioBytes.nominal > 8 * 1024 ** 3 || scenarioBytes.recovery > 8 * 1024 ** 3
+  ) throw new Error("Static release archive exceeds its native byte budget.");
+  if (parts.some((part) => counts.get(String(part?.file)) !== part?.entry_count)) {
+    throw new Error("Static release archive part coverage is invalid.");
+  }
+  // Part names come only from the verified contiguous inventory, never from href fields.
+  return new Set([
+    releaseAssetBaseUrl + coppeliaArchiveAsset,
+    ...parts.map((part) => releaseAssetBaseUrl + String(part?.file))
+  ]);
+}
+
+export function safeReleaseArtifactUrl(path: string, allowed: ReadonlySet<string>): string | null {
+  if (
+    !path.startsWith(releaseAssetBaseUrl) || !allowed.has(path) ||
+    !/^construction-intelligence-v1-coppelia-evidence(?:\.json|-part-\d{6}\.zip)$/.test(
+      path.slice(releaseAssetBaseUrl.length)
+    )
+  ) return null;
+  return path;
 }
 
 function errorDetail(payload: unknown): string | null {
@@ -222,7 +442,7 @@ async function runtimeJson<T>(localPath: string, staticPath: string): Promise<T>
 async function requireLocal<T>(path: string, init?: RequestInit): Promise<T> {
   if (runtimeStatus.readOnly) {
     throw new ApiRequestError(
-      "This control is disabled in the read-only public preview.",
+      "This control is disabled in the read-only static workbench.",
       path
     );
   }
@@ -257,7 +477,7 @@ export function formatApiError(reason: unknown): string {
 export function staticRecoveryTracePath(failureType: string): string {
   if (failureType !== "obstacle") {
     throw new ApiRequestError(
-      "The public preview ships only the obstacle recovery trace.",
+      "The public workbench ships only the obstacle recovery trace.",
       demoUrl("traces/recovery.json")
     );
   }
@@ -267,6 +487,7 @@ export function staticRecoveryTracePath(failureType: string): string {
 export const api = {
   mode: () => runtimeStatus.mode,
   runtime: () => runtimeStatus,
+  initializeRuntime,
 
   project: () =>
     runtimeJson<Project>("/api/project", "project.json").then(normalizeProject),
@@ -464,6 +685,8 @@ export const api = {
   artifactHref: (path: string | null | undefined) => {
     if (!path) return null;
     if (runtimeStatus.mode === "static") {
+      const releaseUrl = safeReleaseArtifactUrl(path, verifiedReleaseAssets);
+      if (releaseUrl) return releaseUrl;
       const relative = safeStaticArtifactPath(path.replace(/^demo\//, ""));
       return relative ? demoUrl(relative) : null;
     }

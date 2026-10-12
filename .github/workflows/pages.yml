@@ -2,25 +2,87 @@ name: Public Workbench
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "auto preserves the preview until v1.0.0 is published; release requires canonical assets"
+        type: choice
+        options: [auto, release]
+        default: auto
+      deploy:
+        description: "Deploy after verification (false runs acceptance only)"
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        default: auto
+      deploy:
+        type: boolean
+        default: true
+      allow_draft:
+        type: boolean
+        default: false
+      expected_asset_set_sha256:
+        type: string
+        default: ""
   push:
     branches: [main]
     paths:
       - "workbench/**"
       - ".github/workflows/pages.yml"
+      - "scripts/stage_construction_pages.py"
+      - "scripts/resolve_construction_pages.py"
+      - "src/embodied_skill_composer/construction/release_assets.py"
+      - "src/embodied_skill_composer/construction/coppelia_archive.py"
+      - "src/embodied_skill_composer/construction/public_demo_provenance.py"
 
 permissions:
   contents: read
 
 concurrency:
-  group: pages
+  group: pages-${{ inputs.deploy == false && inputs.channel != '' && 'verify' || 'deploy' }}
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      demo_identity: ${{ steps.identity.outputs.demo_identity }}
     steps:
       - uses: actions/checkout@v6
         with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve preview or canonical release without fallback on errors
+        id: channel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REQUESTED_CHANNEL: ${{ inputs.channel || 'auto' }}
+          ALLOW_DRAFT: ${{ inputs.allow_draft == true && inputs.deploy == false }}
+        run: |
+          set -euo pipefail
+          metadata_args=(--not-found)
+          if gh api "repos/${GH_REPO}/releases/tags/v1.0.0" \
+              > "$RUNNER_TEMP/pages-release.json" 2> "$RUNNER_TEMP/pages-release.err"; then
+            metadata_args=(--release-json "$RUNNER_TEMP/pages-release.json")
+          elif ! grep --quiet '(HTTP 404)' "$RUNNER_TEMP/pages-release.err"; then
+            cat "$RUNNER_TEMP/pages-release.err" >&2
+            exit 1
+          fi
+          if [ "$ALLOW_DRAFT" = true ]; then metadata_args+=(--allow-draft); fi
+          channel="$(python scripts/resolve_construction_pages.py \
+            --requested "$REQUESTED_CHANNEL" "${metadata_args[@]}")"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v6
+        if: steps.channel.outputs.channel == 'release'
+        with:
+          ref: refs/tags/v1.0.0
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v7
         with:
@@ -33,14 +95,89 @@ jobs:
         working-directory: workbench
       - run: npm run test:unit
         working-directory: workbench
+      - uses: actions/setup-python@v6
+        if: steps.channel.outputs.channel == 'release'
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: constraints/ci-py311-linux.txt
+      - name: Install the hash-locked canonical evidence verifier
+        if: steps.channel.outputs.channel == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r constraints/ci-py311-linux.txt
+          python -m pip install --no-build-isolation --no-deps \
+            -e ".[construction,construction-rl,rl,sim-coppelia]"
+      - name: Download and stage the complete verified canonical release
+        if: steps.channel.outputs.channel == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ALLOW_DRAFT: ${{ inputs.allow_draft == true && inputs.deploy == false }}
+          EXPECTED_ASSET_SET_SHA256: ${{ inputs.expected_asset_set_sha256 }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GH_REPO}/releases/tags/v1.0.0" > "$RUNNER_TEMP/pages-release.json"
+          test "$(jq -r '.prerelease' "$RUNNER_TEMP/pages-release.json")" = false
+          if [ "$ALLOW_DRAFT" != true ]; then
+            test "$(jq -r '.draft' "$RUNNER_TEMP/pages-release.json")" = false
+          fi
+          gh release view v1.0.0 --json name,body > "$RUNNER_TEMP/pages-release-notes.json"
+          python scripts/check_release_notes.py \
+            --expected docs/construction-intelligence-v1-release-notes.md \
+            --actual-json "$RUNNER_TEMP/pages-release-notes.json"
+          gh release download v1.0.0 --dir "$RUNNER_TEMP/pages-release-assets"
+          if [ -n "$EXPECTED_ASSET_SET_SHA256" ]; then
+            actual_asset_set_sha256="$(
+              cd "$RUNNER_TEMP/pages-release-assets"
+              /usr/bin/find . -maxdepth 1 -type f -printf '%f\0' \
+                | /usr/bin/sort -z | /usr/bin/xargs -0 /usr/bin/sha256sum \
+                | /usr/bin/sha256sum | /usr/bin/cut -d' ' -f1
+            )"
+            test "$actual_asset_set_sha256" = "$EXPECTED_ASSET_SET_SHA256"
+          fi
+          python scripts/stage_construction_pages.py \
+            --release-assets "$RUNNER_TEMP/pages-release-assets"
+      - name: Canonical desktop/mobile browser and accessibility acceptance
+        if: steps.channel.outputs.channel == 'release'
+        working-directory: workbench
+        env:
+          PLAYWRIGHT_BUNDLED: "true"
+          CONSTRUCTION_EVIDENCE_CHANNEL: release
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test --project static-desktop --project static-mobile
       - run: npm run build:static
         working-directory: workbench
+      - name: Bind the deployed demo identity
+        id: identity
+        shell: bash
+        working-directory: workbench/dist/demo
+        run: |
+          set -euo pipefail
+          echo 'demo_identity<<CONSTRUCTION_DEMO_HASHES' >> "$GITHUB_OUTPUT"
+          sha256sum release-status.json provenance.json research-summary.json coppelia-evidence.json >> "$GITHUB_OUTPUT"
+          echo CONSTRUCTION_DEMO_HASHES >> "$GITHUB_OUTPUT"
+      - name: Upload browser diagnostics
+        if: always() && steps.channel.outputs.channel == 'release'
+        uses: actions/upload-artifact@v6
+        with:
+          name: pages-canonical-browser-diagnostics
+          if-no-files-found: ignore
+          path: |
+            output/playwright/report
+            output/playwright/test-results
       - uses: actions/configure-pages@v6
+        if: (inputs.deploy != false || inputs.channel == '') && inputs.allow_draft != true
       - uses: actions/upload-pages-artifact@v5
+        if: (inputs.deploy != false || inputs.channel == '') && inputs.allow_draft != true
         with:
           path: workbench/dist
 
   deploy:
+    if: (inputs.deploy != false || inputs.channel == '') && inputs.allow_draft != true
     permissions:
       contents: read
       pages: write
@@ -57,10 +194,14 @@ jobs:
       - name: Smoke deployed workbench
         env:
           PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          EXPECTED_DEMO_IDENTITY: ${{ needs.build.outputs.demo_identity }}
         shell: bash
         run: |
           set -euo pipefail
           test -n "${PAGE_URL}"
+          test -n "${EXPECTED_DEMO_IDENTITY}"
+          mkdir "$RUNNER_TEMP/pages-smoke"
+          printf '%s\n' "$EXPECTED_DEMO_IDENTITY" > "$RUNNER_TEMP/pages-smoke/expected.sha256"
           for attempt in $(seq 1 12); do
             status="$(
               curl --location --silent --show-error \
@@ -71,8 +212,18 @@ jobs:
             if [ "${status}" = "200" ] &&
               grep --quiet '<div id="root"></div>' \
                 "${RUNNER_TEMP}/construction-workbench.html"; then
-              echo "Pages smoke passed on attempt ${attempt}: ${PAGE_URL}"
-              exit 0
+              identity_ready=true
+              for artifact in release-status.json provenance.json research-summary.json coppelia-evidence.json; do
+                if ! curl --fail --location --silent --show-error \
+                    --output "$RUNNER_TEMP/pages-smoke/$artifact" "${PAGE_URL%/}/demo/$artifact"; then
+                  identity_ready=false
+                fi
+              done
+              if [ "$identity_ready" = true ] &&
+                  (cd "$RUNNER_TEMP/pages-smoke" && sha256sum --check expected.sha256); then
+                echo "Pages content-identity smoke passed on attempt ${attempt}: ${PAGE_URL}"
+                exit 0
+              fi
             fi
             echo "Pages not ready on attempt ${attempt} (HTTP ${status})"
             sleep 5
