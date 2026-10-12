@@ -10,6 +10,30 @@ The live executor commands KUKA YouBot wheel joints in deterministic stepping mo
 and samples robot poses and velocities from CoppeliaSim. Direct robot pose writes are
 allowed only while constructing the initial scene, before simulation starts.
 
+### Native model frame correction — October 12, 2026
+
+The prior headless attempt ended at 9/26 modules with a [route-control timeout](evidence/construction-intelligence-phase5-20261012-route-timeout.json), not a completed nominal gate.
+
+Coppelia [`getObjectOrientation`](https://manual.coppeliarobotics.com/en/sim/simGetObjectOrientation.htm)
+returns alpha-beta-gamma, not yaw-pitch-roll. The bundled YouBot root has local X vertical,
+local Z forward, and local Y lateral. Native path following and idle-position holds project the
+full measured ABG rotation onto those body axes; gamma alone is not a heading. Nonfinite or
+degenerate projected frames fail closed. For wire compatibility, robot telemetry's historical
+`measured_pose.rotation_rpy_degrees` field retains raw ABG measurements in degrees; consumers
+must not treat its Z component as body yaw. Module design poses retain their existing contract.
+
+The chassis/wheel bounding corners now use a conservative three-dimensional radial bound,
+valid under rigid base tilt, instead of the incorrect root-local XY footprint. The planner and
+executor defaults increase from 0.12 m to 0.16 m. A stopped-scene read-only native probe measured
+0.145979 m in the true root YZ ground plane and a 0.151376 m orientation-independent corner bound
+for the first base. See the [native-frame audit](evidence/construction-intelligence-phase5-20261012-native-frame-audit.json).
+This is a stronger clearance envelope, not a relaxed acceptance gate. Historical failed bundles
+retain their original explicit configurations and are not rewritten as corrected evidence.
+
+Synthetic closed-loop tests cover arbitrary headings, heading drift, shared routes, idle holds,
+zero post-start pose writes, and conservative geometry. They cannot establish that the fresh
+full-cottage nominal or recovery live gates pass.
+
 Payload transport remains logical and overhead. A module is parented to a carrier
 dummy synchronized to the measured robot-base centroid while preserving its
 attested full three-dimensional pickup offset. A deterministic transport center

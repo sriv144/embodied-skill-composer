@@ -5,13 +5,14 @@ import json
 import math
 import re
 import secrets
+from bisect import bisect_left, bisect_right
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
-from itertools import combinations
+from itertools import combinations, pairwise
 from pathlib import Path
 from typing import Literal, TypeVar, cast
 from uuid import UUID
@@ -592,7 +593,7 @@ class Phase5PhysicalYardConfig(_StrictModel):
     boundary_margin_m: float = Field(default=8.0, ge=1.0)
     dispatch_lane_gap_m: float = Field(default=1.5, ge=0.8)
     dispatch_robot_spacing_m: float = Field(default=1.0, ge=0.6)
-    robot_footprint_radius_m: float = Field(default=0.12, ge=0.08)
+    robot_footprint_radius_m: float = Field(default=0.16, ge=0.08)
     route_clearance_m: float = Field(default=0.16, ge=0.1)
     route_tracking_error_m: float = Field(default=0.12, ge=0)
     formation_clearance_m: float = Field(default=0.5, ge=0.3)
@@ -2987,8 +2988,105 @@ def _preflight_phase5_route_scenario(
     return maximum_formation_offset_m, maximum_transport_height_m
 
 
+class _Phase5TelemetryLookup:
+    """One verification's timestamp index, retaining every original row.
+
+    Time ordering only narrows candidates. Results retain file order, including
+    duplicate rows, and callers still apply their original acceptance predicates.
+    Nonfinite timestamps use a scan rather than changing their existing semantics.
+    """
+
+    def __init__(self, telemetry: Iterable[RobotTelemetry]) -> None:
+        self._entries = [
+            (sample.timestamp_s, ordinal, sample)
+            for ordinal, sample in enumerate(telemetry)
+        ]
+        self._finite_timestamps = all(
+            math.isfinite(entry[0]) for entry in self._entries
+        )
+        self._timestamp_order_is_file_order = all(
+            left[0] <= right[0]
+            for left, right in pairwise(self._entries)
+        )
+        if self._finite_timestamps and not self._timestamp_order_is_file_order:
+            self._entries.sort(key=lambda entry: entry[0])
+        self._by_robot: dict[
+            str, list[tuple[float, int, RobotTelemetry]]
+        ] = {}
+        for entry in self._entries:
+            self._by_robot.setdefault(entry[2].robot_id, []).append(entry)
+
+    def _candidates(
+        self,
+        start_s: float,
+        end_s: float,
+        *,
+        robot_id: str | None = None,
+    ) -> list[tuple[float, int, RobotTelemetry]]:
+        entries = (
+            self._entries
+            if robot_id is None
+            else self._by_robot.get(robot_id, [])
+        )
+        if (
+            not self._finite_timestamps
+            or math.isnan(start_s)
+            or math.isnan(end_s)
+        ):
+            return entries
+        left = bisect_left(entries, start_s, key=lambda entry: entry[0])
+        right = bisect_right(entries, end_s, key=lambda entry: entry[0])
+        candidates = entries[left:right]
+        if not self._timestamp_order_is_file_order:
+            candidates.sort(key=lambda entry: entry[1])
+        return candidates
+
+    def in_interval(
+        self,
+        start_s: float,
+        end_s: float,
+        *,
+        robot_id: str | None = None,
+    ) -> list[RobotTelemetry]:
+        return [
+            sample
+            for _, _, sample in self._candidates(
+                start_s, end_s, robot_id=robot_id
+            )
+            if start_s <= sample.timestamp_s <= end_s
+        ]
+
+    def close_to(
+        self,
+        timestamp_s: float,
+        *,
+        robot_id: str | None = None,
+    ) -> list[RobotTelemetry]:
+        # math.isclose uses max(abs(a), abs(b)), not just the query's scale.
+        # For r=1e-9, r/(1-r) < 2r bounds every relatively close finite a.
+        # Pad outward for rounding; the exact predicate remains authoritative.
+        if math.isfinite(timestamp_s):
+            width_s = max(1e-9, 2e-9 * abs(timestamp_s))
+            start_s = math.nextafter(timestamp_s - width_s, -math.inf)
+            end_s = math.nextafter(timestamp_s + width_s, math.inf)
+        else:
+            start_s, end_s = -math.inf, math.inf
+        return [
+            sample
+            for _, _, sample in self._candidates(
+                start_s, end_s, robot_id=robot_id
+            )
+            if math.isclose(
+                sample.timestamp_s,
+                timestamp_s,
+                rel_tol=1e-9,
+                abs_tol=1e-9,
+            )
+        ]
+
+
 def _telemetry_xy_routes(
-    telemetry: Iterable[RobotTelemetry],
+    telemetry: Iterable[RobotTelemetry] | _Phase5TelemetryLookup,
     *,
     robot_ids: Iterable[str],
     start_s: float,
@@ -2997,7 +3095,12 @@ def _telemetry_xy_routes(
     routes: dict[str, list[Vec2]] = {
         robot_id: [] for robot_id in sorted(set(robot_ids))
     }
-    for sample in telemetry:
+    samples = (
+        telemetry.in_interval(start_s, end_s)
+        if isinstance(telemetry, _Phase5TelemetryLookup)
+        else telemetry
+    )
+    for sample in samples:
         if (
             sample.robot_id in routes
             and start_s <= sample.timestamp_s <= end_s
@@ -6023,6 +6126,7 @@ def _verify_replay_semantics(
     config: DynamicCoppeliaConfig,
     physical_yard: Phase5PhysicalYardManifest,
 ) -> None:
+    telemetry_lookup = _Phase5TelemetryLookup(telemetry)
     schedule = schedule_build(scenario.plan, "sequential")
     modules = {
         module.module_id: module for module in scenario.plan.modules
@@ -6347,13 +6451,13 @@ def _verify_replay_semantics(
                 )
             )
             measured_approach_routes = _telemetry_xy_routes(
-                telemetry,
+                telemetry_lookup,
                 robot_ids=item.executed_robot_ids,
                 start_s=item.started_at_s,
                 end_s=item.pickup_at_s,
             )
             measured_return_routes = _telemetry_xy_routes(
-                telemetry,
+                telemetry_lookup,
                 robot_ids=item.executed_robot_ids,
                 start_s=item.installed_at_s,
                 end_s=item.returned_at_s,
@@ -6524,7 +6628,7 @@ def _verify_replay_semantics(
             transition="logical_payload_lift",
             timestamp_s=item.pickup_at_s,
             commands=commands,
-            telemetry=telemetry,
+            telemetry=telemetry_lookup,
             trace_records=trace_records,
             config=config,
         )
@@ -6578,7 +6682,7 @@ def _verify_replay_semantics(
             transition="logical_installation_snap",
             timestamp_s=item.installed_at_s,
             commands=commands,
-            telemetry=telemetry,
+            telemetry=telemetry_lookup,
             trace_records=trace_records,
             config=config,
         )
@@ -6685,10 +6789,15 @@ def _verify_logical_transition_stop_proof(
     transition: str,
     timestamp_s: float,
     commands: list[RobotCommand],
-    telemetry: list[RobotTelemetry],
+    telemetry: list[RobotTelemetry] | _Phase5TelemetryLookup,
     trace_records: list[Mapping[str, object]],
     config: DynamicCoppeliaConfig,
 ) -> None:
+    telemetry_lookup = (
+        telemetry
+        if isinstance(telemetry, _Phase5TelemetryLookup)
+        else _Phase5TelemetryLookup(telemetry)
+    )
     raw_proof = event.get("team_zero_motion_proof")
     if not isinstance(raw_proof, Mapping):
         raise ValueError(
@@ -6859,7 +6968,9 @@ def _verify_logical_transition_stop_proof(
                     rel_tol=1e-9,
                     abs_tol=1e-9,
                 )
-                for sample in telemetry
+                for sample in telemetry_lookup.close_to(
+                    measured_timestamp, robot_id=robot_id
+                )
             )
         ):
             raise ValueError(
@@ -6899,7 +7010,7 @@ def _verify_logical_transition_stop_proof(
             )
         sample_timestamp_s = _number_value(raw_sample.get("timestamp_s"))
         poses_at_timestamp: dict[str, Vec2] = {}
-        for sample in telemetry:
+        for sample in telemetry_lookup.close_to(sample_timestamp_s):
             if math.isclose(
                 sample.timestamp_s,
                 sample_timestamp_s,
@@ -7034,7 +7145,9 @@ def _verify_logical_transition_stop_proof(
                         rel_tol=1e-9,
                         abs_tol=1e-9,
                     )
-                    for sample in telemetry
+                    for sample in telemetry_lookup.close_to(
+                        robot_timestamp_s, robot_id=robot_id
+                    )
                 )
             ):
                 raise ValueError(

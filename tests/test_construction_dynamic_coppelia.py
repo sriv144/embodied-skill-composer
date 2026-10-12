@@ -133,21 +133,22 @@ class FakeDynamicSim:
             self.aliases[respondable_wheel] = f"/robot/wheel_respondable_{name}"
             self.shape_handles.add(respondable_wheel)
             self.shape_dimensions[respondable_wheel] = [0.042, 0.042, 0.042]
-            wheel_x = -0.02 if name in {"rl", "rr"} else 0.02
-            wheel_y = -0.067 if name in {"rl", "fl"} else 0.067
+            # Scaled native root frame: X vertical, Y lateral, Z forward.
+            wheel_forward = -0.0958 if name in {"rl", "rr"} else 0.0958
+            wheel_lateral = -0.0665 if name in {"rl", "fl"} else 0.0665
             self.object_matrices[(respondable_wheel, root)] = [
                 1.0,
                 0.0,
                 0.0,
-                wheel_x,
+                -0.02,
                 0.0,
                 1.0,
                 0.0,
-                wheel_y,
+                wheel_lateral,
                 0.0,
                 0.0,
                 1.0,
-                -0.096,
+                wheel_forward,
             ]
             self.bool_properties[(respondable_wheel, "collidable")] = False
             descendants.append(respondable_wheel)
@@ -170,7 +171,7 @@ class FakeDynamicSim:
             descendants.append(shape)
         self.trees[root] = [root, *descendants]
         self.positions[root] = [0.0, 0.0, 0.05]
-        self.orientations[root] = [0.0, 0.0, 0.0]
+        self.orientations[root] = [-math.pi / 2, 0.0, -math.pi / 2]
         return root
 
     def setObjectAlias(self, handle: int, alias: str) -> None:
@@ -397,9 +398,30 @@ class FakeDynamicSim:
             lateral = (
                 -wheels["fl"] + wheels["rl"] - wheels["rr"] + wheels["fr"]
             ) * wheel_radius_m / 4
-            yaw = self.orientations.get(root, [0.0, 0.0, 0.0])[2]
-            velocity_x = -math.cos(yaw) * forward - math.sin(yaw) * lateral
-            velocity_y = -math.sin(yaw) * forward + math.cos(yaw) * lateral
+            alpha, beta, gamma = self.orientations[root]
+
+            def rotate_native_axis(axis: tuple[float, float, float]):
+                # Independent physics oracle: apply Rz, then Ry, then Rx.
+                # Never call the production world-to-body control helper here.
+                x, y, z = axis
+                x, y = (
+                    math.cos(gamma) * x - math.sin(gamma) * y,
+                    math.sin(gamma) * x + math.cos(gamma) * y,
+                )
+                x, z = (
+                    math.cos(beta) * x + math.sin(beta) * z,
+                    -math.sin(beta) * x + math.cos(beta) * z,
+                )
+                y, z = (
+                    math.cos(alpha) * y - math.sin(alpha) * z,
+                    math.sin(alpha) * y + math.cos(alpha) * z,
+                )
+                return x, y, z
+
+            forward_axis = rotate_native_axis((0.0, 0.0, 1.0))
+            lateral_axis = rotate_native_axis((0.0, 1.0, 0.0))
+            velocity_x = forward_axis[0] * forward + lateral_axis[0] * lateral
+            velocity_y = forward_axis[1] * forward + lateral_axis[1] * lateral
             position = self.positions[root]
             position[0] += velocity_x * dt
             position[1] += velocity_y * dt

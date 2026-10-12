@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "evidence_kind": "read_only_diagnostic_not_live_acceptance",
+  "release_eligible": false,
+  "retained_run_id": "20261011T122911Z-nominal-s900",
+  "retained_source_commit": "e0e5ca91c1a3c98da67b9a9f70abcfae3ccff60b",
+  "geometry_probe": {
+    "simulation_stopped": true,
+    "scene_mutated": false,
+    "native_base_shapes_per_robot": 5,
+    "maximum_old_root_xy_radius_m": 0.0964276825213865,
+    "maximum_native_root_yz_radius_m": 0.14597931588705323,
+    "robot_1_conservative_3d_corner_radius_m": 0.15137618444857065,
+    "new_planned_radius_m": 0.16,
+    "interpretation": "The model root's local X is vertical. Its old local-XY projection understated the ground footprint. The corrected bound uses the full three-dimensional corner norm, conservative under arbitrary rigid base tilt. The planned radius increases; safety gates are not relaxed."
+  },
+  "saved_telemetry_frame_check": {
+    "robot_id": "robot_3",
+    "timestamp_s": 11061.55,
+    "raw_alpha_beta_gamma_degrees": [-90.05415032290226, -77.0517454262027, -90.04778160200463],
+    "observed_next_xy_velocity_mps": [0.02379690, -0.07078240],
+    "native_body_axes_predicted_xy_velocity_mps": [0.02464682, -0.07216699],
+    "old_gamma_only_predicted_xy_velocity_mps": [-0.06484285, -0.04013658],
+    "interpretation": "Saved measured displacement agrees with local-Z-forward/local-Y-lateral native axes. Treating gamma alone as planar heading predicts the wrong X direction. Rounded velocities are diagnostic, not acceptance tolerances."
+  },
+  "compatibility": "Robot measured_pose.rotation_rpy_degrees retains historical raw Coppelia alpha-beta-gamma measurements; it is not generic yaw-pitch-roll. The existing public yaw-only helper remains available, but live native controls use the explicit ABG projection.",
+  "required_next_evidence": "Fresh clean-source nominal and unavailable-robot full-cottage runs with all original completion, replay, measured-motion, collision, pose-write, and clearance gates."
+}

@@ -63,7 +63,11 @@ def geometry():
         "robot_2": Vec2(x=-23.501910352357292, y=-0.47751084465125626),
         "robot_4": Vec2(x=-23.591753135526186, y=1.6861975605897528),
     }
-    return plan, module, terminals, positions, Phase5PhysicalYardConfig()
+    # Preserve the radius from this historical failed-job record. New live runs
+    # use the stronger native-frame bound; they must not reinterpret old numbers.
+    return plan, module, terminals, positions, Phase5PhysicalYardConfig(
+        robot_footprint_radius_m=0.12,
+    )
 
 
 def handoff(geometry, *, terminals=None, positions=None, disabled=(), configured=0.12):
@@ -130,6 +134,17 @@ def test_bounded_tolerance_retains_full_planned_return_reserve(geometry) -> None
         for item in clearances
     )
     assert handoff(geometry, configured=0.01) == 0.01
+
+
+def test_native_frame_radius_consumes_additional_handoff_reserve(geometry) -> None:
+    plan, module, terminals, positions, _historical = geometry
+    current = (plan, module, terminals, positions, Phase5PhysicalYardConfig())
+    assert current[-1].robot_footprint_radius_m == 0.16
+    assert handoff(current) == pytest.approx(0.0309806007930704)
+    assert handoff(current) < handoff(geometry)
+    insufficient = {**terminals, "robot_1": Vec2(x=3, y=-2.4)}
+    with pytest.raises((DynamicCoppeliaError, RoutingError), match="slack|clearance"):
+        handoff(current, terminals=insufficient)
 
 
 def test_newly_installed_module_limits_handoff_slack(geometry) -> None:

@@ -67,7 +67,7 @@ class DynamicCoppeliaConfig(BaseModel):
     formation_tolerance_m: float = Field(default=0.45, gt=0)
     install_tolerance_m: float = Field(default=0.3, gt=0)
     safety_distance_m: float = Field(default=0.34, gt=0)
-    planned_robot_footprint_radius_m: float = Field(default=0.12, gt=0, le=1.0)
+    planned_robot_footprint_radius_m: float = Field(default=0.16, gt=0, le=1.0)
     max_steps_per_waypoint: int = Field(default=500, ge=10)
     simulation_stop_timeout_s: float = Field(default=15.0, gt=0, le=120)
     disabled_settle_max_steps: int = Field(default=100, ge=3, le=2_000)
@@ -368,6 +368,9 @@ class DynamicCoppeliaExecutor:
 
     def sample_telemetry(self, robot_id: str) -> RobotTelemetry:
         position = self.sim.getObjectPosition(self.robot_handles[robot_id])
+        # Legacy wire name: measured rotation_rpy_degrees stores Coppelia's
+        # raw alpha-beta-gamma angles, not yaw-pitch-roll. Preserve those raw
+        # measurements; native YouBot control projects its actual Y/Z axes.
         orientation = self.sim.getObjectOrientation(self.robot_handles[robot_id])
         linear_speed = 0.0
         angular_speed = 0.0
@@ -599,8 +602,14 @@ class DynamicCoppeliaExecutor:
                         target=target,
                     )
                     continue
-                yaw = math.radians(pose.rotation_rpy_degrees.z)
-                body_forward, body_lateral = world_error_to_youbot_body(dx, dy, yaw)
+                orientation_abg = pose.rotation_rpy_degrees
+                body_forward, body_lateral = world_error_to_youbot_body_abg(
+                    dx,
+                    dy,
+                    math.radians(orientation_abg.x),
+                    math.radians(orientation_abg.y),
+                    math.radians(orientation_abg.z),
+                )
                 scale = self.config.position_gain
                 self.command_body_velocity(
                     robot_id,
@@ -886,11 +895,13 @@ class DynamicCoppeliaExecutor:
                         continue
                     dx = target.x - pose.position.x
                     dy = target.y - pose.position.y
-                    yaw = math.radians(pose.rotation_rpy_degrees.z)
-                    body_forward, body_lateral = world_error_to_youbot_body(
+                    orientation_abg = pose.rotation_rpy_degrees
+                    body_forward, body_lateral = world_error_to_youbot_body_abg(
                         dx,
                         dy,
-                        yaw,
+                        math.radians(orientation_abg.x),
+                        math.radians(orientation_abg.y),
+                        math.radians(orientation_abg.z),
                     )
                     scale = self.config.position_gain
                     self.command_body_velocity(
@@ -916,11 +927,13 @@ class DynamicCoppeliaExecutor:
                         continue
                     dx = target.x - pose.position.x
                     dy = target.y - pose.position.y
-                    yaw = math.radians(pose.rotation_rpy_degrees.z)
-                    body_forward, body_lateral = world_error_to_youbot_body(
+                    orientation_abg = pose.rotation_rpy_degrees
+                    body_forward, body_lateral = world_error_to_youbot_body_abg(
                         dx,
                         dy,
-                        yaw,
+                        math.radians(orientation_abg.x),
+                        math.radians(orientation_abg.y),
+                        math.radians(orientation_abg.z),
                     )
                     scale = self.config.position_gain
                     self.command_body_velocity(
@@ -3047,9 +3060,43 @@ def youbot_wheel_targets(
 
 
 def world_error_to_youbot_body(dx: float, dy: float, yaw: float) -> tuple[float, float]:
-    """Map world error into the bundled model's reversed-X base frame."""
+    """Legacy reversed-X planar-yaw mapping; yaw is not native Coppelia gamma."""
     forward = -(math.cos(yaw) * dx + math.sin(yaw) * dy)
     lateral = -math.sin(yaw) * dx + math.cos(yaw) * dy
+    return forward, lateral
+
+
+def world_error_to_youbot_body_abg(
+    dx: float,
+    dy: float,
+    alpha: float,
+    beta: float,
+    gamma: float,
+) -> tuple[float, float]:
+    """Project world XY error onto the bundled YouBot's native body axes.
+
+    Angles are Coppelia alpha-beta-gamma in radians: R=Rx(alpha)Ry(beta)Rz(gamma).
+    This model's forward axis is local +Z, lateral is local +Y, and local X is
+    vertical when upright. Gamma alone, or generic local-X yaw, is not its
+    planar heading. The legacy telemetry ``rotation_rpy_degrees`` wire field
+    contains these raw ABG angles; do not reinterpret it as yaw-pitch-roll.
+    """
+    if not all(math.isfinite(value) for value in (dx, dy, alpha, beta, gamma)):
+        raise DynamicCoppeliaError("YouBot native body frame inputs must be finite")
+    sin_alpha, cos_alpha = math.sin(alpha), math.cos(alpha)
+    sin_beta, cos_beta = math.sin(beta), math.cos(beta)
+    sin_gamma, cos_gamma = math.sin(gamma), math.cos(gamma)
+    forward_x = sin_beta
+    forward_y = -sin_alpha * cos_beta
+    lateral_x = -cos_beta * sin_gamma
+    lateral_y = cos_alpha * cos_gamma - sin_alpha * sin_beta * sin_gamma
+    planar_determinant = forward_x * lateral_y - forward_y * lateral_x
+    if abs(planar_determinant) <= 1e-9:
+        raise DynamicCoppeliaError("YouBot native body frame has degenerate planar axes")
+    forward = forward_x * dx + forward_y * dy
+    lateral = lateral_x * dx + lateral_y * dy
+    if not math.isfinite(forward) or not math.isfinite(lateral):
+        raise DynamicCoppeliaError("YouBot native body frame projection is nonfinite")
     return forward, lateral
 
 
@@ -3107,6 +3154,12 @@ def _shape_xy_footprint_radius_m(
     shape_handle: int,
     robot_handle: int,
 ) -> float:
+    """Conservatively bound the ground footprint for any chassis orientation.
+
+    The historical helper name refers to world XY. The native root's local X
+    is vertical when upright, but a 3D corner norm bounds the world-ground
+    projection even during tilt, unlike either a root-local XY or YZ projection.
+    """
     raw_bounds = sim.getShapeBB(shape_handle)
     if (
         not isinstance(raw_bounds, (list, tuple))
@@ -3182,7 +3235,7 @@ def _shape_xy_footprint_radius_m(
                 ]
                 maximum_radius = max(
                     maximum_radius,
-                    math.hypot(robot_corner[0], robot_corner[1]),
+                    math.hypot(*robot_corner),
                 )
     return maximum_radius
 
